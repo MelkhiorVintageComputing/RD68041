@@ -90,7 +90,8 @@ module core_vec_tb;
   int unsigned g_seen [0:MAXG-1];
 
   int unsigned t, n, k, i, j, shown, maxshow;
-  int unsigned passed, failed, notbuilt, pending;
+  int unsigned passed, failed, notbuilt, pending, cas_waived, split_waived;
+  bit          bad_pre;
   bit          ok, built, bad;
   string       what, why, s;
 
@@ -250,12 +251,19 @@ module core_vec_tb;
         $sformat(why, "it made %0d operand accesses, more than the bench records", ncap);
       end
       // The reads in order, then the writes in order.
+      bad_pre = bad;
       for (k = 0; k < 2 && !bad; k++) begin
         int nc, no, q;
         nc = 0; no = 0;
         for (q = 0; q < ncap; q++) if (cap_rd[q] == (k == 0)) nc++;
         for (q = 0; q < int'(nread); q++) if (rrw[q][0] == (k == 0)) no++;
-        if (nc != no) begin
+        // UM 7.7.3: a CAS or CAS2 whose compare fails still writes the
+        // operand it read back, to end the locked sequence; UAE040 makes no
+        // write (doc/oracles.md). That one write is accepted.
+        if (k == 1 && no == 0 && nc == 1 && is_cas(w[0]) &&
+            cap_addr[nth(1'b0, 0)] === cap_addr[nth(1'b1, nth_last_rd())]) begin
+          cas_waived++;
+        end else if (nc != no) begin
           bad = 1'b1;
           if (k == 0) $sformat(why, "it made %0d operand reads, UAE040 made %0d", nc, no);
           else        $sformat(why, "it made %0d operand writes, UAE040 made %0d", nc, no);
@@ -267,7 +275,7 @@ module core_vec_tb;
             c = nth(k == 0, j);
             j++;
             if (cap_addr[c] !== racc[q] || {29'd0, cap_bytes[c]} !== rby[q] ||
-                (k == 1 && ((cap_data[c] ^ rval[q]) & rmsk[q]) !== 32'd0)) begin
+                (k == 1 && ((cap_data[c] ^ rval[q]) & rmsk[q] & bmask(rby[q])) !== 32'd0)) begin
               bad = 1'b1;
               if (k == 0)
                 $sformat(why, "read %0d is %0d bytes at %08h, UAE040's %0d bytes at %08h",
@@ -279,6 +287,14 @@ module core_vec_tb;
             end
           end
         end
+      end
+
+      // PACK, UNPK and the bit fields: the bytes, however they were split
+      // into accesses (doc/oracles.md).
+      if (!bad_pre && bad && (gname[grp] == "packunpk_mem" || gname[grp] == "bitfield_mem") &&
+          same_bytes()) begin
+        bad = 1'b0;
+        split_waived++;
       end
 
       if (bad) begin
@@ -306,6 +322,57 @@ module core_vec_tb;
     end
   endtask
 
+  // The bytes of the core's accesses against UAE040's: the same bytes read,
+  // the same bytes written with the same values, in whatever accesses.
+  // Byte i of an access of n at a is at a + i, the data's byte n-1-i.
+  function automatic bit same_bytes();
+    logic [31:0] ca [0:4*MAXCAP-1];
+    logic  [7:0] cv [0:4*MAXCAP-1];
+    logic        cr [0:4*MAXCAP-1];
+    int          nc, q, i, j;
+    bit          hit;
+    logic  [7:0] v;
+    nc = 0;
+    for (q = 0; q < ncap && q < MAXCAP; q++)
+      for (i = 0; i < int'(cap_bytes[q]); i++) begin
+        ca[nc] = cap_addr[q] + i;
+        cv[nc] = 8'(cap_data[q] >> (8 * (int'(cap_bytes[q]) - 1 - i)));
+        cr[nc] = cap_rd[q];
+        nc++;
+      end
+    // Every one of UAE040's is among the core's, and as many of each kind.
+    j = 0;
+    for (q = 0; q < int'(nread); q++)
+      for (i = 0; i < int'(rby[q]); i++) begin
+        v = 8'(rval[q] >> (8 * (int'(rby[q]) - 1 - i)));
+        hit = 1'b0;
+        for (int c = 0; c < nc; c++)
+          if (ca[c] == racc[q] + i && cr[c] == rrw[q][0] && (cr[c] || cv[c] == v)) hit = 1'b1;
+        if (!hit) return 1'b0;
+        j++;
+      end
+    same_bytes = (j == nc);
+  endfunction
+
+  // CAS and CAS2: 0000 1ss0 11 <ea>, ss not 00.
+  function automatic logic is_cas(input logic [31:0] op);
+    is_cas = (op[15:11] == 5'b00001) && (op[10:9] != 2'b00) && (op[8:6] == 3'b011);
+  endfunction
+  // The index, among the reads, of the last one.
+  function automatic int nth_last_rd();
+    int c;
+    c = 0;
+    for (int q = 0; q < ncap && q < MAXCAP; q++) if (cap_rd[q]) c++;
+    nth_last_rd = c - 1;
+  endfunction
+
+  // The bytes an access of n carries: UAE040 reports a byte or word write
+  // with whatever the register held above it.
+  function automatic logic [31:0] bmask(input logic [31:0] n);
+    bmask = (n == 32'd1) ? 32'h0000_00FF : (n == 32'd2) ? 32'h0000_FFFF :
+            (n == 32'd3) ? 32'h00FF_FFFF : 32'hFFFF_FFFF;
+  endfunction
+
   initial begin
     flog = 0;
     if ($value$plusargs("faillog=%s", why)) flog = $fopen(why, "w");
@@ -329,7 +396,7 @@ module core_vec_tb;
     end
     $display("core_vec_tb: %0d vectors from UAE040", ntests);
 
-    passed = 0; failed = 0; notbuilt = 0; pending = 0; shown = 0;
+    passed = 0; failed = 0; notbuilt = 0; pending = 0; shown = 0; cas_waived = 0; split_waived = 0;
 
     for (n = 0; n < VMEM; n++) u_mem.mem[n] = base_byte(n[15:0]);
 
@@ -367,6 +434,12 @@ module core_vec_tb;
                  g_nb[n], g_pend[n]);
     $display("core_vec_tb: %0d passed, %0d failed, %0d not built, %0d pending M8, of %0d",
              passed, failed, notbuilt, pending, ntests);
+    if (split_waived != 0)
+      $display("core_vec_tb: %0d matched byte for byte, split into accesses as UAE040 does not",
+               split_waived);
+    if (cas_waived != 0)
+      $display("core_vec_tb: %0d failed CAS/CAS2 compares wrote the operand back (UM 7.7.3; UAE040 does not)",
+               cas_waived);
     if (failed == 0) $display("PASS: core_vec_tb");
     else             $display("FAIL: core_vec_tb");
     $finish;

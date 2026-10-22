@@ -218,6 +218,27 @@ fixes (59 checks and 48, all passing). It found, against the UM:
 
 ---
 
+### Where UAE040 disagrees with the manual (M7)
+
+Found by `make vectors-all`. The manual is the arbiter; the bench accepts the core's
+behaviour and counts each case.
+
+- **A CAS or CAS2 whose compare fails makes no write.** UM 7.7.3: "If an operand
+  does not match ... the M68040 still executes a single write transfer to terminate
+  the locked sequence with LOCKE asserted. For the CAS instruction, the value read
+  from memory is written back; for the CAS2 instruction, the second operand read is
+  written back." The core makes that write; `core_vec_tb` accepts one write, to the
+  address last read, where UAE040 has none, and prints how many it accepted.
+- **A byte or word write carries the register's upper bits.** UAE040 reports the
+  value written as the whole register (`ffffffad` for a byte `ad`). That is the
+  harness's view, not a disagreement; the bench compares only the bytes written.
+- **How PACK and UNPK's two bytes at -(An) are accessed.** UAE040 makes them one
+  word access at an odd address; the core makes two byte accesses, as PRM 4 describes
+  the operation. The split is a bus detail the manual leaves to the part (UM 7.3), so
+  for `packunpk_mem` and `bitfield_mem` the bench falls back to comparing bytes: the
+  same bytes read, and the same written with the same values. It prints how many
+  vectors needed that (96, all PACK and UNPK: the bit fields match access for access).
+
 ## cputest: WinUAE's instruction tester, for the MC68040 -- M0 spike
 
 **What.** The vector generator that comes with WinUAE (`Inputs/ref/winuae/cputest/`),

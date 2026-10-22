@@ -85,6 +85,14 @@ Two micro-operations where an instruction has a second address or a push beside 
 into T0, then T0 pushed), `JSR` (the target into T0, then the return address pushed and a
 jump to T0). The register file holds four temporaries, T0–T3, beside D0–D7 and A0–A7.
 
+Memory indirection (PRM 2.2.8–2.2.10) is a prelude micro-operation that reads the
+pointer into T3. A bit field in memory is a sequence: the parameters into T3 and the
+field's first byte address into T0; the bytes it covers, one to five, read into T1 and
+T2; the operation; and, if it modifies the field, the bytes written back. Its accesses
+are sized in \<ea\> calculate from T3, which it reads on the index port (`bfa`,
+`bf_bytes`): a byte, a word, a word and a byte, a long word, or a long word and a byte,
+never a byte outside the field.
+
 Hazards (`rtl/rd68041_core.sv`):
 
 - **\<ea\> calculate** takes an address register's update from the OF, EX or W stage
@@ -116,3 +124,13 @@ instructions `rtl/rd68041_decode.sv` lists: `make cosim` runs `sim/programs/m6_b
 on the core and on UAE040 and compares every register and the SR at every one of its 131
 instruction boundaries. About 6.5 clocks an instruction, every fetch and operand a bus
 transfer: the caches (M9) are where the pipeline starts to pay.
+
+**M7: the integer instruction set.** Every MC68040 integer instruction that does not
+take an exception, in every addressing mode, the full extension-word format and memory
+indirection included; locked transfers (CAS, CAS2, TAS) and MOVES. Against UAE040,
+`make vectors-all` passes 12,307 vectors with none failing (382 wait for M8, 18 trace
+or trap tests for M8 are not built), `make cputest` passes 5,811 of WinUAE's corpus with
+none failing (768 wait for M8; MOVE16 is M9's), and `make cosim` runs four programs
+register for register (`m6_basic`, `m7_a`, `m7_b`, `m7_c`). `doc/bugs-found.md` has
+the defects those found, `doc/oracles.md` the three places UAE040 disagrees with the
+manual.

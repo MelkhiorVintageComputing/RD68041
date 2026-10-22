@@ -269,10 +269,20 @@ module rd68041_core (
   // <ea> calculate
   // ===========================================================================
   wire [4:0] base_r  = (ea_u.ea_base == rd68041_pkg::B_REG) ? ea_u.ea_reg : {2'b01, ea_u.ea_an};
-  wire [4:0] index_r = {1'b0, ea_u.ea_xn};
+  // A bit field's accesses read T3, its parameters, on the index port.
+  wire [4:0] index_r = (ea_u.bfa != 2'd0) ? 5'd19 : {1'b0, ea_u.ea_xn};
   wire need_base  = ea_u.valid && ea_u.ea_en &&
                     (ea_u.ea_base == rd68041_pkg::B_AN || ea_u.ea_base == rd68041_pkg::B_REG);
-  wire need_index = ea_u.valid && ea_u.ea_en && ea_u.ea_xen;
+  wire need_index = ea_u.valid && ea_u.ea_en && (ea_u.ea_xen || ea_u.bfa != 2'd0);
+
+  // How many bytes a bit field in memory covers, from OP_BFPRM's parameters
+  // (the width in 18-13, the bit offset into the first byte in 10-8): one to
+  // five. They are accessed as a byte, a word, a word and a byte, a long word,
+  // or a long word and a byte -- none outside the field, which could be in
+  // another page or a device (UM 7.3 leaves the split to the part).
+  function automatic logic [2:0] bf_bytes(input logic [2:0] boff, input logic [5:0] width);
+    bf_bytes = 3'(({3'h0, boff} + width + 6'd7) >> 3);
+  endfunction
 
   // A result an older micro-operation has not computed yet.
   function automatic logic pending(input rd68041_pkg::uop_t u, input logic [4:0] r);
@@ -316,6 +326,23 @@ module rd68041_core (
       default:           agu_base = 32'h0;
     endcase
     agu_disp = (ea_u.ea_upd == rd68041_pkg::U_PRE) ? -{29'h0, ea_u.ea_step} : ea_u.ea_disp;
+    if (ea_u.bfa == 2'd2) agu_disp = (bf_bytes(index_v[10:8], index_v[18:13]) == 3'd3) ? 32'd2 : 32'd4;
+  end
+
+  // The micro-operation as it goes on to <ea> fetch: a bit field's accesses
+  // sized to its bytes, its second dropped when there is no last byte.
+  rd68041_pkg::uop_t ea_out;
+  always_comb begin
+    logic [2:0] n;
+    ea_out = ea_u;
+    n = bf_bytes(index_v[10:8], index_v[18:13]);
+    if (ea_u.bfa == 2'd1)
+      ea_out.sz = (n == 3'd1) ? rd68041_pkg::SZ_B :
+                  (n <= 3'd3) ? rd68041_pkg::SZ_W : rd68041_pkg::SZ_L;
+    if (ea_u.bfa == 2'd2 && n != 3'd3 && n != 3'd5) begin
+      ea_out.ld = 1'b0;
+      ea_out.st = 1'b0;
+    end
   end
 
   rd68041_agu u_agu (.base(agu_base), .index(ea_u.ea_xen ? index_v : 32'h0),
@@ -437,9 +464,30 @@ module rd68041_core (
 
   // --- the bit-field unit (OP_BF) -----------------------------------------------
   // C holds the parameters OP_BFPRM made -- width in 18-13, offset 12-8 -- and
-  // for memory the fifth byte in 7-0; B the register or the first four bytes.
+  // for memory the last byte in 7-0; B the register or the first access, as
+  // EA sized them (bf_bytes). bf_win is the five bytes from the field's first,
+  // those it does not cover zero.
   logic [31:0] bf_field, bf_sx, bf_ins, bf_mreg;
-  logic [39:0] bf_mmem;
+  logic [39:0] bf_mmem, bf_win;
+  logic [31:0] bf_m1, bf_m2;                      // the merged bytes, as written back
+  always_comb begin
+    case (bf_bytes(c_v[10:8], c_v[18:13]))
+      3'd1:    bf_win = {bv[7:0], 32'h0};
+      3'd2:    bf_win = {bv[15:0], 24'h0};
+      3'd3:    bf_win = {bv[15:0], c_v[7:0], 16'h0};
+      3'd4:    bf_win = {bv, 8'h0};
+      default: bf_win = {bv, c_v[7:0]};
+    endcase
+  end
+  always_comb begin
+    case (bf_bytes(c_v[10:8], c_v[18:13]))
+      3'd1:    begin bf_m1 = {24'h0, bf_mmem[39:32]}; bf_m2 = 32'h0;                   end
+      3'd2:    begin bf_m1 = {16'h0, bf_mmem[39:24]}; bf_m2 = 32'h0;                   end
+      3'd3:    begin bf_m1 = {16'h0, bf_mmem[39:24]}; bf_m2 = {24'h0, bf_mmem[23:16]}; end
+      3'd4:    begin bf_m1 = bf_mmem[39:8];           bf_m2 = 32'h0;                   end
+      default: begin bf_m1 = bf_mmem[39:8];           bf_m2 = {24'h0, bf_mmem[7:0]};   end
+    endcase
+  end
   logic        bf_msb, bf_zero;
   logic  [5:0] bf_ffo;
   always_comb begin
@@ -451,7 +499,7 @@ module rd68041_core (
     endcase
   end
   rd68041_bitfield u_bf (
-      .is_reg(ex_u.fn[3]), .reg_data(bv), .mem_data({bv, c_v[7:0]}),
+      .is_reg(ex_u.fn[3]), .reg_data(bv), .mem_data(bf_win),
       .roff(c_v[12:8]), .boff(c_v[10:8]), .width(c_v[18:13]), .ins(bf_ins),
       .field(bf_field), .sxfield(bf_sx), .msb(bf_msb), .zero(bf_zero), .ffo(bf_ffo),
       .merged_reg(bf_mreg), .merged_mem(bf_mmem));
@@ -497,9 +545,12 @@ module rd68041_core (
 
   // The quotient's fit (PRM 4): sixteen bits for the word forms, thirty-two
   // signed or unsigned for the long.
-  wire div_fits = ex_u.fn[1] ? !div_ovf
-                             : (ex_u.fn[0] ? (div_qneg ? (div_qmag <= 32'h8000) : (div_qmag <= 32'h7FFF))
-                                           : (div_qmag <= 32'hFFFF)) && !div_ovf;
+  // The divider's overflow is only the unsigned one: a signed quotient's
+  // magnitude must also fit, up to $80000000 when it is negative.
+  wire div_fits = (ex_u.fn[1]
+                   ? (!ex_u.fn[0] || (div_qneg ? (div_qmag <= 32'h8000_0000) : !div_qmag[31]))
+                   : (ex_u.fn[0] ? (div_qneg ? (div_qmag <= 32'h8000) : (div_qmag <= 32'h7FFF))
+                                 : (div_qmag <= 32'hFFFF))) && !div_ovf;
 
   // --- the operation, and the condition codes at its size (PRM 3.4) ------------
   logic [31:0] res, res2, st_val;              // the result, the second, the store's data
@@ -508,15 +559,18 @@ module rd68041_core (
   logic        ex_nost;                     // nor the store (CAS2's conditional ones)
   logic        ex_trap;                     // a conditional trap is taken
   logic        bcd_c, cmp2_out;
+  // The ALU's width: the operation's, except that a sign-extended word source
+  // (ADDA, SUBA, CMPA .W) is worked on at 32 bits; the load stays a word.
+  wire [1:0] alu_sz = ex_u.a_sxw ? rd68041_pkg::SZ_L : ex_u.sz;
   always_comb begin
     logic [32:0] s;
     logic [31:0] m, p, q;
     logic        cin, sub, an, bn, rn, cy, vf, xop, z;
     logic  [4:0] msb;
     logic  [4:0] bitn;
-    m   = (ex_u.sz == rd68041_pkg::SZ_B) ? 32'h0000_00FF :
-          (ex_u.sz == rd68041_pkg::SZ_W) ? 32'h0000_FFFF : 32'hFFFF_FFFF;
-    msb = (ex_u.sz == rd68041_pkg::SZ_B) ? 5'd7 : (ex_u.sz == rd68041_pkg::SZ_W) ? 5'd15 : 5'd31;
+    m   = (alu_sz == rd68041_pkg::SZ_B) ? 32'h0000_00FF :
+          (alu_sz == rd68041_pkg::SZ_W) ? 32'h0000_FFFF : 32'hFFFF_FFFF;
+    msb = (alu_sz == rd68041_pkg::SZ_B) ? 5'd7 : (alu_sz == rd68041_pkg::SZ_W) ? 5'd15 : 5'd31;
 
     // The adder: p + q + cin, or p - q - cin.
     p = bv; q = av; cin = 1'b0; sub = 1'b0; xop = 1'b0;
@@ -601,10 +655,15 @@ module rd68041_core (
           bcd_c = (v9 > 9'h099);
           if (bcd_c) v9 = v9 + 9'h060;
         end else begin
+          // The borrow is the binary difference's, or the low digit's
+          // correction's: with a digit above 9 the correction can take the
+          // difference back over zero ($00 - $FB: $105, then $0FF), and the
+          // borrow stands (the cputest corpus: $9F, X and C set).
           lo = {5'h0, dd[3:0]} - {5'h0, ss[3:0]} - {8'h0, ccr_x[4]};
           v9 = {1'b0, dd[7:4], 4'h0} - {1'b0, ss[7:4], 4'h0} + lo;
-          if (lo[8]) v9 = v9 - 9'd6;
           bcd_c = v9[8];
+          if (lo[8]) v9 = v9 - 9'd6;
+          bcd_c = bcd_c || v9[8];
           if (bcd_c) v9 = v9 - 9'h060;
         end
         res = {bv[31:8], v9[7:0]};
@@ -644,8 +703,8 @@ module rd68041_core (
           3'd3:    res = bf_sx;                        // BFEXTS
           3'd5:    res = av + {26'h0, bf_ffo};          // BFFFO: the offset plus
           default: begin
-            res  = ex_u.fn[3] ? bf_mreg : bf_mmem[39:8];
-            res2 = {24'h0, bf_mmem[7:0]};
+            res  = ex_u.fn[3] ? bf_mreg : bf_m1;
+            res2 = bf_m2;
           end
         endcase
       end
@@ -658,9 +717,10 @@ module rd68041_core (
       end
       default: res = bv;
     endcase
-    // The store's data is the result, but for LINK, which stores the register,
-    // and CAS, which stores Du if equal.
-    st_val = (ex_u.op == rd68041_pkg::OP_LINK) ? av :
+    // The store's data is the result, but for LINK, which stores the register
+    // (A7 already decremented, PRM 4's order: LINK A7 pushes the new SP), and
+    // CAS, which stores Du if equal.
+    st_val = (ex_u.op == rd68041_pkg::OP_LINK) ? ((ex_u.a_reg == 5'd15) ? ex_ea : av) :
              (ex_u.op == rd68041_pkg::OP_CAS)  ? (((bv & m) == (av & m)) ? c_v : bv) : res;
     // UNLK and RTD: the stack pointer past the frame (decode's imm).
     if (ex_u.op == rd68041_pkg::OP_PASSB && ex_u.wr2) res2 = ex_ea + ex_u.imm;
@@ -673,7 +733,7 @@ module rd68041_core (
       an = bv[msb]; bn = 1'b0;
     end
     // The carry or borrow out of the operation's size.
-    case (ex_u.sz)
+    case (alu_sz)
       rd68041_pkg::SZ_B: cy = sub ? ({1'b0, p[7:0]}  < ({1'b0, q[7:0]} + {8'h0, cin}))
                                   : (({1'b0, p[7:0]}  + {1'b0, q[7:0]}  + {8'h0, cin}) > 9'h0FF);
       rd68041_pkg::SZ_W: cy = sub ? ({1'b0, p[15:0]} < ({1'b0, q[15:0]} + {16'h0, cin}))
@@ -1001,7 +1061,7 @@ module rd68041_core (
 
       // --- <ea> calculate -> <ea> fetch -------------------------------------
       if (!ea_stall) begin
-        of_u  <= ea_u;
+        of_u  <= ea_out;
         of_ea <= agu_ea;
         of_an <= ea_an_new;
         ea_u  <= '0;

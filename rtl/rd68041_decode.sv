@@ -364,6 +364,7 @@ module rd68041_decode (
     u.cc     = rd68041_pkg::CC_NONE;
     u.br     = rd68041_pkg::BR_NONE;
     u.wr_sz  = rd68041_pkg::SZ_L;
+    u.sz     = rd68041_pkg::SZ_L;   // SWAP, MOVEQ, EXG...: long unless the case says
     bad      = 1'b0;
     need     =  4'd0;
     pop      =  4'd0;
@@ -1395,8 +1396,8 @@ module rd68041_decode (
             u.a_sxw = (om == 3'd3);
             u.b_reg = an_r;
             if (op[15:12] == 4'b1011) begin
+              // PRM 4: compared at 32 bits, the word extended (the core's alu_sz).
               u.op = rd68041_pkg::OP_CMP; u.cc = rd68041_pkg::CC_CMP;
-              u.sz = rd68041_pkg::SZ_L;      // PRM 4: compared at 32 bits, the word extended
             end else begin
               u.op = (op[15:12] == 4'b1101) ? rd68041_pkg::OP_ADDA : rd68041_pkg::OP_SUBA;
               u.cc = rd68041_pkg::CC_NONE;
@@ -1468,15 +1469,17 @@ module rd68041_decode (
                 u.wr2 = 1'b1; u.wr2_reg = 5'd16;
               end
             end else if (!rg && (sq == 5'd1 || sq == 5'd2)) begin
-              // The five bytes: a long word, then the fifth with the
-              // parameters beside it.
+              // The bytes the field covers, one to five: a first access into
+              // T1, then any last byte into T2 with the parameters beside it.
+              // EA sizes both from T3 (bfa).
               u.ea_en = 1'b1; u.ea_base = rd68041_pkg::B_REG; u.ea_reg = 5'd16;
               u.ld = 1'b1;
               u.b_sel = rd68041_pkg::S_MEM;
+              u.bfa = sq[1:0];
               if (sq == 5'd1) begin
                 u.wr = 1'b1; u.wr_reg = 5'd17;
               end else begin
-                u.ea_disp = 32'd4; u.sz = rd68041_pkg::SZ_B;
+                u.sz = rd68041_pkg::SZ_B;
                 u.a_reg = 5'd19;
                 u.op = rd68041_pkg::OP_BFPK;
                 u.wr = 1'b1; u.wr_reg = 5'd18;
@@ -1503,13 +1506,14 @@ module rd68041_decode (
                 if (!rg) begin u.wr2 = 1'b1; end
               end
             end else begin
-              // Memory, modified: written back, a long word and a byte.
+              // Memory, modified: written back as it was read (bfa).
               u.ea_en = 1'b1; u.ea_base = rd68041_pkg::B_REG; u.ea_reg = 5'd16;
               u.st = 1'b1;
+              u.bfa = (sq == 5'd4) ? 2'd1 : 2'd2;
               if (sq == 5'd4) begin
                 u.b_reg = 5'd17;
               end else begin
-                u.ea_disp = 32'd4; u.sz = rd68041_pkg::SZ_B;
+                u.sz = rd68041_pkg::SZ_B;
                 u.b_reg = 5'd18;
               end
             end

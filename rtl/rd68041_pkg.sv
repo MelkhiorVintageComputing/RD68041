@@ -185,6 +185,9 @@ package rd68041_pkg;
     logic        lke;        // ... the sequence's last
     logic        alt;        // MOVES: the space SFC or DFC names (UM 7.4, TT = 10)
     logic        cx;         // only if cond holds: else no store, no write, no CCR (CAS2)
+    logic  [1:0] bfa;        // a bit field's first (1) or second (2) access: sized at EA
+                             // from T3 to the bytes the field covers, the second dropped
+                             // if there is none (rd68041_core.sv, bf_bytes)
     // the register result
     logic        wr;
     logic  [4:0] wr_reg;
@@ -194,8 +197,8 @@ package rd68041_pkg;
   } uop_t;
 
   // Its width, written out: yosys has no $bits of a type. 40 (valid, last, halt,
-  // pc, len) + 56 (the <ea>) + 4 (ld, st, sz) + 110 (execute) + 14 (the
+  // pc, len) + 56 (the <ea>) + 4 (ld, st, sz) + 112 (execute) + 14 (the
   // results). sim/tb/core_*_tb check it against $bits.
-  localparam int UOP_W = 224;
+  localparam int UOP_W = 226;
 
 endpackage
