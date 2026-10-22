@@ -238,6 +238,11 @@ module rd68041_slave #(
     for (int i = 0; i < NREG; i++) r_on[i] = 0;
   endtask
 
+  // A program image, as `objcopy -O verilog --verilog-data-width=1` writes it.
+  task automatic load_hex(input string path);
+    $readmemh(path, mem);
+  endtask
+
   task automatic poke_long(input logic [31:0] addr, input logic [31:0] v);
     wr_long(addr, v, 4'b1111);
   endtask

@@ -22,3 +22,12 @@ lint_off -rule UNUSEDPARAM -file "*rtl/rd68041_pkg.sv"
 // the block RAMs' read registers (rtl/rd68041_bram.sv), which is the only reset a
 // block RAM's output register has. Both uses are deliberate.
 lint_off -rule SYNCASYNCNET -file "*rtl/*" -match "*'rst_n'*"
+
+// The pipeline's helper functions take a whole micro-operation (rd68041_pkg::
+// uop_t) and look at the few fields they need: the struct is the unit the
+// stages pass, and splitting it at every call would hide which stage's
+// micro-operation a check is about.
+lint_off -rule UNUSEDSIGNAL -file "*rtl/rd68041_core.sv" -match "*Bits of signal are not used: 'u'*"
+lint_off -rule UNUSEDSIGNAL -file "*rtl/rd68041_core.sv" -match "*Bits of signal are not used: 'o'*"
+lint_off -rule UNUSEDSIGNAL -file "*rtl/rd68041_core.sv" -match "*Bits of signal are not used: 'x'*"
+lint_off -rule UNUSEDSIGNAL -file "*rtl/rd68041_core.sv" -match "*Bits of signal are not used: 'w'*"

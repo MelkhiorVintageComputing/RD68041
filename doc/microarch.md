@@ -67,6 +67,38 @@ unit's (WB2, translated and looked up), and the bus unit's request (WB1). Reads 
 later may pass a write waiting in WB3 or WB2 except to the same address (UM 7.7: "the
 processor detects a read access that references earlier data waiting to be written").
 
+## Micro-operations (M6)
+
+Decode issues one micro-operation a clock (`rd68041_pkg::uop_t`); an instruction is one or
+more, the last marked `last`, every one carrying the instruction's address and length. A
+micro-operation has at most one effective address and so at most one memory operand:
+
+| | |
+|---|---|
+| \<ea\> | base (none, An, the PC, or a register), an index (Dn/An, word or long, scaled), a displacement, and an update (`(An)+`, `-(An)`, by 1, 2 or 4 — 2 for a byte on A7) |
+| \<ea\> fetch | `ld`: read the operand; `st`: write the result there at write-back; both: a read-modify-write |
+| execute | operands A and B, each a register, the immediate, the operand read, or the address itself, a word optionally sign-extended (`a_sxw`, `b_sxw`); an operation; how the condition codes are set; a control transfer (to a target decode computed, to B, or to the operand read) |
+| write-back | a register result of a byte, a word or a long word |
+
+Two micro-operations where an instruction has a second address or a push beside its own:
+`MOVE <mem>,<mem>` (the source into T0, then T0 to the destination), `PEA` (the address
+into T0, then T0 pushed), `JSR` (the target into T0, then the return address pushed and a
+jump to T0). The register file holds four temporaries, T0–T3, beside D0–D7 and A0–A7.
+
+Hazards (`rtl/rd68041_core.sv`):
+
+- **\<ea\> calculate** takes an address register's update from the OF, EX or W stage
+  of an older micro-operation that made it, newest first. It waits for a result an older
+  micro-operation computes in EX until that one is in W, and takes it from there.
+- **execute** reads its operands from the register file and from W. Only W can hold an
+  older micro-operation then.
+- **\<ea\> fetch** waits for an older write it overlaps that is still in EX or W; the
+  data memory unit waits for the ones in its queue (UM 7.7).
+- **a taken branch**, resolved in EX, empties decode, \<ea\> calculate and \<ea\>
+  fetch, cancelling any read of theirs already on the bus, and restarts fetching.
+- **the condition codes** exist twice: EX's, for the next branch, and those write-back
+  committed.
+
 ## Status
 
 **M4: measured.** The storage above (`rtl/rd68041_bram.sv`, `rd68041_atc.sv`,
@@ -78,3 +110,9 @@ to spare (`doc/size-and-speed.md`): OF 21.2 ns, EX into IF1 19.5, IF2 18.9, EX 1
 13.6. The spike's control is a stand-in, so the margin is what the real control, stalls
 and forwarding have to fit in; no stage needs splitting, and the plan's fallback (two OF
 stages) is not taken. 30 MHz stays the constraint.
+
+**M6: the walking skeleton runs.** All six stages, uncached and untranslated, for the
+instructions `rtl/rd68041_decode.sv` lists: `make cosim` runs `sim/programs/m6_basic.S`
+on the core and on UAE040 and compares every register and the SR at every one of its 131
+instruction boundaries. About 6.5 clocks an instruction, every fetch and operand a bus
+transfer: the caches (M9) are where the pipeline starts to pay.

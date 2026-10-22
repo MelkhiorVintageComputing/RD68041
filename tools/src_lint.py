@@ -101,6 +101,19 @@ def check_order(path):
         elif re.match(r'^\s*endmodule\b', line) and start:
             modules.append((start, n))
             start = None
+    # A function's or task's body is its own scope: its arguments and locals
+    # are declared in its header or above their use inside it, and may share
+    # names with module-level signals. Those lines are left out of both the
+    # module's declarations and its uses.
+    inner = set()
+    depth = 0
+    for n, line in enumerate(lines, 1):
+        if re.match(r'^\s*(function|task)\b', line):
+            depth += 1
+        if depth:
+            inner.add(n)
+        if re.match(r'^\s*(endfunction|endtask)\b', line):
+            depth -= 1
     for lo, hi in modules:
         decl = {}
         header_end = lo
@@ -109,11 +122,15 @@ def check_order(path):
                 header_end = n
                 break
         for n in range(header_end + 1, hi + 1):
+            if n in inner:
+                continue
             m = DECL.match(lines[n - 1])
             if m:
                 for name in declared_names(m.group(2)):
                     decl.setdefault(name, n)
         for n in range(header_end + 1, hi + 1):
+            if n in inner:
+                continue
             line = lines[n - 1]
             if re.match(r'^\s*`define\b', line):
                 continue                    # a macro body is text, not a use

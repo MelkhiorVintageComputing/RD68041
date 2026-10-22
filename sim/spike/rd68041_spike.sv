@@ -190,10 +190,10 @@ module rd68041_spike (
 
   rd68041_regfile u_rf (
       .clk(clk), .rst_n(rst_n),
-      .ra(ea_base_r), .rb(ea_index_r), .rc(dec_q[3:0]), .rd(dec_q[7:4]),
+      .ra({1'b0, ea_base_r}), .rb({1'b0, ea_index_r}), .rc({1'b0, dec_q[3:0]}), .rd({1'b0, dec_q[7:4]}),
       .qa(rf_a), .qb(rf_b), .qc(rf_c), .qd(rf_d),
-      .we0(w_we), .wa0(w_reg), .wd0(w_val), .wm0(4'hF),
-      .we1(1'b0), .wa1(4'd0), .wd1(32'd0));
+      .we0(w_we), .wa0({1'b0, w_reg}), .wd0(w_val), .wm0(4'hF),
+      .we1(1'b0), .wa1(5'd0), .wd1(32'd0));
 
   // W -> EA forwarding only (doc/plan.md: an E -> EA dependency costs a bubble).
   wire [31:0] ea_base  = (w_we && w_reg == ea_base_r)  ? w_val : rf_a;

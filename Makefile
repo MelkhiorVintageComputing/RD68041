@@ -47,6 +47,10 @@ SRCS := rtl/rd68041_sync.sv \
         rtl/rd68041_cache_arr.sv \
         rtl/rd68041_regfile.sv \
         rtl/rd68041_agu.sv \
+        rtl/rd68041_decode.sv \
+        rtl/rd68041_ifu.sv \
+        rtl/rd68041_dmu.sv \
+        rtl/rd68041_core.sv \
         rtl/rd68041_shifter.sv \
         rtl/rd68041_divider.sv \
         rtl/rd68041_bitfield.sv \
@@ -59,7 +63,8 @@ IVFLAGS := -g2012 -Wall -Wno-timescale -DTB_FPU=$(FPU)
 
 .PHONY: all help dirs lint lint-source lint-iverilog lint-verilator lint-yosys \
         lint-quartus lint-questa quartus synth impl audit sim sim-bus check \
-        check-lc spike ucode ucode-check print-rtl clean uae040 uae040-smoke cputest-gen
+        check-lc cosim spike ucode ucode-check print-rtl clean uae040 uae040-smoke cputest-gen \
+        qemu040 cosim-qemu-smoke virt-qemu mame-quadra quadra-m68040
 
 all: lint
 
@@ -92,6 +97,14 @@ help:
 	@echo "                    an MC68LC040, and check it against the manual"
 	@echo "  make cputest-gen  WinUAE's cputest corpus for the MC68040, integer and FPU"
 	@echo "                    (build/cputest/), decoded and counted"
+	@echo "  make qemu040      build QEMU (m68k-softmmu, build/qemu/) and the qemu040 trace plugin"
+	@echo "  make cosim-qemu-smoke  smoke040.S on QEMU's m68040, its trace compared with"
+	@echo "                    UAE040's; every known difference confirmed"
+	@echo "  make virt-qemu    Linux 7.2.9 (CONFIG_M68040) to a shell on QEMU's virt board,"
+	@echo "                    a command set typed, powered off (guest build: heavy, alone)"
+	@echo "  make mame-quadra  build MAME's macquadra800.cpp driver (build/mame/; heavy, -j2, alone)"
+	@echo "  make quadra-m68040  the user's Quadra 650 ROM booted on MAME's m68040, no disk,"
+	@echo "                    to the blinking-? screen (QUADRA_SECONDS=, QUADRA_MACHINE=)"
 	@echo
 	@echo "  make clean        remove build/"
 	@echo
@@ -183,7 +196,7 @@ ucode-check: dirs
 # verdicts are printed in TBS order once all have finished. A testbench that
 # leaves no verdict -- killed, or crashed before writing one -- is a failure.
 # ---------------------------------------------------------------------------
-TBS := $(patsubst sim/tb/%.sv,%,$(wildcard sim/tb/*_tb.sv))
+TBS := $(filter-out core_cosim_tb,$(patsubst sim/tb/%.sv,%,$(wildcard sim/tb/*_tb.sv)))
 MODELS := $(wildcard sim/models/*.sv)
 SIMJOBS ?= 4
 
@@ -212,6 +225,55 @@ sim: dirs
 	  if [ ! -s $$r ]; then echo "FAIL: $$tb left no verdict"; ok=0; continue; fi; \
 	  cat $$r; grep -q '^FAIL' $$r && ok=0; \
 	done; test $$ok -eq 1
+
+# ---------------------------------------------------------------------------
+# Programs, and the core against UAE040 -- M6 on
+#
+# Each program in sim/programs/ is built with the cross toolchain and linked at
+# 0 (sim/programs/flat.ld); uae040_trace writes its trace, and core_cosim_tb
+# runs it on the core and compares every register at every instruction
+# boundary (UAE040: doc/oracles.md).
+# ---------------------------------------------------------------------------
+PROGS   ?= m6_basic
+
+# Keep the intermediate files: the ELF is what objdump reads when a run fails.
+.SECONDARY:
+PSTEPS  ?= 4000
+PBUILD  := build/programs
+
+$(PBUILD)/%.elf: sim/programs/%.S sim/programs/flat.ld
+	@mkdir -p $(PBUILD)
+	@$(CROSS)gcc -mcpu=68040 -c -o $(PBUILD)/$*.o $<
+	@$(CROSS)gcc -mcpu=68040 -nostdlib -nostartfiles -T sim/programs/flat.ld \
+	    -Wl,--no-warn-rwx-segments -o $@ $(PBUILD)/$*.o 2> $(PBUILD)/$*.link.log \
+	  || { cat $(PBUILD)/$*.link.log; exit 1; }
+
+$(PBUILD)/%.hex: $(PBUILD)/%.elf
+	@$(CROSS)objcopy -O verilog --verilog-data-width=1 $< $@
+
+$(PBUILD)/%.bin: $(PBUILD)/%.elf
+	@$(CROSS)objcopy -O binary $< $@
+
+# (O40BUILD is defined with the UAE040 targets below, after this rule is read.)
+$(PBUILD)/%.trc: $(PBUILD)/%.bin $(BUILD)/uae040/uae040_trace
+	@$(BUILD)/uae040/uae040_trace -m 64 $< $(PSTEPS) > $@ 2> $(PBUILD)/$*.trace.log \
+	  || { cat $(PBUILD)/$*.trace.log; exit 1; }
+
+cosim: dirs $(patsubst %,$(PBUILD)/%.hex,$(PROGS)) $(patsubst %,$(PBUILD)/%.trc,$(PROGS))
+	@iverilog $(IVFLAGS) -I sim/tb -o $(BUILD)/core_cosim_tb.vvp -s core_cosim_tb \
+	    $(RTL) $(MODELS) sim/tb/core_cosim_tb.sv > $(BUILD)/core_cosim_tb.build.log 2>&1 \
+	  || { grep -v $(NOTES) $(BUILD)/core_cosim_tb.build.log; exit 1; }
+	@ok=1; for p in $(PROGS); do \
+	  vvp $(BUILD)/core_cosim_tb.vvp +image=$(PBUILD)/$$p.hex +trace=$(PBUILD)/$$p.trc \
+	      > $(BUILD)/cosim-$$p.log 2>&1; \
+	  grep -E '^  FAIL' $(BUILD)/cosim-$$p.log | head -8; \
+	  if grep -q '^PASS' $(BUILD)/cosim-$$p.log; then \
+	    echo "  $$p: $$(grep '^PASS' $(BUILD)/cosim-$$p.log | sed 's/^PASS: core_cosim_tb: //')"; \
+	  else \
+	    echo "  FAIL: $$p"; tail -2 $(BUILD)/cosim-$$p.log; ok=0; \
+	  fi; \
+	done; \
+	test $$ok -eq 1 && echo "PASS: cosim"
 
 sim-bus: dirs
 	@$(MAKE) --no-print-directory sim TBS="$(filter bus_%,$(TBS))"
@@ -466,6 +528,77 @@ cputest-gen: dirs $(CTBUILD)/run/stamp $(CTBUILD)/fpu/stamp
 	 grep -E '^(total|instructions|exceptions|frames|DECODE)|DECODE ERROR' $(CTBUILD)/summary.txt | sed 's/^/  /'; \
 	 if [ $$rc -eq 0 ]; then echo "PASS: cputest-gen (per instruction: $(CTBUILD)/summary.txt)"; \
 	 else echo "FAIL: cputest-gen"; exit 1; fi
+
+# ---------------------------------------------------------------------------
+# QEMU's m68040, a third instruction-trace oracle (doc/oracles.md, "QEMU")
+#
+# QEMU 11.1.2 (Inputs/ref/qemu) is exported into build/qemu/src and built
+# there for m68k-softmmu with TCG plugins by tools/cosim/qemu040/build.sh
+# (once; a heavy job, -j4, alone). The plugin, libqemu040.so, writes
+# uae040_trace's .trc, with "x" for the registers QEMU does not expose.
+# QEMU is run with one instruction per translation block: otherwise the
+# condition codes a plugin reads in the middle of a block are stale.
+#
+#   make cosim-qemu-smoke  smoke040.S from reset on both oracles, the traces
+#                          compared; tools/cosim/qemu040/smoke040.quirks lists
+#                          the differences expected, each must recur
+# ---------------------------------------------------------------------------
+QBUILD040 := $(BUILD)/qemu
+QEMU      := $(QBUILD040)/inst/bin/qemu-system-m68k
+Q040      := $(BUILD)/qemu040
+Q040SRC   := tools/cosim/qemu040
+Q040PLUG  := $(Q040)/libqemu040.so
+QEMU040   = $(QEMU) -M virt -cpu m68040 -accel tcg,one-insn-per-tb=on -display none \
+            -monitor none -serial none
+
+$(QEMU): $(Q040SRC)/build.sh
+	@mkdir -p $(QBUILD040)
+	@echo "  qemu040: building QEMU into $(QBUILD040) (-j4, alone)"
+	@JOBS=4 sh $(Q040SRC)/build.sh $(QBUILD040) | sed 's/^/  /'
+
+$(Q040PLUG): $(Q040SRC)/qemu040.c $(QEMU)
+	@mkdir -p $(Q040)
+	@$(CC) -O2 -g -Wall -Wextra -shared -fPIC -I$(QBUILD040)/inst/include \
+	    $$(pkg-config --cflags glib-2.0) -o $@ $<
+
+qemu040: $(QEMU) $(Q040PLUG)
+
+cosim-qemu-smoke: $(Q040PLUG) $(O40SMOKE)/smoke040.elf uae040-smoke
+	@mkdir -p $(Q040)/smoke
+	@$(QEMU040) -m 1M -kernel $(O40SMOKE)/smoke040.elf \
+	    -plugin $(Q040PLUG),trc=$(Q040)/smoke/040.trc,ops=$(Q040)/smoke/040.ops,limit=4000 \
+	    2> $(Q040)/smoke/040.trace.log || { cat $(Q040)/smoke/040.trace.log; exit 1; }
+	@python3 $(Q040SRC)/compare.py --elf $(O40SMOKE)/smoke040.elf --expect $(Q040SRC)/smoke040.quirks \
+	    $(O40SMOKE)/040.trc $(Q040)/smoke/040.trc > $(Q040)/smoke/compare.txt; rc=$$?; \
+	 grep -v ' _start fp' $(Q040)/smoke/compare.txt | sed 's/^  //; s/^/  /'; \
+	 if [ $$rc -eq 0 ]; then echo "PASS: cosim-qemu-smoke"; else echo "FAIL: cosim-qemu-smoke"; exit 1; fi
+
+# ---------------------------------------------------------------------------
+# Linux on QEMU's virt board (doc/oracles.md, "Linux on QEMU's virt")
+#
+# The guest -- Linux 7.2.9 with sim/virt/linux/rd-virt.config (MC68040 only,
+# the FPSP, no FPU emulation) and a static BusyBox, both pinned by
+# Inputs/sw/MANIFEST -- is built by sim/virt/linux/build.sh (heavy, -j4,
+# alone; reused) and booted with sim/virt/linux/commands.script typed at its
+# shell by qemu-run.py. The instruction count is the plugin's (count=).
+# ---------------------------------------------------------------------------
+VGUEST040 := $(BUILD)/virt/guest
+
+$(VGUEST040)/vmlinux $(VGUEST040)/initramfs.cpio.gz: sim/virt/linux/build.sh sim/virt/linux/rd-virt.config \
+            sim/virt/linux/init sim/virt/linux/cpio.list
+	@echo "  virt: building the guest into $(VGUEST040) (Linux and BusyBox, -j4, alone)"
+	@JOBS=4 sh sim/virt/linux/build.sh $(VGUEST040) | sed 's/^/  /'
+
+virt-qemu: $(Q040PLUG) $(VGUEST040)/vmlinux $(VGUEST040)/initramfs.cpio.gz
+	@python3 sim/virt/linux/qemu-run.py --qemu $(QEMU) --log $(VGUEST040)/qemu.console \
+	    --script sim/virt/linux/commands.script --timeout 300 --expect "reboot: Power down" -- \
+	    -M virt -cpu m68040 -m 128M -display none -monitor none -serial stdio \
+	    -kernel $(VGUEST040)/vmlinux -initrd $(VGUEST040)/initramfs.cpio.gz \
+	    -append "console=ttyGF0 lpj=250000 rdvirt.shell" \
+	    -plugin $(Q040PLUG),count=$(VGUEST040)/qemu.insns | sed 's/^/  /'; \
+	 rc=$${PIPESTATUS[0]}; sed 's/^/  /' $(VGUEST040)/qemu.insns; \
+	 if [ $$rc -eq 0 ]; then echo "PASS: virt-qemu (console in $(VGUEST040)/qemu.console)"; \
+	 else echo "FAIL: virt-qemu (console in $(VGUEST040)/qemu.console)"; exit 1; fi
 
 print-rtl:
 	@echo $(RTL)

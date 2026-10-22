@@ -6,8 +6,8 @@
 //
 // Top level: the MC68040's pins (doc/pinout.md), split into _i/_o/_oe.
 //
-// M2: the bus unit with its snooper, and the reset; no processor yet, so
-// nothing asks for a transfer and no cache answers a snoop.
+// M6: the integer unit's walking skeleton (rd68041_core), the bus unit with its
+// snooper, and the reset; no caches yet, so no cache answers a snoop.
 
 module rd68041_top #(
     // Whether the floating-point unit is built: 1 is the MC68040, 0 the
@@ -112,9 +112,15 @@ module rd68041_top #(
       .mode_ipl (mode_ipl)
   );
 
-  // The bus unit. M1: nothing asks it for a transfer yet, so it only follows
-  // arbitration -- implicit ownership while BG is asserted, idle otherwise.
-  logic         req_ready;
+  // The integer unit, with instruction fetch and the data memory unit (M6).
+  logic         req_valid, req_ready, req_write;
+  logic [31:0]  req_addr;
+  logic  [1:0]  req_siz, req_tt;
+  logic  [2:0]  req_tm;
+  logic [127:0] req_wdata;
+  logic         retire, halted;
+  logic [31:0]  retire_pc, retire_npc;
+  logic [15:0]  sr;
   logic         rsp_valid, rsp_tci, rsp_avec, rsp_done, rsp_err;
   logic  [1:0]  rsp_beat, rsp_lw;
   logic [31:0]  rsp_data;
@@ -124,24 +130,33 @@ module rd68041_top #(
   logic  [3:0]  sn_wbe;
   logic         sn_wr, sn_dinv, sn_iinv;
 
+  rd68041_core u_core (
+      .clk(clk), .rst_n(rst_n), .crst(crst),
+      .req_valid(req_valid), .req_ready(req_ready), .req_addr(req_addr),
+      .req_write(req_write), .req_siz(req_siz), .req_tt(req_tt), .req_tm(req_tm),
+      .req_wdata(req_wdata), .rsp_valid(rsp_valid), .rsp_data(rsp_data),
+      .rsp_done(rsp_done), .rsp_err(rsp_err),
+      .retire(retire), .retire_pc(retire_pc), .retire_npc(retire_npc),
+      .halted(halted), .sr(sr));
+
   rd68041_biu u_biu (
       .clk       (clk),
       .rst_n     (rst_n),
       .crst      (crst),
-      .req_valid (1'b0),
+      .req_valid (req_valid),
       .req_ready (req_ready),
-      .req_addr  (32'h0000_0000),
-      .req_write (1'b0),
-      .req_siz   (2'b00),
-      .req_tt    (2'b00),
-      .req_tm    (3'b000),
+      .req_addr  (req_addr),
+      .req_write (req_write),
+      .req_siz   (req_siz),
+      .req_tt    (req_tt),
+      .req_tm    (req_tm),
       .req_tln   (2'b00),
       .req_upa   (2'b00),
       .req_ciout (1'b0),
       .req_lock  (1'b0),
       .req_locke (1'b0),
       .req_more  (1'b0),
-      .req_wdata (128'h0),
+      .req_wdata (req_wdata),
       .lock_seq  (1'b0),
       .rsp_valid (rsp_valid),
       .rsp_beat  (rsp_beat),
@@ -216,8 +231,7 @@ module rd68041_top #(
   assign unused_ok = &{1'b0, pclk, dle_i, sn_addr, sn_wdata, sn_wbe, sn_wr,
                        sn_dinv, sn_iinv,
                        tck_i, tms_i, tdi_i, trst_n_i, FPU != 0, mode_mux,
-                       mode_dle, mode_ipl, req_ready, rsp_valid, rsp_tci,
-                       rsp_avec, rsp_done, rsp_err, rsp_beat, rsp_lw, rsp_data,
-                       owner};
+                       mode_dle, mode_ipl, rsp_tci, rsp_avec, rsp_beat, rsp_lw,
+                       owner, retire, retire_pc, retire_npc, halted, sr};
 
 endmodule
