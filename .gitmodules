@@ -4,3 +4,25 @@
 [submodule "Inputs/QuadraFPGA"]
 	path = Inputs/QuadraFPGA
 	url = https://github.com/MelkhiorVintageComputing/QuadraFPGA
+[submodule "Inputs/ref/winuae"]
+	path = Inputs/ref/winuae
+	url = https://github.com/tonioni/WinUAE
+	shallow = true
+[submodule "Inputs/ref/hatari"]
+	path = Inputs/ref/hatari
+	url = https://github.com/hatari/hatari
+	shallow = true
+[submodule "Inputs/ref/mame"]
+	path = Inputs/ref/mame
+	url = https://github.com/mamedev/mame
+	shallow = true
+[submodule "Inputs/third_party/berkeley-softfloat-3"]
+	path = Inputs/third_party/berkeley-softfloat-3
+	url = https://github.com/ucb-bar/berkeley-softfloat-3.git
+[submodule "Inputs/third_party/berkeley-testfloat-3"]
+	path = Inputs/third_party/berkeley-testfloat-3
+	url = https://github.com/ucb-bar/berkeley-testfloat-3.git
+[submodule "Inputs/ref/qemu"]
+	path = Inputs/ref/qemu
+	url = https://github.com/qemu/qemu
+	shallow = true
