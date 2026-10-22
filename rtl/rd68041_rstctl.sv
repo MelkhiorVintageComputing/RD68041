@@ -19,8 +19,11 @@
 // specifications 53 and 54 hold them from 20 ns before RSTI negates to 2 ns
 // after. They are captured on every clock while the first synchroniser rank
 // still reads RSTI asserted, so the value kept is the one on the pins at the
-// edge on which RSTI was first seen negated. Only the normal modes are built
-// (doc/pinout.md): the captured levels are reported, and nothing else reads them.
+// edge on which RSTI was first seen negated -- up to a clock after it negated,
+// outside 54's window. No rising-edge capture can be inside a window timed from
+// an asynchronous edge and narrower than a clock (doc/ac-timing.md). Only the
+// normal modes are built, so the levels are only reported, and nothing else
+// reads them (doc/divergences.md, "The mode selects are recorded, not met").
 
 module rd68041_rstctl (
     input  logic       clk,

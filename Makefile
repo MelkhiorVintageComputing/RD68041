@@ -42,6 +42,11 @@ SRCS := rtl/rd68041_sync.sv \
         rtl/rd68041_rstctl.sv \
         rtl/rd68041_snoop.sv \
         rtl/rd68041_biu.sv \
+        rtl/rd68041_bram.sv \
+        rtl/rd68041_atc.sv \
+        rtl/rd68041_cache_arr.sv \
+        rtl/rd68041_regfile.sv \
+        rtl/rd68041_agu.sv \
         rtl/rd68041_shifter.sv \
         rtl/rd68041_divider.sv \
         rtl/rd68041_bitfield.sv \
@@ -54,7 +59,7 @@ IVFLAGS := -g2012 -Wall -Wno-timescale -DTB_FPU=$(FPU)
 
 .PHONY: all help dirs lint lint-source lint-iverilog lint-verilator lint-yosys \
         lint-quartus lint-questa quartus synth impl audit sim sim-bus check \
-        check-lc print-rtl clean uae040 uae040-smoke cputest-gen
+        check-lc spike print-rtl clean uae040 uae040-smoke cputest-gen
 
 all: lint
 
@@ -62,15 +67,19 @@ help:
 	@echo "RD68041 -- SystemVerilog MC68040 / MC68LC040"
 	@echo
 	@echo "The gate:"
-	@echo "  make check       lint, audit and sim, then lint and audit again with FPU=0"
+	@echo "  make check       lint, audit, sim and timing, then lint and audit again with FPU=0"
 	@echo "  make lint        elaborate every rtl module under iverilog, Verilator and yosys"
 	@echo "  make audit       prove no register initialises outside reset"
 	@echo "  make sim         the directed testbenches"
 	@echo "  make sim-bus     ... just the bus-level ones"
+	@echo "  make timing      AC feasibility: MC68040 25/33/40 MHz (large, small buffers),"
+	@echo "                   MC68LC040 20/25/33/40 MHz (doc/ac-timing.md)"
+	@echo "  make timing-verbose  ... and every column in detail; PADSKEW=, TIMOPTS=--tie-edges"
 	@echo
 	@echo "Vendor tools, tens of minutes each:"
 	@echo "  make impl         Vivado place and route ($(XPART)), out of context"
 	@echo "  make synth        Vivado synthesis only"
+	@echo "  make spike        the M4 frequency spike, placed and routed (sim/spike/)"
 	@echo "  make quartus      Quartus fit and timing ($(AFAMILY) $(APART))"
 	@echo "  make lint-quartus Quartus analysis and synthesis"
 	@echo "  make lint-questa  Questa vlog + vopt"
@@ -195,10 +204,64 @@ sim-bus: dirs
 	@$(MAKE) --no-print-directory sim TBS="$(filter bus_%,$(TBS))"
 
 # ---------------------------------------------------------------------------
+# AC timing, against UM section 11 (MC68040, large and small buffers) and
+# Appendix A (MC68LC040): tools/timing/, doc/ac-timing.md.
+#
+# One recording per speed grade, at that grade's minimum BCLK period
+# (specification 5), because separations are measured in clock edges and a
+# recording at one frequency is evidence about that frequency only. Each grade
+# is recorded twice, with BCLK high for 40 % and for 60 % of the period -- the
+# two ends of specification 8 -- and both logs go into one system, because the
+# release of BB, TA and TIP is on the falling edge and a board's pads do not
+# change with the clock's duty cycle. Every column of the grade is then judged
+# against that pair: the MC68040's large and small buffers and the MC68LC040.
+# ---------------------------------------------------------------------------
+TIMGRADES := 50:20 40:25 30:33 25:40
+PADSKEW   ?= 0
+TIMOPTS   ?=
+
+.PHONY: timing timing-build timing-verbose
+
+timing-build: dirs
+	@iverilog $(IVFLAGS) -I sim/tb -o $(BUILD)/rd68041_timing_tb.vvp \
+	    -s rd68041_timing_tb $(RTL) $(MODELS) sim/tb/rd68041_timing_tb.sv \
+	    > $(BUILD)/timing.build.log 2>&1 \
+	  || { grep -v $(NOTES) $(BUILD)/timing.build.log; exit 1; }
+	@python3 tools/timing/feasible.py > $(BUILD)/timing-selftest.log \
+	  || { cat $(BUILD)/timing-selftest.log; exit 1; }
+	@python3 tools/timing/anchors.py > $(BUILD)/timing-anchors.log \
+	  || { tail -3 $(BUILD)/timing-anchors.log; exit 1; }
+
+timing: timing-build
+	@ok=1; for g in $(TIMGRADES); do \
+	  p=$${g%%:*}; f=$${g##*:}; logs=; \
+	  for d in 40 60; do \
+	    h=$$(awk "BEGIN { print $$p * $$d / 100 }"); \
+	    vvp $(BUILD)/rd68041_timing_tb.vvp +period=$$p +high=$$h \
+	        +log=$(BUILD)/timing-$$f-$$d.log > $(BUILD)/timing-run-$$f-$$d.log 2>&1; \
+	    grep -q '^PASS' $(BUILD)/timing-run-$$f-$$d.log \
+	      || { echo "FAIL: the timing testbench did not complete at $$p ns, $$h high"; \
+	           grep '^ *FAIL' $(BUILD)/timing-run-$$f-$$d.log | head -5; ok=0; }; \
+	    logs="$$logs $(BUILD)/timing-$$f-$$d.log"; \
+	  done; \
+	  python3 tools/timing/analyse.py --grade $$f --pad-skew $(PADSKEW) $(TIMOPTS) \
+	      $$logs || ok=0; \
+	done; \
+	if [ $$ok -eq 1 ]; then echo "PASS: timing"; else echo "FAIL: timing"; exit 1; fi
+
+# The same, and then every column again with its separations, pad windows, a
+# pad assignment that meets every limit, and the input sampling windows.
+timing-verbose: timing-build
+	@$(MAKE) --no-print-directory timing || true
+	@for g in $(TIMGRADES); do f=$${g##*:}; \
+	  python3 tools/timing/analyse.py --grade $$f --pad-skew $(PADSKEW) $(TIMOPTS) \
+	      --verbose $(BUILD)/timing-$$f-40.log $(BUILD)/timing-$$f-60.log; done; true
+
+# ---------------------------------------------------------------------------
 # The gate. The MC68LC040 build is elaborated and audited too, in its own
 # build directory, so that FPU=0 cannot rot unseen.
 # ---------------------------------------------------------------------------
-check: lint audit sim check-lc
+check: lint audit sim timing check-lc
 	@echo "PASS: check"
 
 check-lc:
@@ -221,6 +284,23 @@ impl: dirs
 	@cd $(BUILD) && $(CURDIR)/scripts/vivado.sh -mode batch -nojournal -nolog \
 	    -source $(CURDIR)/scripts/impl.tcl \
 	    -tclargs $(XPART) $(TOP) $(CURDIR) $(FPU) \
+	    > impl.log 2>&1; rc=$$?; \
+	  grep -E '^(RD68041|ERROR|CRITICAL WARNING)' impl.log; exit $$rc
+
+# The M4 frequency spike (doc/microarch.md): the design's storage and adders in
+# the pipeline's arrangement, through a harness that is not part of the design,
+# placed and routed like `make impl`. Its own build directory.
+SPIKE_SRCS := rtl/rd68041_pkg.sv rtl/rd68041_late_release.sv rtl/rd68041_rstctl.sv \
+              rtl/rd68041_snoop.sv rtl/rd68041_biu.sv rtl/rd68041_bram.sv \
+              rtl/rd68041_atc.sv rtl/rd68041_cache_arr.sv rtl/rd68041_regfile.sv \
+              rtl/rd68041_agu.sv rtl/rd68041_shifter.sv sim/spike/rd68041_spike.sv
+
+spike: dirs
+	@mkdir -p $(BUILD)/spike
+	@printf '%s\n' $(addprefix $(CURDIR)/,$(SPIKE_SRCS)) > $(BUILD)/spike/rtl.f
+	@cd $(BUILD)/spike && $(CURDIR)/scripts/vivado.sh -mode batch -nojournal -nolog \
+	    -source $(CURDIR)/scripts/impl.tcl \
+	    -tclargs $(XPART) rd68041_spike $(CURDIR) - \
 	    > impl.log 2>&1; rc=$$?; \
 	  grep -E '^(RD68041|ERROR|CRITICAL WARNING)' impl.log; exit $$rc
 

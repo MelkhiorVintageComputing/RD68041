@@ -30,3 +30,17 @@ and the IPL levels at reset the output buffer strengths. This design builds the 
 modes only: `rd68041_rstctl` records what was asked for (`mode_mux`, `mode_dle`,
 `mode_ipl`) and nothing reads it. The MC68LC040 has none of the three modes (Appendix A),
 so for `FPU = 0` this is exact. Buffer strength has no meaning inside an FPGA.
+
+## The mode selects are recorded, not met
+
+**Specifications 53 and 54.** CDIS, MDIS and IPL2–IPL0 are valid from 20 ns before RSTI
+negates to 2 ns after, and the part latches them there (UM 7.10).
+
+**What this design does.** `rd68041_rstctl` captures them on the rising edge on which its
+first synchroniser rank sees RSTI negated, which can be up to a clock after RSTI negates
+(39.5 ns at 25 MHz, measured by `make timing` at M3). A synchronous design cannot do
+better: the window is timed from RSTI's own, asynchronous edge and is narrower than a
+clock, and a register clocked by RSTI would be a second clock domain. Nothing depends on
+the result -- the modes are not built (above) and the captured levels are only reported --
+so `tools/timing/anchors.py` lists 53 and 54 as not about this design, with this entry as
+the reason. A board that relies on a mode select must hold it for a clock after RSTI.

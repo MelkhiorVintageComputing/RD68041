@@ -55,7 +55,7 @@ instruction was executing when the write-back faulted, which is the "next instru
 the one that issued it; the table describes that case. UAE040 follows 8.2.1
 (`doc/oracles.md`). Raised by the M0 UAE040 spike.
 
-## 3. The MC68LC040's output timing is not the MC68040's small-buffer timing
+## 4. The MC68LC040's output timing is not the MC68040's small-buffer timing
 
 **Followed: each table as printed -- Appendix A for the MC68LC040, section 11 for the
 MC68040.**
