@@ -17,3 +17,8 @@
 // the numbers are written down once, in one place, with their citation -- so an
 // unused one is the normal case rather than a defect.
 lint_off -rule UNUSEDPARAM -file "*rtl/rd68041_pkg.sv"
+
+// rst_n is the asynchronous reset of every flip-flop and the synchronous reset of
+// the block RAMs' read registers (rtl/rd68041_bram.sv), which is the only reset a
+// block RAM's output register has. Both uses are deliberate.
+lint_off -rule SYNCASYNCNET -file "*rtl/*" -match "*'rst_n'*"

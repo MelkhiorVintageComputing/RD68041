@@ -37,8 +37,13 @@ set_msg_config -id "Synth 8-6901" -new_severity ERROR
 read_verilog -sv $rtl
 read_xdc $root/scripts/rd68041.xdc
 
-synth_design -top $top -part $part -mode out_of_context -flatten_hierarchy none \
-             -generic FPU=$fpu
+# "-" for a top that has no FPU parameter (the M4 spike, sim/spike/).
+if {$fpu eq "-"} {
+    synth_design -top $top -part $part -mode out_of_context -flatten_hierarchy none
+} else {
+    synth_design -top $top -part $part -mode out_of_context -flatten_hierarchy none \
+                 -generic FPU=$fpu
+}
 opt_design
 place_design
 phys_opt_design

@@ -68,9 +68,27 @@ UNRESET_FF = {
 # also fails if a name here stops being needed -- an exemption that has quietly
 # become unnecessary is one nobody will re-examine.
 #
-# None yet. RD68031 exempted its microcode store's read register; this design's
-# micro-sequencer store, when it arrives (M5), argues its own case here.
+# By count: none yet. RD68031 exempted its microcode store's read register; this
+# design's micro-sequencer store, when it arrives (M5), argues its own case here.
 EXEMPT = {}
+
+# By name: registers whose every bit, wherever the module is instantiated, is
+# allowed, each pattern with its argument. Counted from the netlist by the
+# register's name (the flattened hierarchy keeps it); a pattern that matches
+# nothing is not a failure -- the structure it covers may not be built yet, or
+# may be built out by a parameter.
+#
+# The block RAMs' read data registers (rtl/rd68041_bram.sv). They ARE reset,
+# synchronously, from rst_n -- the only reset a block RAM's output register has
+# (RSTRAM, sclr) -- and yosys keeps a synchronous reset as a multiplexer in front
+# of a plain flip-flop until opt_dff merges them, which this audit does not run
+# (it would delete every constant register with them: measured at M4, 797 flops
+# became 453). So the netlist shows them as unreset, and they are named here
+# instead. The source check below holds the module to its synchronous reset.
+EXEMPT_NAMED = [
+    (re.compile(r'(^|\.)[ab]_rdata$'),
+     'the block RAM read registers, synchronously reset (rtl/rd68041_bram.sv)'),
+]
 
 FORBIDDEN = [
     (re.compile(r'^\s*initial\b'),
@@ -92,6 +110,15 @@ def strip_comments(text):
 def scan_source(files):
     """The constructs the rule forbids, by file and line."""
     bad = []
+    # The named exemption's premise: the block RAM's read registers keep their
+    # synchronous reset.
+    for path in files:
+        if os.path.basename(path) == 'rd68041_bram.sv':
+            text = strip_comments(open(path).read())
+            for reg in ('a_rdata', 'b_rdata'):
+                if not re.search(r'if \(!rst_n\) begin\s*' + reg + r" <= '0;", text):
+                    bad.append((path, 0, f'{reg} has lost its synchronous reset, '
+                                f'which EXEMPT_NAMED relies on', reg))
     for path in files:
         with open(path) as fh:
             raw = fh.read()
@@ -149,6 +176,32 @@ def yosys_netlist(files, top, build, params=()):
     return counts, out
 
 
+def named_unreset(netlist):
+    """{pattern index: bits} for the unreset flops whose names EXEMPT_NAMED allows.
+
+    write_verilog prints each bit-level flip-flop without a reset as
+        always @(posedge clk)
+          NAME[i] <= ...;
+    (an asynchronously reset one has `or negedge` in its sensitivity list).
+    """
+    counts = {}
+    lines = open(netlist).read().split('\n')
+    for i, line in enumerate(lines):
+        # The clock may be an escaped identifier, which ends in a space.
+        if not re.match(r'\s*always @\((pos|neg)edge \\?[^\s,()]+\s*\)\s*$', line):
+            continue
+        # An escaped identifier runs to the next space and may hold brackets.
+        m = re.match(r'\s*(\\\S+|[^\s\[]+)\s*(\[\d+\])?\s*<=', lines[i + 1])
+        if not m:
+            continue
+        name = m.group(1).lstrip('\\')
+        for k, (pat, _) in enumerate(EXEMPT_NAMED):
+            if pat.search(name):
+                counts[k] = counts.get(k, 0) + 1
+                break
+    return counts
+
+
 def source_has_registers(files):
     """Does the source describe any clocked storage at all?
 
@@ -187,8 +240,9 @@ def main():
 
     if not args.source_only:
         os.makedirs(args.build, exist_ok=True)
-        counts, _ = yosys_netlist(args.files, args.top, args.build,
-                                  args.param)
+        counts, netlist = yosys_netlist(args.files, args.top, args.build,
+                                        args.param)
+        named = named_unreset(netlist)
 
         reset = sum(n for c, n in counts.items() if c in RESET_FF)
         unreset = {c: n for c, n in counts.items() if c in UNRESET_FF}
@@ -204,7 +258,7 @@ def main():
                 print(f'  {c}: {n}')
             print('  Add it to RESET_FF or UNRESET_FF in tools/reset_audit.py.')
 
-        allowed = sum(EXEMPT.values())
+        allowed = sum(EXEMPT.values()) + sum(named.values())
         found = sum(unreset.values())
         if found > allowed:
             failed = True
@@ -217,7 +271,7 @@ def main():
             print(f'FAIL: audit -- {allowed} registers are exempted but only {found} '
                   f'unreset cells exist. An exemption that is no longer needed is one '
                   f'nobody will re-examine; remove it from EXEMPT.')
-        elif reset == 0 and source_has_registers(args.files):
+        elif reset + found == 0 and source_has_registers(args.files):
             failed = True
             print('FAIL: audit -- the source contains always_ff blocks but the '
                   'netlist has no flip-flops, so this check proved nothing. '
@@ -227,6 +281,8 @@ def main():
                                   if c in RESET_FF)
             print(f'  netlist: {reset} flip-flops, every one reset'
                   + (f', {allowed} exempted' if allowed else ''))
+            for k, n in sorted(named.items()):
+                print(f'           {n} bits: {EXEMPT_NAMED[k][1]}')
             print(f'           {breakdown}')
 
     if failed:

@@ -67,7 +67,7 @@ output maximum is smaller or equal, every minimum equal, the input tables shared
 large-buffer pass implies a small-buffer pass, and here the two always agree. The
 MC68LC040's column is *not* the MC68040's small-buffer one, although UM 11.8 says it
 should be: Appendix A prints a different 39 at 33 MHz and a different 40 at 33 and 40 MHz
-(`doc/manual-contradictions.md`, 3). Each column is judged as printed.
+(`doc/manual-contradictions.md`, 4). Each column is judged as printed.
 
 The MC68040 build (`FPU = 1`) is to be judged in the `040-*` columns and the MC68LC040
 build (`FPU = 0`) in the `LC040-*` ones; the bus unit is the same in both, so one
