@@ -1,0 +1,4 @@
+# Macintosh Quadra ROM images, supplied by the user and git-ignored
+# (/Inputs/ref/ROMs/). Apple firmware: never committed. Checked by the MAME
+# flows (doc/plan.md, M0 spike 4 and M14) with `sha256sum -c`.
+05ad753fb594e656cf078023ec189e09e2a7655a780de993b75b8c51ed6b09ca  Inputs/ref/ROMs/Quadra-650.ROM
