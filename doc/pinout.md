@@ -6,10 +6,11 @@ Appendix A (MC68LC040), and `MC68040UM_split/pin-assignments.csv`. This design i
 the MC68040 and the MC68LC040 (`FPU = 0`); the pins are the same set, but for the four
 differences in "MC68LC040" below.
 
-**Status: M0.** Every pin below exists on `rtl/rd68041_top.sv`. Nothing drives a bus
-cycle yet: every output is in the state UM 5.7.2 gives for reset ("all three-state
-signals are set to the high-impedance state, and all outputs, except MI, are negated"),
-with MI asserted. M1 and M2 make the bus unit drive them.
+**Status: M1.** Every pin below exists on `rtl/rd68041_top.sv`. The bus unit
+(`rtl/rd68041_biu.sv`, `doc/bus.md`) drives the master side of the bus and arbitration,
+and the reset controller (`rtl/rd68041_rstctl.sv`) RSTI and the modes sampled at reset;
+nothing above the bus unit asks it for a transfer yet. The snooper (M2) drives TA and
+MI's snoop behaviour; RSTO, IPEND and PST arrive with the core.
 
 The original has three-state and bidirectional pins. This core has none: every such pin is
 split into an input `_i`, an output `_o` and an output-enable `_oe`. An external wrapper

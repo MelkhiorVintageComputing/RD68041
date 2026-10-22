@@ -6,12 +6,8 @@
 //
 // Top level: the MC68040's pins (doc/pinout.md), split into _i/_o/_oe.
 //
-// M0: no processor yet. Every pin is in the state UM 5.7.2 gives while RSTI is
-// recognised -- "all three-state signals are set to the high-impedance state, and
-// all outputs, except MI, are negated" -- and MI is asserted while RSTI is (UM
-// 5.5.2: "MI is asserted during reset"). Out of reset nothing ever asks for the
-// bus, so MI is negated and everything else stays as it was. The bus unit (M1)
-// replaces this.
+// M1: the bus unit and the reset, and no processor yet: nothing asks for a
+// transfer.
 
 module rd68041_top #(
     // Whether the floating-point unit is built: 1 is the MC68040, 0 the
@@ -97,65 +93,110 @@ module rd68041_top #(
     output logic        tdo_oe
 );
 
-  // RSTI, synchronised to the next rising edge of BCLK (UM 5.7.2). While rst_n
-  // holds the design, RSTI reads as asserted, so the pins come out of rst_n in
-  // their reset state.
-  logic crst_n;
+  // The processor reset (UM 7.10): RSTI synchronised, the 128-clock hold, the
+  // modes sampled at reset.
+  logic       crst;
+  logic       mode_mux, mode_dle;
+  logic [2:0] mode_ipl;
 
-  rd68041_sync #(.WIDTH(1), .RESET_VAL(1'b0)) u_rsti_sync (
-      .clk   (clk),
-      .rst_n (rst_n),
-      .d     (rsti_n_i),
-      .q     (crst_n)
+  rd68041_rstctl u_rstctl (
+      .clk      (clk),
+      .rst_n    (rst_n),
+      .rsti_n_i (rsti_n_i),
+      .cdis_n_i (cdis_n_i),
+      .mdis_n_i (mdis_n_i),
+      .ipl_n_i  (ipl_n_i),
+      .crst     (crst),
+      .mode_mux (mode_mux),
+      .mode_dle (mode_dle),
+      .mode_ipl (mode_ipl)
   );
 
-  // MI is a two-state output: asserted during reset (UM 5.5.2), negated
-  // otherwise until the snoop logic (M2) has a reason to hold it. Registered,
-  // because a pin is a flop (doc/coding-standard.md).
-  always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
-      mi_n_o <= 1'b0;
-    end else begin
-      mi_n_o <= crst_n ? 1'b1 : 1'b0;
-    end
-  end
+  // The bus unit. M1: nothing asks it for a transfer yet, so it only follows
+  // arbitration -- implicit ownership while BG is asserted, idle otherwise.
+  logic         req_ready;
+  logic         rsp_valid, rsp_tci, rsp_avec, rsp_done, rsp_err;
+  logic  [1:0]  rsp_beat, rsp_lw;
+  logic [31:0]  rsp_data;
+  logic         owner;
 
-  // Everything else: released, or negated (UM 5.7.2).
-  assign a_o       = '0;
-  assign a_oe      = 1'b0;
-  assign d_o       = '0;
-  assign d_oe      = 1'b0;
-  assign tt_o      = rd68041_pkg::TT_NORMAL;
-  assign tm_o      = '0;
-  assign tln_o     = '0;
-  assign upa_o     = '0;
-  assign rw_o      = 1'b1;
-  assign siz_o     = rd68041_pkg::SIZ_LONG;
-  assign lock_n_o  = 1'b1;
-  assign locke_n_o = 1'b1;
-  assign ciout_n_o = 1'b1;
-  assign attr_oe   = 1'b0;
-  assign ts_n_o    = 1'b1;
-  assign ts_oe     = 1'b0;
-  assign tip_n_o   = 1'b1;
-  assign tip_oe    = 1'b0;
+  rd68041_biu u_biu (
+      .clk       (clk),
+      .rst_n     (rst_n),
+      .crst      (crst),
+      .req_valid (1'b0),
+      .req_ready (req_ready),
+      .req_addr  (32'h0000_0000),
+      .req_write (1'b0),
+      .req_siz   (2'b00),
+      .req_tt    (2'b00),
+      .req_tm    (3'b000),
+      .req_tln   (2'b00),
+      .req_upa   (2'b00),
+      .req_ciout (1'b0),
+      .req_lock  (1'b0),
+      .req_locke (1'b0),
+      .req_more  (1'b0),
+      .req_wdata (128'h0),
+      .lock_seq  (1'b0),
+      .rsp_valid (rsp_valid),
+      .rsp_beat  (rsp_beat),
+      .rsp_lw    (rsp_lw),
+      .rsp_data  (rsp_data),
+      .rsp_tci   (rsp_tci),
+      .rsp_avec  (rsp_avec),
+      .rsp_done  (rsp_done),
+      .rsp_err   (rsp_err),
+      .owner     (owner),
+      .a_o       (a_o),
+      .a_oe      (a_oe),
+      .d_i       (d_i),
+      .d_o       (d_o),
+      .d_oe      (d_oe),
+      .tt_o      (tt_o),
+      .tm_o      (tm_o),
+      .tln_o     (tln_o),
+      .upa_o     (upa_o),
+      .rw_o      (rw_o),
+      .siz_o     (siz_o),
+      .lock_n_o  (lock_n_o),
+      .locke_n_o (locke_n_o),
+      .ciout_n_o (ciout_n_o),
+      .attr_oe   (attr_oe),
+      .ts_n_o    (ts_n_o),
+      .tip_n_o   (tip_n_o),
+      .tip_oe    (tip_oe),
+      .ta_n_i    (ta_n_i),
+      .tea_n_i   (tea_n_i),
+      .tci_n_i   (tci_n_i),
+      .tbi_n_i   (tbi_n_i),
+      .avec_n_i  (avec_n_i),
+      .br_n_o    (br_n_o),
+      .bg_n_i    (bg_n_i),
+      .bb_n_i    (bb_n_i),
+      .bb_n_o    (bb_n_o),
+      .bb_oe     (bb_oe),
+      .mi_n_o    (mi_n_o)
+  );
+
+  // TS shares the address group's enable (specification 38 names it with
+  // them); the snooper (M2) drives TA.
+  assign ts_oe     = attr_oe;
   assign ta_n_o    = 1'b1;
   assign ta_oe     = 1'b0;
-  assign bb_n_o    = 1'b1;
-  assign bb_oe     = 1'b0;
-  assign br_n_o    = 1'b1;
   assign rsto_n_o  = 1'b1;
   assign ipend_n_o = 1'b1;
   assign pst_o     = rd68041_pkg::PST_USER_RUN;
   assign tdo_o     = 1'b0;
   assign tdo_oe    = 1'b0;
 
-  // What M0 deliberately does not read. Each goes when the unit that needs it
-  // arrives: the bus unit (M1-M2), the snooper (M2), the FPU (M11).
+  // What M1 deliberately does not read. Each goes when the unit that needs it
+  // arrives: the snooper (M2), the core (M6), the FPU (M11).
   logic unused_ok;
-  assign unused_ok = &{1'b0, pclk, a_i, d_i, tt_i, rw_i, siz_i, ts_n_i, ta_n_i,
-                       tea_n_i, tci_n_i, tbi_n_i, dle_i, sc_i, bg_n_i, bb_n_i,
-                       cdis_n_i, mdis_n_i, ipl_n_i, avec_n_i, tck_i, tms_i, tdi_i,
-                       trst_n_i, FPU != 0};
+  assign unused_ok = &{1'b0, pclk, a_i, tt_i, rw_i, siz_i, ts_n_i, dle_i, sc_i,
+                       tck_i, tms_i, tdi_i, trst_n_i, FPU != 0, mode_mux,
+                       mode_dle, mode_ipl, req_ready, rsp_valid, rsp_tci,
+                       rsp_avec, rsp_done, rsp_err, rsp_beat, rsp_lw, rsp_data,
+                       owner};
 
 endmodule

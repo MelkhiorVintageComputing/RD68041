@@ -47,6 +47,13 @@ XOR'd dual-edge output for the MC68030's half-clock bus states, and its clock wa
 limited by half-period paths through them; none of that is wanted here. A `negedge`
 in `rtl/` is a design review, not a style question.
 
+There is one, reviewed at M1: `rd68041_late_release`, a falling-edge copy of a
+rising-edge output enable, ORed with it, for BB, TA and TIP. Specification 39 releases
+those three pins 19-28 ns after the rising edge at 25 MHz -- half a period, where every
+other pin is released 9-18 ns after it (specification 38) -- and no rising-edge register
+can do that. It feeds only those pins' enables; no path in the core starts or ends on the
+falling edge. A second falling-edge register needs the same argument written down.
+
 ### Forbidden — project rules rather than tool limits
 
 | Rule | Why |
