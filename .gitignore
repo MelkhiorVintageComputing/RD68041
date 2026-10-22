@@ -1,0 +1,50 @@
+# Build and simulation output
+/build/
+*.vvp
+*.vcd
+*.fst
+*.dcp
+*.rpt
+*.jou
+*.log
+.Xil/
+
+# Vivado simulator: xvlog/xvhdl/xelab/xsim drop protobuf logs wherever they run,
+# and xsim.dir is the compiled library it keeps beside them.
+*.pb
+xsim.dir/
+
+# Quartus: a project's database and reports, which land wherever it is run
+db/
+incremental_db/
+output_files/
+*.qpf
+*.qsf
+*.qws
+*.sof
+*.pof
+*.smsg
+*.done
+
+# Questa: the compiled library and the transcript, likewise
+work/
+transcript
+modelsim.ini
+
+# ghdl
+*.cf
+*.o
+
+# Verilator
+obj_dir/
+
+# Generated test vectors: regenerated from the oracle, never committed
+/sim/vectors/
+
+# Python
+__pycache__/
+*.pyc
+
+# Macintosh Quadra ROM images: supplied by the user, never committed; hashes in
+# Inputs/sw/ROMS.sha256 (M0 spike 4, M14)
+/Inputs/ref/ROMs/

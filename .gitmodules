@@ -1,0 +1,6 @@
+[submodule "Inputs/doc/MC68030_Doc_More_Readable"]
+	path = Inputs/doc/MC68030_Doc_More_Readable
+	url = https://github.com/MelkhiorVintageComputing/MC68030_Doc_More_Readable
+[submodule "Inputs/QuadraFPGA"]
+	path = Inputs/QuadraFPGA
+	url = https://github.com/MelkhiorVintageComputing/QuadraFPGA
