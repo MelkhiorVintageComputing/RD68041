@@ -59,7 +59,7 @@ IVFLAGS := -g2012 -Wall -Wno-timescale -DTB_FPU=$(FPU)
 
 .PHONY: all help dirs lint lint-source lint-iverilog lint-verilator lint-yosys \
         lint-quartus lint-questa quartus synth impl audit sim sim-bus check \
-        check-lc spike print-rtl clean uae040 uae040-smoke cputest-gen
+        check-lc spike ucode ucode-check print-rtl clean uae040 uae040-smoke cputest-gen
 
 all: lint
 
@@ -68,6 +68,8 @@ help:
 	@echo
 	@echo "The gate:"
 	@echo "  make check       lint, audit, sim and timing, then lint and audit again with FPU=0"
+	@echo "  make ucode       regenerate rtl/gen/ and doc/checkpoint.md's tables (tools/ucode/)"
+	@echo "  make ucode-check ... or check they are up to date"
 	@echo "  make lint        elaborate every rtl module under iverilog, Verilator and yosys"
 	@echo "  make audit       prove no register initialises outside reset"
 	@echo "  make sim         the directed testbenches"
@@ -157,6 +159,17 @@ lint-yosys: dirs
 audit: dirs
 	@python3 tools/reset_audit.py --top $(TOP) --build $(BUILD) \
 	    --param FPU=$(FPU) $(RTL)
+
+# ---------------------------------------------------------------------------
+# Generated files -- M5
+# ---------------------------------------------------------------------------
+# The generated files are committed, so a build needs no Python. ucode-check is
+# the first thing `make check` runs, so they cannot drift from their source.
+ucode: dirs
+	@python3 tools/ucode/frames.py
+
+ucode-check: dirs
+	@python3 tools/ucode/frames.py --check
 
 # ---------------------------------------------------------------------------
 # Directed testbenches
@@ -261,7 +274,7 @@ timing-verbose: timing-build
 # The gate. The MC68LC040 build is elaborated and audited too, in its own
 # build directory, so that FPU=0 cannot rot unseen.
 # ---------------------------------------------------------------------------
-check: lint audit sim timing check-lc
+check: ucode-check lint audit sim timing check-lc
 	@echo "PASS: check"
 
 check-lc:
