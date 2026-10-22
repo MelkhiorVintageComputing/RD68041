@@ -97,6 +97,12 @@ help:
 	@echo "                    an MC68LC040, and check it against the manual"
 	@echo "  make cputest-gen  WinUAE's cputest corpus for the MC68040, integer and FPU"
 	@echo "                    (build/cputest/), decoded and counted"
+	@echo "  make vectors      the per-opcode sweep on the core against UAE040 (OP=alu,shift ...;"
+	@echo "                    default OP=$(VECGROUPS)); passed / failed / not built / pending M8"
+	@echo "  make vectors-all  ... every group"
+	@echo "  make ea           ... the addressing-mode sweep (OP=ea)"
+	@echo "  make cputest      the integer cputest corpus on the core (CPUTEST_SEL=ADD,MOVE.L"
+	@echo "                    CPUTEST_MAX=$(CPUTEST_MAX) CPUTEST_USER=$(CPUTEST_USER))"
 	@echo "  make qemu040      build QEMU (m68k-softmmu, build/qemu/) and the qemu040 trace plugin"
 	@echo "  make cosim-qemu-smoke  smoke040.S on QEMU's m68040, its trace compared with"
 	@echo "                    UAE040's; every known difference confirmed"
@@ -196,7 +202,8 @@ ucode-check: dirs
 # verdicts are printed in TBS order once all have finished. A testbench that
 # leaves no verdict -- killed, or crashed before writing one -- is a failure.
 # ---------------------------------------------------------------------------
-TBS := $(filter-out core_cosim_tb,$(patsubst sim/tb/%.sv,%,$(wildcard sim/tb/*_tb.sv)))
+# The oracle sweeps' benches need a stream and have their own targets.
+TBS := $(filter-out core_cosim_tb core_vec_tb core_cputest_tb,$(patsubst sim/tb/%.sv,%,$(wildcard sim/tb/*_tb.sv)))
 MODELS := $(wildcard sim/models/*.sv)
 SIMJOBS ?= 4
 
@@ -440,7 +447,7 @@ O40WRAP   := mmu_get_word_unaligned mmu_get_long_unaligned \
 O40LDFLAGS := $(addprefix -Wl$(comma)--wrap=,$(O40WRAP)) -lm
 O40CFLAGS  := -O2 -g -Wall -Wextra -I$(O40SRC)
 
-uae040: $(O40BUILD)/uae040_trace
+uae040: $(O40BUILD)/uae040_trace $(O40BUILD)/vectors_gen
 
 $(O40BUILD)/libuae040.a: $(O40SRC)/build.sh $(O40SRC)/uae040_glue.c $(O40SRC)/uae040.h
 	@mkdir -p $(O40BUILD)
@@ -478,6 +485,52 @@ uae040-smoke: $(O40BUILD)/uae040_trace $(O40SMOKE)/smoke040.bin
 	if [ $$ok -eq 1 ]; then echo "PASS: uae040-smoke"; else echo "FAIL: uae040-smoke"; exit 1; fi
 
 # ---------------------------------------------------------------------------
+# The per-opcode sweep, against UAE040 (M7)
+#
+# tools/vectors/gen.c (RD68031's, retargeted) runs each group's tests through
+# UAE040 and writes the stream sim/tb/core_vec_tb.sv replays on the core: the
+# registers, SR, the next PC and the operand accesses are compared, and every
+# test is counted as passed, failed, not built (the core halted on it) or
+# pending M8 (the oracle took an exception, or the test starts in user mode or
+# traced). It passes when nothing fails. `ea` is the addressing-mode group.
+#
+#   make vectors OP=alu        one group (or several: OP="alu shift")
+#   make vectors               OP=$(VECGROUPS)
+#   make vectors-all           every group
+#   make ea                    every addressing mode, through LEA and MOVE.L
+#
+# Not in `make check`.
+# ---------------------------------------------------------------------------
+VECGROUPS ?= all
+OP        ?= $(VECGROUPS)
+VECSHOW   ?= 15
+
+$(O40BUILD)/vectors_gen: tools/vectors/gen.c $(O40SRC)/uae040.h $(O40BUILD)/libuae040.a
+	@$(CC) $(O40CFLAGS) -o $@ $< $(O40BUILD)/libuae040.a $(O40LDFLAGS)
+
+.PHONY: vectors vectors-all ea
+vectors: dirs $(O40BUILD)/vectors_gen
+	@$(O40BUILD)/vectors_gen $(OP) > $(BUILD)/vectors.hex 2> $(BUILD)/vectors-gen.log \
+	  || { cat $(BUILD)/vectors-gen.log; exit 1; }
+	@sed 's/^/  /' $(BUILD)/vectors-gen.log
+	@iverilog $(IVFLAGS) -I sim/tb -o $(BUILD)/core_vec_tb.vvp -s core_vec_tb \
+	    $(RTL) $(MODELS) sim/tb/core_vec_tb.sv > $(BUILD)/core_vec_tb.build.log 2>&1 \
+	  || { grep -v $(NOTES) $(BUILD)/core_vec_tb.build.log; exit 1; }
+	@vvp $(BUILD)/core_vec_tb.vvp +vec=$(BUILD)/vectors.hex +faillog=$(BUILD)/vectors.fail \
+	    +show=$(VECSHOW) > $(BUILD)/core_vec_tb.log 2>&1; \
+	 grep -E '^  (FAIL|      )' $(BUILD)/core_vec_tb.log | head -$$(( $(VECSHOW) * 4 )); \
+	 grep -E '^core_vec_tb: ' $(BUILD)/core_vec_tb.log | sed 's/^core_vec_tb: /  /'; \
+	 grep -q '^PASS' $(BUILD)/core_vec_tb.log || { grep -E '^FAIL' $(BUILD)/core_vec_tb.log; \
+	   echo "  (every failure: $(BUILD)/vectors.fail)"; exit 1; }
+	@grep -E '^PASS' $(BUILD)/core_vec_tb.log
+
+vectors-all:
+	@$(MAKE) --no-print-directory vectors OP=all
+
+ea:
+	@$(MAKE) --no-print-directory vectors OP=ea
+
+# ---------------------------------------------------------------------------
 # WinUAE's cputest corpus for the MC68040
 #
 # cputestgen (built out of tree into build/cputest/gen/ by
@@ -485,8 +538,8 @@ uae040-smoke: $(O40BUILD)/uae040_trace $(O40SMOKE)/smoke040.bin
 # build/cputest/run/data/ and the FPU corpus from CPUTEST_FPU_INI into
 # build/cputest/fpu/data/, one instruction per generator run
 # (tools/cputest/generate.sh). tools/cputest/convert.py summary then decodes
-# every test and counts them (build/cputest/summary.txt). There is no bench
-# yet (M7).
+# every test and counts them (build/cputest/summary.txt). `make cputest`
+# runs the integer corpus on the core (sim/tb/core_cputest_tb.sv, M7).
 #
 #   CPUTEST_TIMEOUT=s    the generator's time limit per instruction (default 120);
 #                        one that runs out twice is listed and left out
@@ -528,6 +581,37 @@ cputest-gen: dirs $(CTBUILD)/run/stamp $(CTBUILD)/fpu/stamp
 	 grep -E '^(total|instructions|exceptions|frames|DECODE)|DECODE ERROR' $(CTBUILD)/summary.txt | sed 's/^/  /'; \
 	 if [ $$rc -eq 0 ]; then echo "PASS: cputest-gen (per instruction: $(CTBUILD)/summary.txt)"; \
 	 else echo "FAIL: cputest-gen"; exit 1; fi
+
+# The integer corpus on the core: convert.py bench samples it into
+# build/cputest/cputest.vec and core_cputest_tb replays it; every test is
+# passed, failed, not built or pending M8 (sim/tb/core_cputest_tb.sv). The FPU
+# corpus is counted and skipped (M11). Not in `make check`.
+#
+#   CPUTEST_SEL=ADD,MOVE.L   only these instructions (a bare name takes every size)
+#   CPUTEST_MAX=N            at most N tests per instruction, sampled evenly; 0 all
+#   CPUTEST_USER=run         the corpus's user-mode tests of unprivileged
+#                            instructions run in the core's supervisor mode,
+#                            A7 = USP; =pending sets them aside as pending M8
+CPUTEST_SEL  ?=
+CPUTEST_MAX  ?= 40
+CPUTEST_USER ?= run
+
+.PHONY: cputest
+cputest: dirs $(CTBUILD)/run/stamp
+	@python3 tools/cputest/convert.py bench $(CTBUILD) $(CTBUILD)/run/data/*/ \
+	    $(wildcard $(CTBUILD)/fpu/data/*/) --summary $(CTBUILD)/summary.txt \
+	    --select "$(CPUTEST_SEL)" --max $(CPUTEST_MAX) | sed 's/^/  /'
+	@iverilog $(IVFLAGS) -I sim/tb -o $(BUILD)/core_cputest_tb.vvp -s core_cputest_tb \
+	    $(RTL) $(MODELS) sim/tb/core_cputest_tb.sv > $(BUILD)/core_cputest_tb.build.log 2>&1 \
+	  || { grep -v $(NOTES) $(BUILD)/core_cputest_tb.build.log; exit 1; }
+	@vvp $(BUILD)/core_cputest_tb.vvp +vec=$(CTBUILD)/cputest.vec +mem=$(CTBUILD) \
+	    +faillog=$(CTBUILD)/cputest.fail +user=$(if $(filter run,$(CPUTEST_USER)),1,0) \
+	    > $(BUILD)/core_cputest_tb.log 2>&1; \
+	 grep -E '^  (FAIL|      )' $(BUILD)/core_cputest_tb.log | head -75; \
+	 grep -E '^core_cputest_tb: ' $(BUILD)/core_cputest_tb.log | sed 's/^core_cputest_tb: /  /'; \
+	 grep -q '^PASS' $(BUILD)/core_cputest_tb.log || { grep -E '^FAIL' $(BUILD)/core_cputest_tb.log; \
+	   echo "  (every failure: $(CTBUILD)/cputest.fail)"; exit 1; }
+	@grep -E '^PASS' $(BUILD)/core_cputest_tb.log
 
 # ---------------------------------------------------------------------------
 # QEMU's m68040, a third instruction-trace oracle (doc/oracles.md, "QEMU")

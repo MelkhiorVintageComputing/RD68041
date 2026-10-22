@@ -15,8 +15,9 @@ every instruction and counts them. The 68040's frames need nothing new: the
 corpus has no bus or address errors (no format $7), and the FP ones -- format
 $2 for an unimplemented instruction (vector 11) or data type (55), $3 for a
 post-instruction exception, $0 -- were already decoded, with the generator's
-"EA valid" flag (fpeaset). `bench` still writes RD68031's integer stream; an
-FPU set is refused there until RD68041's bench defines its stream (M7, M11).
+"EA valid" flag (fpeaset). `bench` writes RD68031's integer stream, which
+RD68041's sim/tb/core_cputest_tb.sv reads (M7); an FPU set, or an FPU test in
+an integer set, is skipped and counted until M11 defines the FPU's stream.
 
 `dump` prints decoded tests. `bench` writes OUTDIR/cputest.vec, the stream
 sim/tb/core_cputest_tb.sv runs (its format is BENCH_FORMAT below), with
@@ -711,7 +712,7 @@ until kind 3:
 
 def bench(setdir, mnemonics, out, idx, max_run=0, setno=0, tid0=0):
     """Convert the named instructions of one set into a bench stream."""
-    nrun = nskip = nsampled = ntrace = nundef = 0
+    nrun = nskip = nsampled = ntrace = nundef = nfpu = 0
     tid = tid0
 
     def bcd_ok(b):
@@ -798,10 +799,10 @@ def bench(setdir, mnemonics, out, idx, max_run=0, setno=0, tid0=0):
                     yield t["copy"][1] + i
 
         for t in decode(setdir, mn):
-            if t.get("fpu"):
-                raise SystemExit("bench: %s is an FPU test set; RD68041's bench stream for the "
-                                 "FPU is not defined yet (use summary)" % setdir)
             run = t["run"]
+            if run and t.get("fpu"):
+                run = False     # M11: the FPU's stream is not defined yet
+                nfpu += 1
             if run and t["exception"] and "trace_sr" in t["exception"]:
                 run = False     # an exception followed by a trace: two frames
                 ntrace += 1
@@ -860,7 +861,7 @@ def bench(setdir, mnemonics, out, idx, max_run=0, setno=0, tid0=0):
             tid += 1
             nrun += 1
             emit_mem(out, t["post"])
-    return nrun, nskip, nsampled, ntrace, nundef
+    return nrun, nskip, nsampled, ntrace, nundef, nfpu
 
 
 def summary(sets, sel):
@@ -948,6 +949,9 @@ def main():
                    "prefixes (ADD matches ADD.B ADD.W ADD.L); empty = all")
     b.add_argument("--max", type=int, default=0, help="at most this many tests run "
                    "per instruction, evenly sampled (0 = all)")
+    b.add_argument("--with-fpu", action="store_true", help="decode FPU sets too (their "
+                   "tests are still skipped and counted until M11)")
+    b.add_argument("--summary", default="", help="summary.txt, for the FPU sets' test counts")
     sm = sp.add_parser("summary", help="decode every test and count them")
     sm.add_argument("sets", nargs="+", help="data/<lvl>_<name> directories")
     sm.add_argument("--select", default="", help="as for bench")
@@ -968,26 +972,49 @@ def main():
         return
     sel = [x.strip().upper() for x in a.select.split(",") if x.strip()]
     os.makedirs(a.out, exist_ok=True)
-    tot = [0, 0, 0, 0, 0]
+    tot = [0, 0, 0, 0, 0, 0]
+    fpu_files = fpu_tests = 0
+    counts = {}
+    if a.summary and os.path.exists(a.summary):
+        cur = None
+        for line in open(a.summary):
+            if not line.startswith(" ") and line.rstrip().endswith("instruction files"):
+                cur = os.path.normpath(line.split(":")[0])
+            elif line.startswith("  ") and cur and " tests," in line:
+                f = line.split()
+                counts[(cur, f[0])] = int(f[1])
     with open(os.path.join(a.out, "cputest.vec"), "w") as out, \
          open(os.path.join(a.out, "cputest.idx"), "w") as idx, \
          open(os.path.join(a.out, "cputest.sets"), "w") as sets:
         sets_ok = [d for d in a.sets
                    if any(os.path.isdir(os.path.join(d, x)) for x in os.listdir(d))]
-        for si, sdir in enumerate(sets_ok):
-            hd, sub = images(sdir, a.out, si)
+        si = 0
+        for sdir in sets_ok:
+            sub = sorted(d for d in os.listdir(sdir) if os.path.isdir(os.path.join(sdir, d)))
             if sel:
                 sub = [m for m in sub if any(m.upper() == x or m.upper().split(".")[0] == x
                                              for x in sel)]
+            hd = parse_header(next(chunks(os.path.join(sdir, sub[0] if sub else os.listdir(sdir)[0], "0000.dat"))))
+            if hd["fpu_model"] and not a.with_fpu:
+                # M11: an FPU set is counted, not decoded (the FPU corpus is
+                # millions of tests); the counts are summary.txt's
+                fpu_files += len(sub)
+                fpu_tests += sum(counts.get((os.path.normpath(sdir), m), 0) for m in sub)
+                continue
+            hd, _ = images(sdir, a.out, si)
             sets.write("%d %s %x %x %x %x\n" % (si, sdir, hd["test_memory_start"],
                                                 hd["test_memory_size"], hd["super_stack_memory"],
                                                 hd["user_stack_memory"]))
             r = bench(sdir, sub, out, idx, a.max, si, tot[0])
             tot = [x + y for x, y in zip(tot, r)]
+            si += 1
         out.write("3\n")
     print("cputest: %d tests to run; %d skipped by the generator, %d sampled out, "
           "%d with a trace after an exception, %d whose result the manual leaves "
-          "undefined" % tuple(tot))
+          "undefined, %d FPU tests skipped (M11)" % tuple(tot))
+    if fpu_files:
+        print("cputest: the FPU sets skipped (M11): %d instruction files, %d tests%s" % (
+            fpu_files, fpu_tests, "" if counts else " (no summary.txt to count them)"))
 
 
 if __name__ == "__main__":
