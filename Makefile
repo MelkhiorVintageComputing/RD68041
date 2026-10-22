@@ -54,7 +54,7 @@ IVFLAGS := -g2012 -Wall -Wno-timescale -DTB_FPU=$(FPU)
 
 .PHONY: all help dirs lint lint-source lint-iverilog lint-verilator lint-yosys \
         lint-quartus lint-questa quartus synth impl audit sim sim-bus check \
-        check-lc print-rtl clean
+        check-lc print-rtl clean uae040 uae040-smoke cputest-gen
 
 all: lint
 
@@ -74,6 +74,13 @@ help:
 	@echo "  make quartus      Quartus fit and timing ($(AFAMILY) $(APART))"
 	@echo "  make lint-quartus Quartus analysis and synthesis"
 	@echo "  make lint-questa  Questa vlog + vopt"
+	@echo
+	@echo "The oracles (doc/oracles.md), minutes each, not in check:"
+	@echo "  make uae040       build the UAE040 oracle and uae040_trace (build/uae040/)"
+	@echo "  make uae040-smoke run tools/cosim/uae040/tests/smoke040.S on it, as an MC68040 and"
+	@echo "                    an MC68LC040, and check it against the manual"
+	@echo "  make cputest-gen  WinUAE's cputest corpus for the MC68040, integer and FPU"
+	@echo "                    (build/cputest/), decoded and counted"
 	@echo
 	@echo "  make clean        remove build/"
 	@echo
@@ -250,6 +257,122 @@ quartus: dirs
 lint-questa: dirs
 	@scripts/questa.sh $(BUILD) $(TOP) $(RTL)
 	@echo "  questa: ok"
+
+# ---------------------------------------------------------------------------
+# The instruction-level oracle: UAE040
+#
+# The WinUAE MC68040 core as Hatari carries it (Inputs/ref/hatari/src/cpu),
+# built out of tree into build/uae040/ (Inputs/ is immutable) by
+# tools/cosim/uae040/build.sh as one library, libuae040.a, and linked into
+# its front-ends: uae040_trace for now. RD68031's uae030 flow, retargeted;
+# doc/oracles.md has what it is trusted for.
+#
+# The library is built once and reused: build.sh is incremental, and only runs
+# again when the harness's own glue changes. The generated cores are compiled
+# at -O0/-O1, four at a time, which keeps each compile near 300 MB.
+#
+# The --wrap options let the glue see an operand the core moves in pieces (it
+# crosses a page, or it is MOVES or a locked read-modify-write) as the one
+# operand it is.
+# ---------------------------------------------------------------------------
+O40BUILD  := $(BUILD)/uae040
+O40SRC    := tools/cosim/uae040
+comma     := ,
+O40WRAP   := mmu_get_word_unaligned mmu_get_long_unaligned \
+             mmu_put_word_unaligned mmu_put_long_unaligned \
+             sfc_get_long sfc_get_word dfc_put_long dfc_put_word \
+             uae_mmu_get_lrmw uae_mmu_put_lrmw
+O40LDFLAGS := $(addprefix -Wl$(comma)--wrap=,$(O40WRAP)) -lm
+O40CFLAGS  := -O2 -g -Wall -Wextra -I$(O40SRC)
+
+uae040: $(O40BUILD)/uae040_trace
+
+$(O40BUILD)/libuae040.a: $(O40SRC)/build.sh $(O40SRC)/uae040_glue.c $(O40SRC)/uae040.h
+	@mkdir -p $(O40BUILD)
+	@echo "  uae040: building the oracle core into $(O40BUILD)"
+	@JOBS=4 sh $(O40SRC)/build.sh $(O40BUILD) > $(O40BUILD)/build.log 2>&1 \
+	  || { tail -30 $(O40BUILD)/build.log; exit 1; }
+
+$(O40BUILD)/uae040_trace: $(O40SRC)/uae040_trace.c $(O40SRC)/uae040.h $(O40BUILD)/libuae040.a
+	@$(CC) $(O40CFLAGS) -o $@ $< $(O40BUILD)/libuae040.a $(O40LDFLAGS)
+
+# The M0 smoke program, run as an MC68040 and as an MC68LC040 (-L), each
+# checked by tests/smoke040_check.py against the values and accesses the
+# manual fixes. The trace, bus and operand streams stay in build/uae040/smoke/.
+O40SMOKE := $(O40BUILD)/smoke
+
+$(O40SMOKE)/smoke040.elf: $(O40SRC)/tests/smoke040.S
+	@mkdir -p $(O40SMOKE)
+	@$(CROSS)gcc -mcpu=68040 -nostdlib -Wl,-Ttext=0 -Wl,--build-id=none -o $@ $<
+
+$(O40SMOKE)/smoke040.bin: $(O40SMOKE)/smoke040.elf
+	@$(CROSS)objcopy -O binary $< $@
+
+uae040-smoke: $(O40BUILD)/uae040_trace $(O40SMOKE)/smoke040.bin
+	@ok=1; for v in 040 lc040; do \
+	  f=; c=; [ $$v = lc040 ] && { f=-L; c=--lc; }; \
+	  $(O40BUILD)/uae040_trace $$f -m 256 -B $(O40SMOKE)/$$v.bus -O $(O40SMOKE)/$$v.ops \
+	      $(O40SMOKE)/smoke040.bin 4000 > $(O40SMOKE)/$$v.trc 2> $(O40SMOKE)/$$v.trace.log \
+	    || { echo "FAIL: uae040_trace ($$v)"; cat $(O40SMOKE)/$$v.trace.log; ok=0; continue; }; \
+	  python3 $(O40SRC)/tests/smoke040_check.py $$c $(O40SMOKE)/smoke040.elf $(O40SMOKE)/$$v.trc \
+	      $(O40SMOKE)/$$v.bus $(O40SMOKE)/$$v.ops > $(O40SMOKE)/$$v.check 2>&1; \
+	  grep -E '^  (FAIL|quirk)' $(O40SMOKE)/$$v.check | sort -u; \
+	  tail -1 $(O40SMOKE)/$$v.check | sed 's/^/  /'; \
+	  grep -q '^PASS' $(O40SMOKE)/$$v.check || ok=0; \
+	done; \
+	if [ $$ok -eq 1 ]; then echo "PASS: uae040-smoke"; else echo "FAIL: uae040-smoke"; exit 1; fi
+
+# ---------------------------------------------------------------------------
+# WinUAE's cputest corpus for the MC68040
+#
+# cputestgen (built out of tree into build/cputest/gen/ by
+# tools/cputest/build.sh) writes the integer corpus from CPUTEST_INI into
+# build/cputest/run/data/ and the FPU corpus from CPUTEST_FPU_INI into
+# build/cputest/fpu/data/, one instruction per generator run
+# (tools/cputest/generate.sh). tools/cputest/convert.py summary then decodes
+# every test and counts them (build/cputest/summary.txt). There is no bench
+# yet (M7).
+#
+#   CPUTEST_TIMEOUT=s    the generator's time limit per instruction (default 120);
+#                        one that runs out twice is listed and left out
+#
+# Each corpus is regenerated only when its ini or the generator changes.
+# ---------------------------------------------------------------------------
+CTBUILD         := $(BUILD)/cputest
+CPUTEST_INI     ?= tools/cputest/cputestgen.ini
+CPUTEST_FPU_INI ?= tools/cputest/cputestgen-fpu.ini
+
+$(CTBUILD)/gen/cputestgen: tools/cputest/build.sh tools/cputest/compat/cputest_compat.h \
+                           tools/cputest/compat/ua_stub.cpp
+	@mkdir -p $(CTBUILD)/gen
+	@echo "  cputest: building cputestgen into $(CTBUILD)/gen"
+	@JOBS=4 sh tools/cputest/build.sh $(CTBUILD)/gen > $(CTBUILD)/gen.log 2>&1 \
+	  || { tail -30 $(CTBUILD)/gen.log; exit 1; }
+
+$(CTBUILD)/run/stamp: $(CTBUILD)/gen/cputestgen $(CPUTEST_INI) tools/cputest/generate.sh
+	@rm -rf $(CTBUILD)/run
+	@mkdir -p $(CTBUILD)/run/data
+	@cp $(CPUTEST_INI) $(CTBUILD)/run/cputestgen.ini
+	@echo "  cputest: generating the integer corpus from $(CPUTEST_INI), one instruction at a time"
+	@set -o pipefail; sh tools/cputest/generate.sh $(CTBUILD)/gen/cputestgen $(CPUTEST_INI) $(CTBUILD)/run int \
+	  | sed 's/^/  /'
+	@touch $@
+
+$(CTBUILD)/fpu/stamp: $(CTBUILD)/gen/cputestgen $(CPUTEST_FPU_INI) tools/cputest/generate.sh
+	@rm -rf $(CTBUILD)/fpu
+	@mkdir -p $(CTBUILD)/fpu/data
+	@cp $(CPUTEST_FPU_INI) $(CTBUILD)/fpu/cputestgen.ini
+	@echo "  cputest: generating the FPU corpus from $(CPUTEST_FPU_INI), one instruction at a time"
+	@set -o pipefail; sh tools/cputest/generate.sh $(CTBUILD)/gen/cputestgen $(CPUTEST_FPU_INI) $(CTBUILD)/fpu fpu \
+	  | sed 's/^/  /'
+	@touch $@
+
+cputest-gen: dirs $(CTBUILD)/run/stamp $(CTBUILD)/fpu/stamp
+	@python3 tools/cputest/convert.py summary $(CTBUILD)/run/data/*/ $(CTBUILD)/fpu/data/*/ \
+	    > $(CTBUILD)/summary.txt 2>&1; rc=$$?; \
+	 grep -E '^(total|instructions|exceptions|frames|DECODE)|DECODE ERROR' $(CTBUILD)/summary.txt | sed 's/^/  /'; \
+	 if [ $$rc -eq 0 ]; then echo "PASS: cputest-gen (per instruction: $(CTBUILD)/summary.txt)"; \
+	 else echo "FAIL: cputest-gen"; exit 1; fi
 
 print-rtl:
 	@echo $(RTL)
