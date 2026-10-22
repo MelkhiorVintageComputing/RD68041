@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: CERN-OHL-S-2.0
+# Copyright 2026 Romain Dolbeau
+# Source location: https://github.com/MelkhiorVintageComputing/RD68041
+#
+# Where QEMU's m68040 (B) and UAE040 (A) part on tools/cosim/uae040/tests/
+# smoke040.S, each confirmed on every `make cosim-qemu-smoke`
+# (tools/cosim/qemu040/compare.py --expect). One "<label> <field>" a line,
+# shell patterns; doc/oracles.md ("QEMU") has the evidence and which of the
+# two the manual supports.
+#
+# Reset: FP0-FP7 are NaN in QEMU, zero in UAE040. UM 8.2.10 does not say.
+_start          fp[0-7][ehl]
+# MOVEC of all ones to ITT0 and TC reads back all ones in QEMU: it does not
+# clear the reserved bits (UM 3.1.2, 3.1.3; UAE040 does).
+L_int+1a        d5
+L_int+2e        d6
+# Access error frame (format $7): QEMU stacks the fault address in the
+# effective address field at +$08, UAE040 0 (UM 8.4.6.1).
+aerr+10         a3
+# PTESTW: QEMU's MMUSR has no M (UM 3.1.4: a write search sets it; UAE040 does).
+L_ptest         d4
+# A DTTR over $00xxxxxx with S ignored: QEMU still translates through the tables
+# (reads PA $30000, not $20000).
+L_pflush+10     d4
+L_pflush+10     sr
+# No data cache in QEMU: CINVA cannot lose the dirty line.
+L_cb3           d2
+L_cb3           sr
+# FSIN: QEMU executes it, the MC68040 does not implement it (UM table 9-10:
+# vector 11, format $2; UAE040 traps), and what follows differs with it.
+fline           pc
+L_fsin          *

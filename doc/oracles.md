@@ -8,9 +8,10 @@ counterparts, chosen in `doc/plan.md` §3:
 |---|---|---|---|
 | 1 | **UAE040**, the WinUAE MC68040 core (Hatari's copy) | instructions, the programmer's model at every boundary, the MMU's table searches and faults, the data cache's copyback behaviour, the FPU's results and its unimplemented-instruction traps | M0 spike 1: **go, with caveats** (below) |
 | 1b | **cputest**, WinUAE's tester, `cpu=68040`, integer and `fpu=68040` | bulk single-instruction vectors, integer and FPU, checked against real processors by its author | M0 spike 2: **go, with caveats** (below) |
-| 1c | QEMU `-cpu m68040` | a third opinion on instructions; weak on frames | M0 spike 3, pending |
+| 1c | QEMU `-cpu m68040` | a third opinion on integer instructions; weak on frames, no caches, MMU and FPU only roughly | M0 spike 3: **go, with caveats** (below) |
 | 1d | Berkeley TestFloat/SoftFloat | the FPU datapath's rounding | from M11 |
-| 4 | MAME's m68040 in a Macintosh Quadra | whole-system behaviour | M0 spike 4, pending |
+| 3 | Linux 7.2.9 (`CONFIG_M68040`) on QEMU's `virt` | validates the guest kernels rd-virt will run | M0 spike 5: **go** (below) |
+| 4 | MAME's m68040 in a Macintosh Quadra | whole-system behaviour | M0 spike 4: **go, with caveats** (below; one more ROM needed) |
 
 This file records:
 - what each oracle is and how it is configured;
@@ -307,3 +308,192 @@ a larger map is the first thing to try at M7.
   with no FPU) gives FP opcodes plain F-line format $0 frames, not UM A.5's format $4 --
   that is cputest's model of an FPU-less part, not an LC040's. UAE040 `-L` is the oracle
   for format $4.
+
+---
+
+## QEMU: the m68040 of QEMU 11.1.2 (a third instruction trace) -- M0 spike
+
+**What.** QEMU's `qemu-system-m68k -cpu m68040` (`Inputs/ref/qemu`, v11.1.2), run on its
+`virt` board, traced by a TCG plugin. It has no MC68LC040 model (`-cpu help`: m68000 to
+m68060 and ColdFires), no caches, and executes the whole 68881 instruction set itself.
+The plugin links nothing of QEMU's but its plugin API, and is GPL-2.0-or-later like the
+other harnesses; the comparison script only reads traces.
+
+### The harness (`tools/cosim/qemu040/`)
+
+| File | What |
+|---|---|
+| `build.sh` | exports the tree (`git archive`) into `build/qemu/src`, configures out of tree in `build/qemu/obj` (`m68k-softmmu`, `--enable-plugins`, no UI, no tools, no docs), installs into `build/qemu/inst`. About 2 minutes at `-j4` from clean |
+| `qemu040.c` | the plugin, `build/qemu040/libqemu040.so`: the `.trc`, an operand stream, or an instruction count |
+| `compare.py` | compares two `.trc`s record by record, resynchronising on the PC; `--expect` a list of known differences |
+| `smoke040.quirks` | the differences expected on `smoke040.S` |
+
+`make qemu040` builds both; `make cosim-qemu-smoke` runs `tools/cosim/uae040/tests/smoke040.S`
+on QEMU and on UAE040 (`make uae040-smoke` first) and compares the traces.
+
+**Build quirks.** QEMU's configure refuses an exported tree without the `keycodemapdb`
+subproject that a release tarball carries: `build.sh` copies the release's subprojects from
+RD68031's unpacked `qemu-11.1.2` tarball, and keeps downloads enabled because configure's
+Python venv wants the `wheel` package, which this host lacks (fetched from PyPI into
+`build/qemu/obj/pyvenv`). ninja is not installed: RD68031's copy is used.
+
+**Running a bare-metal image.** `-M virt -cpu m68040 -m 1M -kernel prog.elf`: the board
+loads the ELF and starts at its entry point in the reset state, with no SSP. The plugin
+(`reset=on`, the default) then performs the reset exception's loads itself before the first
+instruction -- SSP from physical 0 and PC from physical 4 (UM 8.2.10) -- so the program runs
+as it does under `uae040_trace`. The board writes its bootinfo after the ELF's `_end`; a
+program must not expect zeroes there. The run ends, as `uae040_trace`'s does, at the first
+BRA to itself.
+
+**The trace** is `uae040_trace`'s `.trc`, nfield 58, same order, so every reader of UAE040's
+traces reads it. QEMU's plugin interface exposes its gdbstub's registers only: D0-D7, A0-A6,
+the active A7, SR, PC, FP0-FP7, FPCR, FPSR. Every other field is written **`x`** -- an
+unknown digit to `$fscanf("%h")`, skipped by `compare.py`:
+- USP, ISP, MSP: the active A7 goes into the one SR.S/SR.M select, the other two are `x`;
+- VBR, CACR, SFC, DFC, TC, URP, SRP, ITT0/1, DTT0/1, MMUSR: `x`;
+- FPIAR: `x` (the gdbstub always reads it as 0).
+The PC is the instruction's own address (QEMU's PC register is brought up to date only at
+block boundaries). The operand stream (`ops=`) is `uae040_trace -O`'s format with `x` for
+the function code and `E x` at each exception (a plugin is not told the vector). It carries
+only the accesses instructions make: exception frames, the vector fetch, RTE's frame
+reads and table searches are absent. `count=FILE` counts instructions, at full speed.
+
+**The condition codes.** Read in the middle of a translation block, SR's condition codes
+are stale (a MOVEQ #0 seen with Z clear). QEMU is therefore always run with
+`-accel tcg,one-insn-per-tb=on`; with it, SR agrees with UAE040 at every boundary of the
+smoke program.
+
+### The M0 spike
+
+`make cosim-qemu-smoke`: 117 instructions on QEMU, 130 on UAE040 (the 13 of the FSIN
+handler, below), compared after resynchronisation. D0-D7, A0-A6, the active stack pointer,
+SR, FPCR, FPSR and FP0-FP7 agree at every common boundary except in the cases below, each
+listed in `smoke040.quirks` and confirmed on every run. The access error's format $7 frame
+gives the same format word ($7008) and SSW ($0505) in both; MOVEC to CACR, the MSP/ISP/VBR
+reads, the three-level table search with its remap, the page fault, its RTE restart, PFLUSH,
+MOVE16 and the FP arithmetic and FMOVEM all agree.
+
+| Where (`smoke040.S`) | UAE040 | QEMU | The manual |
+|---|---|---|---|
+| reset | FP0-FP7 = 0 | FP0-FP7 = NaN ($7FFF FFFFFFFF FFFFFFFF) | UM 8.2.10 does not say: both are allowed |
+| MOVEC $FFFFFFFF to ITT0, back | $FFFFE364 | $FFFFFFFF | UM 3.1.3: the reserved bits read as zero -- **QEMU wrong** |
+| MOVEC $7FFF to TC, back | $4000 | $7FFF | UM 3.1.2: bits 13-0 read as zero -- **QEMU wrong** |
+| format $7 frame, the EA field (+$08) | 0 | the fault address | UM 8.4.6.1; to settle at M10 |
+| PTESTW of a resident page, MMUSR | $00030011 (M) | $00030001 | UM 3.1.4: a write search sets M -- **QEMU wrong** |
+| DTT0 $0000C040 (base 0, mask 0, S ignored) | not translated: PA $20000 | translated through the tables: PA $30000 | UM 3.1.3 -- **QEMU wrong** for this TTR |
+| CINVA of a dirty copyback line | the write is lost | kept (no data cache) | UM 4.5 -- QEMU has no caches |
+| FSIN | vector 11, format $2, handled | executed: a result in FP4, no exception | UM table 9-10: unimplemented on the 040 -- **QEMU wrong** |
+
+**Trusted for:** integer instructions and their condition codes in supervisor and user
+mode, outside the MMU and the caches; MOVEM, bit fields, MUL/DIV, the 040's MOVE16; the
+results of the FP instructions the MC68040 implements (no FPSP is needed on QEMU).
+
+**Not authoritative for:** anything the trace writes as `x`; the control registers'
+reserved bits; transparent translation and PTEST's status; caches and
+CINV/CPUSH (none); exception frames beyond the format word and SSW, and their bus accesses
+(not visible); the FPU's unimplemented instructions and data types (QEMU implements them,
+so it can never stand in for the FPSP traps: UAE040 is the reference there); the
+MC68LC040 (no model). A third opinion at M7, not an arbiter.
+
+**Verdict: go, with caveats** -- the trace works and lines up with UAE040's; its value is
+the integer ISA.
+
+---
+
+## MAME's Quadra: the user's Quadra 650 ROM on MAME's m68040 -- M0 spike
+
+**Which machine.** The ROM the user supplied (`Inputs/ref/ROMs/Quadra-650.ROM`, sha256 in
+`Inputs/sw/ROMS.sha256`) is, by CRC and SHA-1, MAME's `f1acad13.rom` (CRC 4e70e3c0,
+SHA-1 f2a9ce38..., "Version 23F2"), the default BIOS of the `macqd800` set in
+`src/mame/apple/macquadra800.cpp`. Its clones share it: `macqd650` (Quadra 650: an
+MC68040 at 33 MHz), `macqd610`, and `macct650`/`macct610` (Centris 650/610: an
+**MC68LC040**). One ROM so gives both RD68041 configurations, `quadra` and `quadra-lc`.
+
+**MAME also needs `342s0440-b.bin`** (1 KB, CRC cffb33eb, SHA-1 4a35a446...), the firmware
+of the ADB modem's PIC microcontroller, which MAME runs at low level. It is Apple
+firmware too and was not supplied. Without it MAME refuses to start; with a **zero-filled
+stand-in** (made by the Makefile in `build/` when `Inputs/ref/ROMs/342s0440-b.bin` is
+absent) MAME warns about the checksum and runs.
+
+**The build** (`make mame-quadra`, `sim/mame/build.sh`): RD68031's recipe -- a copy of
+`Inputs/ref/mame` in `build/mame/src`, `SUBTARGET=quadra SOURCES=src/mame/apple/macquadra800.cpp`,
+SDL headers from RD68031's unprivileged prefix, `-j2`, a guard that stops the build under
+3 GB available. 22 minutes; about 1,400 compile units (the driver pulls in the NuBus card
+library and the SCSI devices). MAME is not patched.
+
+**The run** (`make quadra-m68040`, `sim/mame/quadra.sh`, `sim/mame/quadra.lua`): headless,
+`-video none -sound none -nothrottle`, a fresh PRAM each time, the screen saved as a PNG
+every emulated second and the PC and SR logged. `-wavwrite` keeps the sound.
+
+### The M0 spike
+
+| | Quadra 650 (`macqd650`, m68040) | Centris 650 (`macct650`, 68LC040) |
+|---|---|---|
+| 0-2 s | sound in the first two seconds of the recording, then silence but for a short blip at 4 s: taken to be the startup chime (not listened to) | |
+| 1-5 s | black screen, the ROM's tests and set-up (PC in the ROM, $408xxxxx) | the same |
+| from 6 s | the grey desktop pattern; the ROM waits in a loop at $4080A870 with interrupts enabled, testing a flag an interrupt is to clear -- by its place in the boot, most likely ADB initialisation | the same, from 7 s |
+| speed | 15 emulated seconds in 4.7 s wall (350 %); 120 s in 38 s | |
+
+The run is deterministic: two runs give the same PCs and the same PNGs, so a screen hash
+is a valid check (`sim/mame/quadra-m68040.expect`). With the stand-in firmware the ADB
+modem never answers, which is the likely reason the boot stops before the "?" disk:
+the ROM got through its POST, the chime, the video and the desktop pattern on MAME's
+m68040 (and its 68LC040), **with no fix needed** to MAME's CPU so far.
+
+**What is needed next** (no OS media was fetched):
+- `342s0440-b.bin`, the ADB modem firmware, from the user, to reach the "?" disk;
+- a serial console: the SCC's `modem` and `printer` ports take MAME's `null_modem`
+  (`-modem null_modem -bitb socket.127.0.0.1:PORT`), RD68031's `drive.py` scheme;
+- for NetBSD/mac68k or Linux/m68k: both start from a Mac OS application (the NetBSD
+  Booter, Penguin), so a SCSI disk image (`-hard1`, `.chd`/`.hd`) with System 7.1-7.6 or
+  8.1, the booter and a kernel and root (a NetBSD/mac68k install set or a Debian m68k
+  image), and the booter set to a serial console. Mac OS itself would be checked by screen
+  hashes.
+
+**Not authoritative for:** anything beyond MAME's own model of the machine; the bus
+(MAME has no 040 bus cycles); cycle timing.
+
+**Verdict: go, with caveats** -- the machine boots MAME's m68040 and 68LC040 from the
+user's ROM to the desktop pattern; reaching the "?" disk and a console needs the ADB
+firmware and OS media above.
+
+---
+
+## Linux on QEMU's virt (the guest kernel for rd-virt) -- M0 spike
+
+**What.** RD68031's rd-virt guest rebuilt for the MC68040: Linux 7.2.9 and BusyBox
+1.38.0, pinned by sha256 in `Inputs/sw/MANIFEST` (the same files and hashes as RD68031's;
+the tarballs were copied from RD68031's download directory and verified). In
+`sim/virt/linux/`, from RD68031's:
+- `rd-virt.config`, over `allnoconfig`: `VIRT`, `M68040` alone (no `M68030`, so the kernel's
+  C is built for the 040), and **`M68KFPU_EMU` off**. With `M68040` the kernel always links
+  the M68040FPSP (`arch/m68k/fpsp040`);
+- `build.sh` (BusyBox static with `-mcpu=68040`; a check that the config took);
+- `init`, `cpio.list`, `commands.script` (expecting `68040` and `-rd040`, and floating
+  point in awk: `atan2`, `sin`, `exp`, `log`);
+- `qemu-run.py`: boots QEMU with the console on stdio, types the script, waits for the
+  power-off.
+
+`make virt-qemu` builds the guest once (`-j4`, alone: 76 s for the kernel and BusyBox) and
+boots it on `build/qemu` (`-M virt -cpu m68040 -m 128M`, `lpj=250000 rdvirt.shell`).
+
+### The M0 spike
+
+The kernel boots to the shell (`CPU: 68040`, `MMU: 68040`, `FPU: 68040` in
+`/proc/cpuinfo`), every command of the script answers as expected -- awk's `3.141593`
+and `fp 3.55975 2.30259`, the md5 of `seq`, the goldfish tty's input -- and it powers off
+through virt-ctrl: **about 90.9 M instructions** (the plugin's count; 144 M without
+`lpj=`), 1.1 s wall. The count varies by a few tens of thousands from run to run, with or
+without `-icount shift=0,sleep=off`: the console input arrives at host-dependent times.
+
+**Caveats:**
+- On QEMU the FPSP is linked but **never runs**: QEMU executes FSIN, FETOX, FLOGN and
+  FATAN itself. The same kernel on UAE040 or the core will trap them to the FPSP, which is
+  the point of running it there (M11, M13).
+- **The MC68LC040** needs `CONFIG_M68KFPU_EMU=y` as well: the kernel's FP emulation takes
+  the F-line traps when the bootinfo reports no FPU (rd-virt leaves `BI_FPUTYPE` at 0, as
+  RD68031 found an 030 kernel needs). QEMU cannot run that case (no LC040 model); its first
+  run will be on rd-virt with UAE040 `-L`. RD68031's cautions about the emulator's
+  transcendental placeholders apply.
+
+**Verdict: go.**

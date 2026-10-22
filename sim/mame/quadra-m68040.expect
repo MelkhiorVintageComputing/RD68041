@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: CERN-OHL-S-2.0
+# Copyright 2026 Romain Dolbeau
+# Source location: https://github.com/MelkhiorVintageComputing/RD68041
+#
+# The screens `make quadra-m68040` accepts as the end of the boot, one a line:
+#   <machine> <sha256 of the PNG, first 16 hex digits> <what it shows>
+# MAME is deterministic: the same build, ROMs and options give the same
+# screen. The PNGs themselves are never committed (Apple firmware output).
+# With the zero-filled stand-in for the ADB modem's PIC firmware (no
+# 342s0440-b.bin supplied), the ROM stops in ADB initialisation on the grey
+# desktop pattern (doc/oracles.md, "MAME's Quadra").
+macqd650 c8702c3418f7f4b4 grey desktop, ADB initialisation waiting (stand-in ADB firmware)
+macct650 a85547398b82898f grey desktop, ADB initialisation waiting (stand-in ADB firmware)

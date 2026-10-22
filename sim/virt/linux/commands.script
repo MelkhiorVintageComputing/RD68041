@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: CERN-OHL-S-2.0
+# Copyright 2026 Romain Dolbeau
+# Source location: https://github.com/MelkhiorVintageComputing/RD68041
+#
+# The scripted command set of `make virt-qemu` (sim/virt/linux/qemu-run.py):
+# `expect <text>` waits for the text on the console, `send <text>` types it
+# (\n is a newline). The kernel is booted with rdvirt.shell, so /init ends in
+# a shell on the console. Typing goes through the goldfish-tty's receive
+# interrupt and its DMA into RAM, which the boot alone never exercises.
+# The awk lines are floating point in a static glibc built for the 68881/2
+# instruction set: on an MC68040 its FATAN, FSIN, FETOX and FLOGN are
+# unimplemented and are emulated by the kernel's M68040FPSP (on the part, and
+# on UAE040; QEMU's m68040 executes them itself -- doc/oracles.md).
+expect awk float: 3.141593
+expect rd-virt: shell
+expect # 
+send echo sum $((6*7)) product $((123*457))\n
+expect sum 42 product 56211
+send uname -m -r\n
+expect 7.2.9-rd040 m68k
+send grep -c virtio /proc/interrupts; grep CPU: /proc/cpuinfo\n
+expect 68040
+send awk 'BEGIN{print "fp", sin(1)+exp(1), log(10)}'\n
+expect fp 3.55975 2.30259
+send seq 1 200 | md5sum\n
+expect 304f7b9574921ad21a2bc72f200483d7
+send echo hello > /tmp.txt; cat /tmp.txt; wc -c < /tmp.txt\n
+expect 6
+send ls /sys/class/rtc\n
+expect rtc0
+send echo $(for i in 1 2 3; do echo loop$i; done | sort -r)\n
+expect loop3 loop2 loop1
+send echo done\n
+expect done
+send poweroff -f\n

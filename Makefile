@@ -600,6 +600,61 @@ virt-qemu: $(Q040PLUG) $(VGUEST040)/vmlinux $(VGUEST040)/initramfs.cpio.gz
 	 if [ $$rc -eq 0 ]; then echo "PASS: virt-qemu (console in $(VGUEST040)/qemu.console)"; \
 	 else echo "FAIL: virt-qemu (console in $(VGUEST040)/qemu.console)"; exit 1; fi
 
+# ---------------------------------------------------------------------------
+# MAME's Quadra (doc/oracles.md, "MAME's Quadra"; the core goes in at M14)
+#
+# MAME with only macquadra800.cpp (Quadra 650/610/800, Centris 650/610),
+# built from a copy of Inputs/ref/mame by sim/mame/build.sh (once; heavy,
+# -j2, alone, about 25 minutes). The ROM path is made in build/mame/roms:
+#   macqd800/f1acad13.rom   the user's Inputs/ref/ROMs/Quadra-650.ROM, checked
+#                           against Inputs/sw/ROMS.sha256 (MAME's 23F2 BIOS)
+#   macqd800/342s0440-b.bin the ADB modem's PIC firmware: Inputs/ref/ROMs/
+#                           342s0440-b.bin if the user supplies it, else a
+#                           zero-filled stand-in (MAME warns, and runs)
+# Apple firmware: nothing here is committed or copied outside build/.
+#
+#   make quadra-m68040     QUADRA_MACHINE (macqd650: the Quadra 650, MAME's
+#                          m68040; macct650: the Centris 650, its 68LC040) run
+#                          headless with no disk for QUADRA_SECONDS emulated
+#                          seconds; passes when the last screens are stable and
+#                          listed in sim/mame/quadra-m68040.expect
+# ---------------------------------------------------------------------------
+MAMEB          := $(BUILD)/mame
+MAMEQ          := $(MAMEB)/src/quadra
+MAMEQROMS      := $(MAMEB)/roms/macqd800
+QUADRA_MACHINE ?= macqd650
+QUADRA_SECONDS ?= 15
+
+$(MAMEQ): sim/mame/build.sh
+	@echo "  mame-quadra: building MAME's macquadra800 driver into $(MAMEB)/src (-j2, alone; 25 min from clean)"
+	@JOBS=2 bash sim/mame/build.sh $(MAMEB) | sed 's/^/  /'
+
+$(MAMEQROMS)/f1acad13.rom: Inputs/ref/ROMs/Quadra-650.ROM Inputs/sw/ROMS.sha256
+	@sha256sum --quiet -c Inputs/sw/ROMS.sha256
+	@mkdir -p $(MAMEQROMS)
+	@cp $< $@
+
+$(MAMEQROMS)/342s0440-b.bin:
+	@mkdir -p $(MAMEQROMS)
+	@if [ -f Inputs/ref/ROMs/342s0440-b.bin ]; then cp Inputs/ref/ROMs/342s0440-b.bin $@; \
+	 else echo "  quadra: no 342s0440-b.bin (the ADB modem's firmware): a zero-filled stand-in"; \
+	      head -c 1024 /dev/zero > $@; fi
+
+mame-quadra: $(MAMEQ)
+
+quadra-m68040: $(MAMEQ) $(MAMEQROMS)/f1acad13.rom $(MAMEQROMS)/342s0440-b.bin
+	@MAMEDIR=$(CURDIR)/$(MAMEB) bash sim/mame/quadra.sh $(QUADRA_MACHINE) $(CURDIR)/$(MAMEB)/run/$(QUADRA_MACHINE) \
+	    $(QUADRA_SECONDS) || { tail -5 $(MAMEB)/run/$(QUADRA_MACHINE)/mame.out; exit 1; }
+	@D=$(MAMEB)/run/$(QUADRA_MACHINE); grep -h '^emulated time\|^Average speed\|^wall' $$D/mame.out | sed 's/^/  /'; \
+	 awk '{print "t " $$1 " pc " $$2 " sr " $$3 " screen " $$4}' $$D/samples.txt | uniq -f7 -c \
+	   | awk '{c = $$1; $$1 = ""; print "  " c " samples from" $$0}'; \
+	 last=$$(tail -1 $$D/samples.txt | cut -d' ' -f4); \
+	 n=$$(tail -3 $$D/samples.txt | cut -d' ' -f4 | sort -u | wc -l); \
+	 what=$$(awk -v m=$(QUADRA_MACHINE) -v h=$$last '$$1 == m && $$2 == h { $$1 = $$2 = ""; print substr($$0, 3) }' \
+	        sim/mame/quadra-m68040.expect); \
+	 if [ $$n -eq 1 ] && [ -n "$$what" ]; then echo "PASS: quadra-m68040 ($(QUADRA_MACHINE): $$what; $$D/snap/)"; \
+	 else echo "FAIL: quadra-m68040 (last screen $$last, not stable or not in sim/mame/quadra-m68040.expect; $$D/snap/)"; exit 1; fi
+
 print-rtl:
 	@echo $(RTL)
 

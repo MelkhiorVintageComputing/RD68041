@@ -1,0 +1,28 @@
+#!/bin/sh
+# SPDX-License-Identifier: CERN-OHL-S-2.0
+# Copyright 2026 Romain Dolbeau
+# Source location: https://github.com/MelkhiorVintageComputing/RD68041
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+echo "=============================================="
+echo " RD68041 rd-virt initramfs: hello from /init"
+echo "=============================================="
+uname -a
+cat /proc/cpuinfo
+cat /proc/interrupts
+free
+ls /sys/bus/platform/devices | head -20
+cat /sys/class/rtc/rtc0/time 2>/dev/null
+echo "sum test: $((6*7))"
+echo "awk float: $(awk 'BEGIN{printf "%.6f", atan2(1,1)*4}')"
+# With rdvirt.shell on the command line (make virt-qemu), a shell on the
+# console, for the scripted command set; otherwise power off here.
+case "$(cat /proc/cmdline)" in
+*rdvirt.shell*)
+	echo "rd-virt: shell"
+	exec /bin/sh
+	;;
+esac
+echo "powering off"
+poweroff -f
