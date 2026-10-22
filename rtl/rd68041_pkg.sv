@@ -84,6 +84,22 @@ package rd68041_pkg;
   localparam logic [4:0] OP_ADDA  = 5'd13;  // B + A at 32 bits, no flags (ADDA, SUBQ to An...)
   localparam logic [4:0] OP_SUBA  = 5'd14;
   localparam logic [4:0] OP_CCR   = 5'd15;  // ANDI/ORI/EORI to CCR: CCR op= the immediate
+  localparam logic [4:0] OP_SHIFT = 5'd16;  // fn: {left, kind}; B shifted by A (rd68041_shifter)
+  localparam logic [4:0] OP_NEG   = 5'd17;  // 0 - B
+  localparam logic [4:0] OP_NEGX  = 5'd18;  // 0 - B - X
+  localparam logic [4:0] OP_NOT   = 5'd19;
+  localparam logic [4:0] OP_ADDX  = 5'd20;  // B + A + X
+  localparam logic [4:0] OP_SUBX  = 5'd21;  // B - A - X
+  localparam logic [4:0] OP_SCC   = 5'd22;  // $FF if cond, else $00
+  localparam logic [4:0] OP_DBCC  = 5'd23;  // B.W - 1, and the branch unless cond or -1
+  localparam logic [4:0] OP_BIT   = 5'd24;  // fn: 0 BTST 1 BCHG 2 BCLR 3 BSET; bit A of B
+  localparam logic [4:0] OP_MUL   = 5'd25;  // fn: {long, signed, 64-bit}
+  localparam logic [4:0] OP_DIV   = 5'd26;  // fn: {long, signed, 64-bit dividend}
+  localparam logic [4:0] OP_EXG   = 5'd27;  // result A, second result B
+  localparam logic [4:0] OP_TOCCR = 5'd28;  // the CCR from A's low five bits
+  localparam logic [4:0] OP_BCD   = 5'd29;  // fn: 0 ABCD, 1 SBCD, 2 NBCD
+  localparam logic [4:0] OP_LINK  = 5'd30;  // result the address, second result the address + imm
+  localparam logic [4:0] OP_MOVEP = 5'd31;  // fn: {store, -, byte}: B's byte fn[1:0] in or out
 
   // How the condition codes are set (PRM 3.4, Table 3-18).
   localparam logic [2:0] CC_NONE  = 3'd0;
@@ -92,6 +108,24 @@ package rd68041_pkg;
   localparam logic [2:0] CC_SUB   = 3'd3;   // X N Z V C of a subtract
   localparam logic [2:0] CC_CMP   = 3'd4;   // N Z V C of a subtract, X kept
   localparam logic [2:0] CC_SET   = 3'd5;   // the CCR operations
+
+  // Control registers, for MOVEC, MOVE USP and MOVE from SR (UM 2.2, 3.1, 4.2).
+  localparam logic [3:0] CR_SFC  = 4'd0;
+  localparam logic [3:0] CR_DFC  = 4'd1;
+  localparam logic [3:0] CR_CACR = 4'd2;
+  localparam logic [3:0] CR_TC   = 4'd3;
+  localparam logic [3:0] CR_ITT0 = 4'd4;
+  localparam logic [3:0] CR_ITT1 = 4'd5;
+  localparam logic [3:0] CR_DTT0 = 4'd6;
+  localparam logic [3:0] CR_DTT1 = 4'd7;
+  localparam logic [3:0] CR_USP  = 4'd8;
+  localparam logic [3:0] CR_VBR  = 4'd9;
+  localparam logic [3:0] CR_MSP  = 4'd10;
+  localparam logic [3:0] CR_ISP  = 4'd11;
+  localparam logic [3:0] CR_MMUSR = 4'd12;
+  localparam logic [3:0] CR_URP  = 4'd13;
+  localparam logic [3:0] CR_SRP  = 4'd14;
+  localparam logic [3:0] CR_SR   = 4'd15;    // read only here: MOVE from SR
 
   // A control transfer, resolved in EX.
   localparam logic [1:0] BR_NONE = 2'd0;
@@ -133,15 +167,22 @@ package rd68041_pkg;
     logic  [3:0] cond;       // Bcc's condition (PRM Table 3-19); 0 = true
     logic  [1:0] br;
     logic [31:0] tgt;        // BR_DISP's target, computed in decode
+    logic  [3:0] fn;         // the operation's variant (OP_SHIFT, OP_BIT, OP_MUL...)
+    logic        trap;       // a conditional trap (TRAPcc, TRAPV, CHK): taken if EX says
+    logic        crr;        // B is control register cr
+    logic        crw;        // the result goes to control register cr
+    logic  [3:0] cr;
     // the register result
     logic        wr;
     logic  [4:0] wr_reg;
     logic  [1:0] wr_sz;      // the size written: an address register is always long
+    logic        wr2;        // a second register result, long (EXG, LINK, UNLK, MUL.L, DIV.L)
+    logic  [4:0] wr2_reg;
   } uop_t;
 
   // Its width, written out: yosys has no $bits of a type. 40 (valid, last, halt,
-  // pc, len) + 51 (the <ea>) + 4 (ld, st, sz) + 94 (execute) + 8 (the result).
-  // sim/tb/core_*_tb check it against $bits.
-  localparam int UOP_W = 197;
+  // pc, len) + 51 (the <ea>) + 4 (ld, st, sz) + 105 (execute) + 14 (the
+  // results). sim/tb/core_*_tb check it against $bits.
+  localparam int UOP_W = 214;
 
 endpackage

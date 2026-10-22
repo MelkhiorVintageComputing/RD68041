@@ -67,6 +67,13 @@ module rd68041_core (
   logic [4:0] ccr_x, ccr_w;                  // EX's and the committed CCR
   assign sr = {SR_SYS, 3'b000, ccr_w};
 
+  // The control registers (UM 2.2.2, 3.1, 4.2), written at write-back. M7 holds
+  // the MMU's as plain registers for MOVEC; M10 gives them meaning. With M = 0
+  // the interrupt stack pointer is A7 (register 15), and the master stack
+  // pointer is held here (M8 swaps them).
+  logic  [2:0] sfc, dfc;
+  logic [31:0] cacr, tc, itt0, itt1, dtt0, dtt1, usp, vbr, msp, mmusr, urp, srp;
+
   // ===========================================================================
   // The arbiter: the data memory unit first, then instruction fetch.
   // ===========================================================================
@@ -125,6 +132,11 @@ module rd68041_core (
   logic        of_got;                        // ... is in of_md
   logic [31:0] ex_md;
   logic [31:0] w_res;                         // the result
+  logic [31:0] w_res2;                        // the second result
+  logic [31:0] w_std;                         // the store's data
+  logic        w_nowr;                        // EX cancelled the register results
+  logic        w_trap;                        // EX took a conditional trap (M8)
+  logic        div_go, div_done;              // the divider was started; it has answered
   logic [31:0] w_npc;                         // the next instruction's address
   logic  [4:0] w_ccr;                         // the CCR it leaves
 
@@ -155,15 +167,40 @@ module rd68041_core (
   logic [2:0]  dec_need, dec_pop;
   logic        dec_more;
 
+  // MOVEM's register list (PRM 4): the mask from its first extension word, then
+  // what is left of it. The next register is its lowest set bit -- which for
+  // -(An), whose mask is reversed, is A7 first and D0 last.
+  logic [15:0] mv_mask, mv_src, mv_bit;
+  logic  [4:0] mv_k;
+  logic  [3:0] mv_reg;
+  logic        mv_last, mv_used;
+  wire  [15:0] cur_op = step ? de_op : q_win[127:112];
+  assign mv_src = step ? mv_mask : q_win[111:96];
+  always_comb begin
+    mv_bit = 16'h0;
+    mv_reg = 4'd0;
+    for (int b = 15; b >= 0; b--) begin
+      if (mv_src[b]) begin
+        mv_bit = 16'h1 << b;
+        mv_reg = (cur_op[5:3] == 3'd4) ? 4'(15 - b) : 4'(b);
+      end
+    end
+  end
+  assign mv_last = (mv_src & (mv_src - 16'h1)) == 16'h0;
+
   rd68041_decode u_dec (
-      .op   (step ? de_op : q_win[127:112]),
-      .w    (step ? q_win[127:16] : q_win[111:0]),
-      .step (step),
-      .pc   (step ? de_pc : q_pc),
-      .uop  (dec_v),
-      .need (dec_need),
-      .pop  (dec_pop),
-      .more (dec_more));
+      .op      (cur_op),
+      .w       (step ? q_win[127:16] : q_win[111:0]),
+      .step    (step),
+      .pc      (step ? de_pc : q_pc),
+      .mv_reg  (mv_reg),
+      .mv_last (mv_last),
+      .mv_k    (mv_k),
+      .uop     (dec_v),
+      .need    (dec_need),
+      .pop     (dec_pop),
+      .more    (dec_more),
+      .mv_used (mv_used));
 
   rd68041_pkg::uop_t dec_u;
   assign dec_u = dec_v;
@@ -179,19 +216,20 @@ module rd68041_core (
   // ===========================================================================
   // The register file
   // ===========================================================================
-  logic [4:0]  ra, rb, rc, rd;
-  logic [31:0] qa, qb, qc, qd;
-  logic        we0, we1;
-  logic [4:0]  wa0, wa1;
-  logic [31:0] wd0, wd1;
+  logic [4:0]  ra, rb, rc, rd, re;
+  logic [31:0] qa, qb, qc, qd, qe;
+  logic        we0, we1, we2;
+  logic [4:0]  wa0, wa1, wa2;
+  logic [31:0] wd0, wd1, wd2;
   logic [3:0]  wm0;
 
   rd68041_regfile u_rf (
       .clk(clk), .rst_n(rst_n),
-      .ra(ra), .rb(rb), .rc(rc), .rd(rd),
-      .qa(qa), .qb(qb), .qc(qc), .qd(qd),
+      .ra(ra), .rb(rb), .rc(rc), .rd(rd), .re(re),
+      .qa(qa), .qb(qb), .qc(qc), .qd(qd), .qe(qe),
       .we0(we0), .wa0(wa0), .wd0(wd0), .wm0(wm0),
-      .we1(we1), .wa1(wa1), .wd1(wd1));
+      .we1(we1), .wa1(wa1), .wd1(wd1),
+      .we2(we2), .wa2(wa2), .wd2(wd2));
 
   function automatic logic [3:0] lanes_of(input logic [1:0] sz);
     lanes_of = (sz == rd68041_pkg::SZ_B) ? 4'b0001 :
@@ -216,14 +254,16 @@ module rd68041_core (
   // ===========================================================================
   // <ea> calculate
   // ===========================================================================
-  wire [4:0] base_r  = {2'b01, ea_u.ea_an};
+  wire [4:0] base_r  = (ea_u.ea_base == rd68041_pkg::B_REG) ? ea_u.a_reg : {2'b01, ea_u.ea_an};
   wire [4:0] index_r = {1'b0, ea_u.ea_xn};
-  wire need_base  = ea_u.valid && ea_u.ea_en && (ea_u.ea_base == rd68041_pkg::B_AN);
+  wire need_base  = ea_u.valid && ea_u.ea_en &&
+                    (ea_u.ea_base == rd68041_pkg::B_AN || ea_u.ea_base == rd68041_pkg::B_REG);
   wire need_index = ea_u.valid && ea_u.ea_en && ea_u.ea_xen;
 
   // A result an older micro-operation has not computed yet.
   function automatic logic pending(input rd68041_pkg::uop_t u, input logic [4:0] r);
-    pending = u.valid && u.wr && (u.wr_reg == r);
+    pending = u.valid && ((u.wr && (u.wr_reg == r)) || (u.wr2 && (u.wr2_reg == r)) ||
+                          (u.crw && u.cr == rd68041_pkg::CR_ISP && r == 5'd15));
   endfunction
   function automatic logic upd_of(input rd68041_pkg::uop_t u, input logic [4:0] r);
     upd_of = u.valid && (u.ea_upd != rd68041_pkg::U_NONE) && ({2'b01, u.ea_an} == r);
@@ -233,13 +273,15 @@ module rd68041_core (
   function automatic logic [31:0] ea_val(input logic [4:0] r, input logic [31:0] rf,
                                          input rd68041_pkg::uop_t o, input logic [31:0] o_an,
                                          input rd68041_pkg::uop_t x, input logic [31:0] x_an,
-                                         input rd68041_pkg::uop_t w, input logic [31:0] w_a,
-                                         input logic [31:0] w_r);
-    if (upd_of(o, r))                         ea_val = o_an;
-    else if (upd_of(x, r))                    ea_val = x_an;
-    else if (w.valid && w.wr && w.wr_reg == r) ea_val = merge(rf[31:8], w_r, w.wr_sz);
-    else if (upd_of(w, r))                    ea_val = w_a;
-    else                                      ea_val = rf;
+                                         input rd68041_pkg::uop_t w, input logic w_ok,
+                                         input logic [31:0] w_a,
+                                         input logic [31:0] w_r, input logic [31:0] w_r2);
+    if (upd_of(o, r))                                     ea_val = o_an;
+    else if (upd_of(x, r))                                ea_val = x_an;
+    else if (w.valid && w.wr && w_ok && w.wr_reg == r)    ea_val = merge(rf[31:8], w_r, w.wr_sz);
+    else if (w.valid && w.wr2 && w_ok && w.wr2_reg == r)  ea_val = w_r2;
+    else if (upd_of(w, r))                                ea_val = w_a;
+    else                                                  ea_val = rf;
   endfunction
 
   assign ra = base_r;
@@ -248,13 +290,14 @@ module rd68041_core (
   wire ea_wait = (need_base  && (pending(of_u, base_r)  || pending(ex_u, base_r))) ||
                  (need_index && (pending(of_u, index_r) || pending(ex_u, index_r)));
 
-  wire [31:0] base_v  = ea_val(base_r,  qa, of_u, of_an, ex_u, ex_an, w_u, w_an, w_res);
-  wire [31:0] index_v = ea_val(index_r, qb, of_u, of_an, ex_u, ex_an, w_u, w_an, w_res);
+  wire [31:0] base_v  = ea_val(base_r,  qa, of_u, of_an, ex_u, ex_an, w_u, !w_nowr, w_an, w_res, w_res2);
+  wire [31:0] index_v = ea_val(index_r, qb, of_u, of_an, ex_u, ex_an, w_u, !w_nowr, w_an, w_res, w_res2);
 
   logic [31:0] agu_base, agu_disp, agu_ea;
   always_comb begin
     case (ea_u.ea_base)
-      rd68041_pkg::B_AN: agu_base = base_v;
+      rd68041_pkg::B_AN,
+      rd68041_pkg::B_REG: agu_base = base_v;
       rd68041_pkg::B_PC: agu_base = ea_u.pc;
       default:           agu_base = 32'h0;
     endcase
@@ -310,13 +353,16 @@ module rd68041_core (
   // ===========================================================================
   assign rc = ex_u.a_reg;
   assign rd = ex_u.b_reg;
+  assign re = ex_u.wr2_reg;                  // the high half of a 64-bit dividend
 
   function automatic logic [31:0] ex_reg(input logic [4:0] r, input logic [31:0] rf,
-                                         input rd68041_pkg::uop_t w, input logic [31:0] w_a,
-                                         input logic [31:0] w_r);
-    if (w.valid && w.wr && w.wr_reg == r) ex_reg = merge(rf[31:8], w_r, w.wr_sz);
-    else if (upd_of(w, r))                ex_reg = w_a;
-    else                                  ex_reg = rf;
+                                         input rd68041_pkg::uop_t w, input logic w_ok,
+                                         input logic [31:0] w_a,
+                                         input logic [31:0] w_r, input logic [31:0] w_r2);
+    if (w.valid && w.wr && w_ok && w.wr_reg == r)        ex_reg = merge(rf[31:8], w_r, w.wr_sz);
+    else if (w.valid && w.wr2 && w_ok && w.wr2_reg == r) ex_reg = w_r2;
+    else if (upd_of(w, r))                        ex_reg = w_a;
+    else                                          ex_reg = rf;
   endfunction
 
   function automatic logic [31:0] pick(input logic [1:0] sel, input logic [31:0] rv,
@@ -330,73 +376,263 @@ module rd68041_core (
     endcase
   endfunction
 
-  wire [31:0] a_raw = pick(ex_u.a_sel, ex_reg(ex_u.a_reg, qc, w_u, w_an, w_res), ex_u.imm, ex_md, ex_ea);
-  wire [31:0] b_raw = pick(ex_u.b_sel, ex_reg(ex_u.b_reg, qd, w_u, w_an, w_res), ex_u.imm, ex_md, ex_ea);
+  // A control register as EX reads it: W's write to it first.
+  function automatic logic [31:0] cr_val(input logic [3:0] c, input rd68041_pkg::uop_t w,
+                                         input logic [31:0] w_r, input logic [31:0] cur);
+    if (w.valid && w.crw && w.cr == c) cr_val = w_r;
+    else                               cr_val = cur;
+  endfunction
+
+  logic [31:0] cr_cur;
+  always_comb begin
+    case (ex_u.cr)
+      rd68041_pkg::CR_SFC:   cr_cur = {29'h0, sfc};
+      rd68041_pkg::CR_DFC:   cr_cur = {29'h0, dfc};
+      rd68041_pkg::CR_CACR:  cr_cur = cacr;
+      rd68041_pkg::CR_TC:    cr_cur = tc;
+      rd68041_pkg::CR_ITT0:  cr_cur = itt0;
+      rd68041_pkg::CR_ITT1:  cr_cur = itt1;
+      rd68041_pkg::CR_DTT0:  cr_cur = dtt0;
+      rd68041_pkg::CR_DTT1:  cr_cur = dtt1;
+      rd68041_pkg::CR_USP:   cr_cur = usp;
+      rd68041_pkg::CR_VBR:   cr_cur = vbr;
+      rd68041_pkg::CR_MSP:   cr_cur = msp;
+      rd68041_pkg::CR_MMUSR: cr_cur = mmusr;
+      rd68041_pkg::CR_URP:   cr_cur = urp;
+      rd68041_pkg::CR_SRP:   cr_cur = srp;
+      default:               cr_cur = {16'h0, SR_SYS, 3'b000, ccr_x};
+    endcase
+  end
+
+  wire [31:0] b_reg_v = ex_reg(ex_u.b_reg, qd, w_u, !w_nowr, w_an, w_res, w_res2);
+  wire [31:0] a_raw = pick(ex_u.a_sel, ex_reg(ex_u.a_reg, qc, w_u, !w_nowr, w_an, w_res, w_res2),
+                           ex_u.imm, ex_md, ex_ea);
+  wire [31:0] b_raw = ex_u.crr ? cr_val(ex_u.cr, w_u, w_res, cr_cur)
+                               : pick(ex_u.b_sel, b_reg_v, ex_u.imm, ex_md, ex_ea);
+  wire [31:0] c_v   = ex_reg(ex_u.wr2_reg, qe, w_u, !w_nowr, w_an, w_res, w_res2);
   wire [31:0] av = ex_u.a_sxw ? {{16{a_raw[15]}}, a_raw[15:0]} : a_raw;
   wire [31:0] bv = ex_u.b_sxw ? {{16{b_raw[15]}}, b_raw[15:0]} : b_raw;
 
-  // The operation, and the condition codes at the operation's size (PRM 3.4).
-  logic [31:0] res;
+  // --- the shifter (fn: {left, kind}) ---------------------------------------
+  logic [31:0] sh_res;
+  logic        sh_c, sh_v, sh_x, sh_xw;
+  rd68041_shifter u_shift (
+      .op(bv), .count(av[5:0]), .size(ex_u.sz), .kind(ex_u.fn[1:0]), .left(ex_u.fn[2]),
+      .x_in(ccr_x[4]), .res(sh_res), .c_out(sh_c), .v_out(sh_v), .x_out(sh_x),
+      .x_write(sh_xw));
+
+  // --- the multiplier (fn: {64-bit, long, signed}) ------------------------------
+  // 32 x 32 to 64, signed or not, the word forms on sign- or zero-extended
+  // halves (PRM 4, MULS and MULU).
+  logic [63:0] prod;
+  always_comb begin
+    logic [63:0] pa, pb;
+    if (ex_u.fn[1]) begin
+      pa = ex_u.fn[0] ? {{32{av[31]}}, av} : {32'h0, av};
+      pb = ex_u.fn[0] ? {{32{bv[31]}}, bv} : {32'h0, bv};
+    end else begin
+      pa = ex_u.fn[0] ? {{48{av[15]}}, av[15:0]} : {48'h0, av[15:0]};
+      pb = ex_u.fn[0] ? {{48{bv[15]}}, bv[15:0]} : {48'h0, bv[15:0]};
+    end
+    prod = pa * pb;
+  end
+
+  // --- the divider (fn: {64-bit dividend, long, signed}) --------------------------
+  // B the dividend (Dq), A the divisor, c_v the dividend's high half (Dr).
+  logic        div_start, div_busy, div_zero, div_ovf, div_qneg;
+  logic [31:0] div_q, div_r, div_qmag;
+  logic [63:0] div_n;
+  logic [31:0] div_d;
+  always_comb begin
+    if (ex_u.fn[2])      div_n = {c_v, bv};
+    else if (ex_u.fn[0]) div_n = {{32{bv[31]}}, bv};
+    else                 div_n = {32'h0, bv};
+    if (ex_u.fn[1])      div_d = av;
+    else                 div_d = ex_u.fn[0] ? {{16{av[15]}}, av[15:0]} : {16'h0, av[15:0]};
+  end
+  rd68041_divider u_div (
+      .clk(clk), .rst_n(rst_n), .start(div_start), .dividend(div_n), .divisor(div_d),
+      .is_signed(ex_u.fn[0]), .busy(div_busy), .quotient(div_q), .remainder(div_r),
+      .div_zero(div_zero), .overflow(div_ovf), .q_mag(div_qmag), .q_neg(div_qneg));
+
+  wire ex_is_div = ex_u.valid && (ex_u.op == rd68041_pkg::OP_DIV);
+  assign div_start = ex_is_div && !div_go && running;
+  // div_go: started; div_done: the answer is there (the clock after busy falls).
+  wire div_wait = ex_is_div && !(div_go && !div_busy && div_done);
+
+  // The quotient's fit (PRM 4): sixteen bits for the word forms, thirty-two
+  // signed or unsigned for the long.
+  wire div_fits = ex_u.fn[1] ? !div_ovf
+                             : (ex_u.fn[0] ? (div_qneg ? (div_qmag <= 32'h8000) : (div_qmag <= 32'h7FFF))
+                                           : (div_qmag <= 32'hFFFF)) && !div_ovf;
+
+  // --- the operation, and the condition codes at its size (PRM 3.4) ------------
+  logic [31:0] res, res2, st_val;              // the result, the second, the store's data
   logic  [4:0] ccr_n;                       // X N Z V C
+  logic        ex_nowr;                     // the register results are not written
+  logic        ex_trap;                     // a conditional trap is taken
   always_comb begin
     logic [32:0] s;
-    logic [31:0] m;
-    logic        an, bn, rn, cy, vf;
+    logic [31:0] m, p, q;
+    logic        cin, sub, an, bn, rn, cy, vf, xop, z;
     logic  [4:0] msb;
+    logic  [4:0] bitn;
     m   = (ex_u.sz == rd68041_pkg::SZ_B) ? 32'h0000_00FF :
           (ex_u.sz == rd68041_pkg::SZ_W) ? 32'h0000_FFFF : 32'hFFFF_FFFF;
     msb = (ex_u.sz == rd68041_pkg::SZ_B) ? 5'd7 : (ex_u.sz == rd68041_pkg::SZ_W) ? 5'd15 : 5'd31;
-    s   = 33'h0;
+
+    // The adder: p + q + cin, or p - q - cin.
+    p = bv; q = av; cin = 1'b0; sub = 1'b0; xop = 1'b0;
     case (ex_u.op)
-      rd68041_pkg::OP_ADD, rd68041_pkg::OP_ADDA: s = {1'b0, bv} + {1'b0, av};
-      rd68041_pkg::OP_SUB, rd68041_pkg::OP_SUBA,
-      rd68041_pkg::OP_CMP:                       s = {1'b0, bv} - {1'b0, av};
+      rd68041_pkg::OP_SUB, rd68041_pkg::OP_SUBA, rd68041_pkg::OP_CMP: sub = 1'b1;
+      rd68041_pkg::OP_ADDX: begin cin = ccr_x[4]; xop = 1'b1; end
+      rd68041_pkg::OP_SUBX: begin cin = ccr_x[4]; sub = 1'b1; xop = 1'b1; end
+      rd68041_pkg::OP_NEG:  begin p = 32'h0; q = bv; sub = 1'b1; end
+      rd68041_pkg::OP_NEGX: begin p = 32'h0; q = bv; sub = 1'b1; cin = ccr_x[4]; xop = 1'b1; end
       default: ;
     endcase
+    s = sub ? ({1'b0, p} - {1'b0, q} - {32'h0, cin}) : ({1'b0, p} + {1'b0, q} + {32'h0, cin});
+
+    res   = bv;
+    res2  = 32'h0;
+    ex_nowr = 1'b0;
+    ex_trap = 1'b0;
+    bitn  = ex_u.sz == rd68041_pkg::SZ_L ? av[4:0] : {2'b00, av[2:0]};
     case (ex_u.op)
       rd68041_pkg::OP_PASSB: res = bv;
       rd68041_pkg::OP_PASSA: res = av;
-      rd68041_pkg::OP_ADD, rd68041_pkg::OP_ADDA,
-      rd68041_pkg::OP_SUB, rd68041_pkg::OP_SUBA,
-      rd68041_pkg::OP_CMP:   res = s[31:0];
+      rd68041_pkg::OP_ADD, rd68041_pkg::OP_ADDA, rd68041_pkg::OP_SUB, rd68041_pkg::OP_SUBA,
+      rd68041_pkg::OP_CMP, rd68041_pkg::OP_ADDX, rd68041_pkg::OP_SUBX,
+      rd68041_pkg::OP_NEG, rd68041_pkg::OP_NEGX: res = s[31:0];
       rd68041_pkg::OP_AND:   res = bv & av;
       rd68041_pkg::OP_OR:    res = bv | av;
       rd68041_pkg::OP_EOR:   res = bv ^ av;
+      rd68041_pkg::OP_NOT:   res = ~bv;
       rd68041_pkg::OP_EXTW:  res = {bv[31:16], {8{bv[7]}}, bv[7:0]};
       rd68041_pkg::OP_EXTL:  res = {{16{bv[15]}}, bv[15:0]};
       rd68041_pkg::OP_EXTBL: res = {{24{bv[7]}}, bv[7:0]};
       rd68041_pkg::OP_SWAP:  res = {bv[15:0], bv[31:16]};
       rd68041_pkg::OP_CLR:   res = 32'h0;
-      default:               res = bv;
+      rd68041_pkg::OP_SHIFT: res = sh_res;
+      rd68041_pkg::OP_SCC:   res = cond_true(ex_u.cond, ccr_x[3:0]) ? 32'hFF : 32'h00;
+      rd68041_pkg::OP_DBCC: begin
+        res = {bv[31:16], bv[15:0] - 16'd1};
+        ex_nowr = cond_true(ex_u.cond, ccr_x[3:0]);
+      end
+      rd68041_pkg::OP_BIT: begin
+        case (ex_u.fn[1:0])
+          2'd1:    res = bv ^  (32'h1 << bitn);
+          2'd2:    res = bv & ~(32'h1 << bitn);
+          2'd3:    res = bv |  (32'h1 << bitn);
+          default: res = bv;
+        endcase
+      end
+      rd68041_pkg::OP_MUL: begin
+        res  = prod[31:0];
+        res2 = prod[63:32];
+      end
+      rd68041_pkg::OP_DIV: begin
+        // The word forms: the remainder in the high word, the quotient low.
+        res     = ex_u.fn[1] ? div_q : {div_r[15:0], div_q[15:0]};
+        res2    = div_r;
+        ex_nowr = !div_fits;
+        // PRM 4: division by zero traps (M8).
+        ex_trap = div_zero;
+      end
+      rd68041_pkg::OP_EXG: begin
+        res  = av;
+        res2 = bv;
+      end
+      rd68041_pkg::OP_LINK: begin
+        res  = ex_ea;
+        res2 = ex_ea + ex_u.imm;
+      end
+      rd68041_pkg::OP_MOVEP: begin
+        // fn[3]: out of B's byte fn[1:0]; else A's byte into it.
+        if (ex_u.fn[3]) res = (bv >> {ex_u.fn[1:0], 3'b000}) & 32'hFF;
+        else            res = (bv & ~(32'hFF << {ex_u.fn[1:0], 3'b000})) |
+                              ({24'h0, av[7:0]} << {ex_u.fn[1:0], 3'b000});
+      end
+      default: res = bv;
     endcase
+    // The store's data is the result, but for LINK, which stores the register.
+    st_val = (ex_u.op == rd68041_pkg::OP_LINK) ? av : res;
+    // UNLK and RTD: the stack pointer past the frame (decode's imm).
+    if (ex_u.op == rd68041_pkg::OP_PASSB && ex_u.wr2) res2 = ex_ea + ex_u.imm;
+
     an = av[msb];
     bn = bv[msb];
     rn = res[msb];
+    if (ex_u.op == rd68041_pkg::OP_NEG || ex_u.op == rd68041_pkg::OP_NEGX) begin
+      an = bv[msb]; bn = 1'b0;
+    end
     // The carry or borrow out of the operation's size.
     case (ex_u.sz)
-      rd68041_pkg::SZ_B: cy = (ex_u.op == rd68041_pkg::OP_ADD) ? (({1'b0, bv[7:0]} + {1'b0, av[7:0]}) > 9'h0FF)
-                                                               : (bv[7:0] < av[7:0]);
-      rd68041_pkg::SZ_W: cy = (ex_u.op == rd68041_pkg::OP_ADD) ? (({1'b0, bv[15:0]} + {1'b0, av[15:0]}) > 17'h0FFFF)
-                                                               : (bv[15:0] < av[15:0]);
+      rd68041_pkg::SZ_B: cy = sub ? ({1'b0, p[7:0]}  < ({1'b0, q[7:0]} + {8'h0, cin}))
+                                  : (({1'b0, p[7:0]}  + {1'b0, q[7:0]}  + {8'h0, cin}) > 9'h0FF);
+      rd68041_pkg::SZ_W: cy = sub ? ({1'b0, p[15:0]} < ({1'b0, q[15:0]} + {16'h0, cin}))
+                                  : (({1'b0, p[15:0]} + {1'b0, q[15:0]} + {16'h0, cin}) > 17'h0FFFF);
       default:           cy = s[32];
     endcase
-    vf = (ex_u.op == rd68041_pkg::OP_ADD) ? ((an == bn) && (rn != bn))
-                                          : ((an != bn) && (rn != bn));
+    vf = sub ? ((an != bn) && (rn != bn)) : ((an == bn) && (rn != bn));
+    z  = (res & m) == 32'h0;
+
     ccr_n = ccr_x;
     case (ex_u.cc)
-      rd68041_pkg::CC_LOGIC: ccr_n = {ccr_x[4], rn, (res & m) == 32'h0, 1'b0, 1'b0};
+      rd68041_pkg::CC_LOGIC: ccr_n = {ccr_x[4], rn, z, 1'b0, 1'b0};
       rd68041_pkg::CC_ADD,
-      rd68041_pkg::CC_SUB:   ccr_n = {cy, rn, (res & m) == 32'h0, vf, cy};
-      rd68041_pkg::CC_CMP:   ccr_n = {ccr_x[4], rn, (res & m) == 32'h0, vf, cy};
+      rd68041_pkg::CC_SUB:   ccr_n = {cy, rn, xop ? (z && ccr_x[2]) : z, vf, cy};
+      rd68041_pkg::CC_CMP:   ccr_n = {ccr_x[4], rn, z, vf, cy};
       rd68041_pkg::CC_SET: begin
         case (ex_u.cond)
           4'd0:    ccr_n = ccr_x & av[4:0];
           4'd1:    ccr_n = ccr_x | av[4:0];
-          default: ccr_n = ccr_x ^ av[4:0];
+          4'd2:    ccr_n = ccr_x ^ av[4:0];
+          default: ccr_n = av[4:0];                 // MOVE to CCR, RTR
         endcase
       end
       default: ;
     endcase
+    // The operations whose condition codes follow rules of their own.
+    case (ex_u.op)
+      rd68041_pkg::OP_SHIFT: ccr_n = {sh_xw ? sh_x : ccr_x[4], rn, z, sh_v, sh_c};
+      rd68041_pkg::OP_BIT:   ccr_n = {ccr_x[4:3], !bv[bitn], ccr_x[1:0]};
+      rd68041_pkg::OP_MUL: begin
+        // PRM 4: N and Z of the whole result; V set when a 32-bit result has
+        // lost bits; C cleared.
+        if (ex_u.fn[2])
+          ccr_n = {ccr_x[4], prod[63], prod == 64'h0, 1'b0, 1'b0};
+        else if (ex_u.fn[1])
+          ccr_n = {ccr_x[4], prod[31], prod[31:0] == 32'h0,
+                   ex_u.fn[0] ? (prod[63:32] != {32{prod[31]}}) : (prod[63:32] != 32'h0), 1'b0};
+        else
+          ccr_n = {ccr_x[4], prod[31], prod[31:0] == 32'h0, 1'b0, 1'b0};
+      end
+      rd68041_pkg::OP_DIV: begin
+        if (!div_fits)
+          ccr_n = {ccr_x[4], ccr_x[3], ccr_x[2], 1'b1, 1'b0};
+        else if (ex_u.fn[1])
+          ccr_n = {ccr_x[4], div_q[31], div_q == 32'h0, 1'b0, 1'b0};
+        else
+          ccr_n = {ccr_x[4], div_q[15], div_q[15:0] == 16'h0, 1'b0, 1'b0};
+      end
+      default: ;
+    endcase
+    // Traps (M8 takes the exception; until then they halt): TRAPcc and TRAPV on
+    // their condition, CHK when the register is out of bounds (PRM 4: "if Dn <
+    // 0 or Dn > source", N set for the first and cleared for the second).
+    if (ex_u.trap) begin
+      if (ex_u.op == rd68041_pkg::OP_CMP) begin
+        logic lt0, gtb;
+        lt0 = bv[msb];
+        gtb = !lt0 && ((ex_u.sz == rd68041_pkg::SZ_W) ? ($signed(bv[15:0]) > $signed(av[15:0]))
+                                                       : ($signed(bv) > $signed(av)));
+        ex_trap = lt0 || gtb;
+        ccr_n = {ccr_x[4], lt0 ? 1'b1 : (gtb ? 1'b0 : ccr_x[3]), ccr_x[2:0]};
+      end else begin
+        ex_trap = cond_true(ex_u.cond, ccr_x[3:0]);
+      end
+    end
   end
 
   // PRM Table 3-19: the conditions, on the CCR as the instructions before left it.
@@ -423,40 +659,50 @@ module rd68041_core (
     endcase
   endfunction
 
-  wire ex_taken = ex_u.valid && (ex_u.br != rd68041_pkg::BR_NONE) &&
-                  ((ex_u.br != rd68041_pkg::BR_DISP) || cond_true(ex_u.cond, ccr_x[3:0]));
+  // DBcc branches unless the condition holds or the counter has run out.
+  wire dbcc_take = (ex_u.op == rd68041_pkg::OP_DBCC) && !cond_true(ex_u.cond, ccr_x[3:0]) &&
+                   (bv[15:0] != 16'h0000);
+  wire ex_taken = ex_u.valid && !ex_u.halt && (ex_u.br != rd68041_pkg::BR_NONE) &&
+                  ((ex_u.op == rd68041_pkg::OP_DBCC) ? dbcc_take :
+                   ((ex_u.br != rd68041_pkg::BR_DISP) || cond_true(ex_u.cond, ccr_x[3:0])));
   wire [31:0] ex_target = (ex_u.br == rd68041_pkg::BR_DISP) ? ex_u.tgt :
                           (ex_u.br == rd68041_pkg::BR_MEM)  ? ex_md : bv;
   wire [31:0] ex_npc    = ex_taken ? ex_target : ex_u.pc + {27'h0, ex_u.len};
 
-  assign ex_stall    = w_stall;
+  assign ex_stall    = w_stall || div_wait;
   assign redirect    = ex_taken && !ex_stall && running;
   assign redirect_pc = ex_target;
 
   // ===========================================================================
   // Write-back
   // ===========================================================================
-  // A halt stays in write-back, and the pipeline behind it with it.
-  assign w_stall = w_u.valid && (w_u.halt || (w_u.st && !st_ready));
-  wire   w_go    = w_u.valid && !w_stall && running && !w_u.halt;
+  // A halt stays in write-back, and the pipeline behind it with it; so does a
+  // trap EX took, until M8 makes it an exception.
+  wire   w_halts = w_u.halt || w_trap;
+  assign w_stall = w_u.valid && (w_halts || (w_u.st && !st_ready));
+  wire   w_go    = w_u.valid && !w_stall && running && !w_halts;
+  wire   w_wr    = w_go && !w_nowr;
 
-  assign we0 = (w_go && w_u.wr) || (rs == R_SSP && ld_done);
-  assign wa0 = (rs == R_SSP) ? 5'd15 : w_u.wr_reg;
+  assign we0 = (w_wr && w_u.wr) || (rs == R_SSP && ld_done) ||
+               (w_go && w_u.crw && w_u.cr == rd68041_pkg::CR_ISP);
+  assign wa0 = (rs == R_SSP || (w_u.crw && w_u.cr == rd68041_pkg::CR_ISP)) ? 5'd15 : w_u.wr_reg;
   assign wd0 = (rs == R_SSP) ? ld_data : w_res;
-  assign wm0 = (rs == R_SSP) ? 4'hF : lanes_of(w_u.wr_sz);
-  // The address register update, unless the result goes to the same register
-  // (MOVEA (An)+,An: the operand read wins, PRM 4).
-  assign we1 = w_go && (w_u.ea_upd != rd68041_pkg::U_NONE) &&
-               !(w_u.wr && w_u.wr_reg == {2'b01, w_u.ea_an});
+  assign wm0 = (rs == R_SSP || w_u.crw) ? 4'hF : lanes_of(w_u.wr_sz);
+  // The address register update; the register file lets a result or a second
+  // result to the same register win over it.
+  assign we1 = w_go && (w_u.ea_upd != rd68041_pkg::U_NONE);
   assign wa1 = {2'b01, w_u.ea_an};
   assign wd1 = w_an;
+  assign we2 = w_wr && w_u.wr2;
+  assign wa2 = w_u.wr2_reg;
+  assign wd2 = w_res2;
 
   rd68041_dmu u_dmu (
       .clk(clk), .rst_n(rst_n), .crst(crst), .sup(1'b1),
       .ld_valid(ld_valid), .ld_addr(ld_addr), .ld_sz(ld_sz),
       .ld_done(ld_done), .ld_data(ld_data), .ld_err(ld_err), .ld_cancel(ld_cancel),
-      .st_valid(w_u.valid && w_u.st && running && !w_u.halt), .st_addr(w_ea),
-      .st_sz(w_u.sz), .st_data(w_res), .st_ready(st_ready), .st_empty(st_empty),
+      .st_valid(w_u.valid && w_u.st && running && !w_halts), .st_addr(w_ea),
+      .st_sz(w_u.sz), .st_data(w_std), .st_ready(st_ready), .st_empty(st_empty),
       .d_valid(d_valid), .d_ready(d_ready), .d_addr(d_addr), .d_write(d_write),
       .d_siz(d_siz), .d_tm(d_tm), .d_wdata(d_wdata), .d_rsp(d_rsp),
       .d_data(rsp_data), .d_done(d_done), .d_err(d_err));
@@ -480,10 +726,16 @@ module rd68041_core (
       halted    <= 1'b0;
       ccr_x     <= 5'h00;
       ccr_w     <= 5'h00;
+      sfc       <= 3'd0;
+      dfc       <= 3'd0;
+      cacr      <= '0; tc <= '0; itt0 <= '0; itt1 <= '0; dtt0 <= '0; dtt1 <= '0;
+      usp       <= '0; vbr <= '0; msp <= '0; mmusr <= '0; urp <= '0; srp <= '0;
       step      <= 1'b0;
       de_op     <= '0;
       de_pc     <= '0;
       de_halted <= 1'b0;
+      mv_mask   <= '0;
+      mv_k      <= '0;
       ea_u      <= '0;
       of_u      <= '0;
       ex_u      <= '0;
@@ -491,40 +743,81 @@ module rd68041_core (
       of_ea     <= '0; ex_ea <= '0; w_ea <= '0;
       of_an     <= '0; ex_an <= '0; w_an <= '0;
       of_md     <= '0; of_got <= 1'b0; ex_md <= '0;
-      w_res     <= '0; w_npc <= '0; w_ccr <= '0;
+      w_res     <= '0; w_res2 <= '0; w_std <= '0; w_npc <= '0; w_ccr <= '0;
+      w_nowr    <= 1'b0; w_trap <= 1'b0;
+      div_go    <= 1'b0; div_done <= 1'b0;
       reset_v   <= '0;
     end else if (crst) begin
+      // UM 8.2.10: the reset clears VBR and CACR, and TC's and the TTRs'
+      // enables (UM 3.6.1).
       rs        <= R_SSP;
       halted    <= 1'b0;
+      vbr       <= '0;
+      cacr      <= '0;
+      tc        <= '0;
+      itt0      <= '0; itt1 <= '0; dtt0 <= '0; dtt1 <= '0;
       step      <= 1'b0;
       de_halted <= 1'b0;
       ea_u      <= '0;
       of_u      <= '0;
       ex_u      <= '0;
       w_u       <= '0;
+      w_trap    <= 1'b0;
       of_got    <= 1'b0;
+      div_go    <= 1'b0;
+      div_done  <= 1'b0;
     end else begin
       // --- reset ------------------------------------------------------------
       if (rs == R_SSP && ld_done) rs <= R_PC;
       if (rs == R_PC  && ld_done) begin rs <= R_RUN; reset_v <= ld_data; end
 
       // --- write-back -------------------------------------------------------
-      if (w_u.valid && w_u.halt && running) halted <= 1'b1;
+      if (w_u.valid && w_halts && running) halted <= 1'b1;
       if (w_go) begin
-        if (w_u.last || w_u.cc != rd68041_pkg::CC_NONE) ccr_w <= w_ccr;
+        ccr_w <= w_ccr;
+        if (w_u.crw) begin
+          case (w_u.cr)
+            rd68041_pkg::CR_SFC:   sfc   <= w_res[2:0];
+            rd68041_pkg::CR_DFC:   dfc   <= w_res[2:0];
+            // UM 4.2: CACR has DE (31) and IE (15); the rest reads as zero.
+            rd68041_pkg::CR_CACR:  cacr  <= w_res & 32'h8000_8000;
+            rd68041_pkg::CR_TC:    tc    <= w_res & 32'h0000_C000;
+            rd68041_pkg::CR_ITT0:  itt0  <= w_res & 32'hFFFF_E364;
+            rd68041_pkg::CR_ITT1:  itt1  <= w_res & 32'hFFFF_E364;
+            rd68041_pkg::CR_DTT0:  dtt0  <= w_res & 32'hFFFF_E364;
+            rd68041_pkg::CR_DTT1:  dtt1  <= w_res & 32'hFFFF_E364;
+            rd68041_pkg::CR_USP:   usp   <= w_res;
+            rd68041_pkg::CR_VBR:   vbr   <= w_res;
+            rd68041_pkg::CR_MSP:   msp   <= w_res;
+            rd68041_pkg::CR_MMUSR: mmusr <= w_res;
+            rd68041_pkg::CR_URP:   urp   <= w_res & 32'hFFFF_FE00;
+            rd68041_pkg::CR_SRP:   srp   <= w_res & 32'hFFFF_FE00;
+            default: ;
+          endcase
+        end
       end
       if (!w_stall) w_u <= '0;
 
+      // --- the divider ------------------------------------------------------
+      if (div_start) div_go <= 1'b1;
+      if (div_go && !div_busy) div_done <= 1'b1;
+
       // --- execute -> write-back --------------------------------------------
       if (!ex_stall) begin
-        w_u   <= ex_u;
-        w_ea  <= ex_ea;
-        w_an  <= ex_an;
-        w_res <= res;
-        w_npc <= ex_npc;
-        w_ccr <= ccr_n;
+        w_u    <= ex_u;
+        w_ea   <= ex_ea;
+        w_an   <= ex_an;
+        w_res  <= res;
+        w_res2 <= res2;
+        w_std  <= st_val;
+        w_npc  <= ex_npc;
+        w_ccr  <= ccr_n;
+        w_nowr <= ex_nowr;
+        w_trap <= ex_u.valid && ex_trap;
         if (ex_u.valid) ccr_x <= ccr_n;
-        ex_u  <= '0;
+        ex_u   <= '0;
+        div_go   <= 1'b0;
+        div_done <= 1'b0;
       end
 
       // --- <ea> fetch -> execute --------------------------------------------
@@ -553,11 +846,21 @@ module rd68041_core (
       if (de_issue) begin
         ea_u <= dec_u;
         if (dec_more) begin
-          step  <= 1'b1;
-          de_op <= q_win[127:112];
-          de_pc <= q_pc;
+          step <= 1'b1;
+          if (!step) begin
+            de_op <= q_win[127:112];
+            de_pc <= q_pc;
+          end
         end else begin
           step <= 1'b0;
+        end
+        // MOVEM's registers: the mask, less each one transferred.
+        if (!step) begin
+          mv_mask <= mv_used ? (mv_src & ~mv_bit) : mv_src;
+          mv_k    <= mv_used ? 5'd1 : 5'd0;
+        end else if (mv_used) begin
+          mv_mask <= mv_mask & ~mv_bit;
+          mv_k    <= mv_k + 5'd1;
         end
         if (dec_u.halt) de_halted <= 1'b1;
       end

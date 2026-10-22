@@ -67,3 +67,59 @@ task automatic boot(input string image);
   repeat (12) @(negedge clk);
   rsti_n = 1'b1;
 endtask
+
+// ---------------------------------------------------------------------------
+// One instruction at a time, for the per-opcode sweeps (core_vec_tb,
+// core_cputest_tb).
+//
+// deposit: after a reset, at the one moment the pipeline is known empty -- the
+// clock the reset sequence has fetched the PC and nothing has been decoded --
+// the registers are written from dep_d, dep_a (A7 is the active stack pointer)
+// and dep_sr's condition codes. M6-M7: SR's system byte is fixed (supervisor,
+// interrupt mask 7) until M8 builds it, so a starting state must have it.
+//
+// run_one: lets decode issue the instruction's micro-operations, then stops it
+// (de_halted forced) and waits until everything issued has completed and every
+// write has reached the bus. ok is false if it never did, or if the
+// instruction is one the core does not build yet (it halted).
+// ---------------------------------------------------------------------------
+logic [31:0] dep_d [0:7];
+logic [31:0] dep_a [0:7];
+logic [15:0] dep_sr;
+
+task automatic deposit();
+  int t;
+  t = 0;
+  while (dut.u_core.rs != 2'd2 && t < 2000) begin @(negedge clk); t++; end
+  for (int i = 0; i < 8; i++) dut.u_core.u_rf.r[i] = dep_d[i];
+  for (int i = 0; i < 8; i++) dut.u_core.u_rf.r[8 + i] = dep_a[i];
+  dut.u_core.ccr_x = dep_sr[4:0];
+  dut.u_core.ccr_w = dep_sr[4:0];
+endtask
+
+task automatic run_one(input int limit, output bit ok, output bit built);
+  int t;
+  bit stopped, done;
+  t = 0; stopped = 0; done = 0; ok = 0; built = 1;
+  while (!done && t < limit) begin
+    @(negedge clk);
+    t++;
+    if (!stopped && dut.u_core.ea_u.valid && dut.u_core.ea_u.last) begin
+      force dut.u_core.de_halted = 1'b1;
+      stopped = 1;
+    end
+    if (dut.u_core.halted) begin
+      built = 0;
+      done = 1;
+    end else if (stopped && !dut.u_core.ea_u.valid && !dut.u_core.of_u.valid &&
+                 !dut.u_core.ex_u.valid && !dut.u_core.w_u.valid &&
+                 dut.u_core.st_empty && !dut.u_core.u_dmu.xbusy) begin
+      ok = 1;
+      done = 1;
+    end
+  end
+endtask
+
+task automatic end_one();
+  release dut.u_core.de_halted;
+endtask
