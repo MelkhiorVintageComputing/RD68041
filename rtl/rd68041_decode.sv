@@ -12,10 +12,16 @@
 // extension words it has, and the decode stage waits until the queue holds
 // them. Most instructions are one micro-operation. Where one has more -- a
 // second memory address, a push beside its own address, a list of registers --
-// they are issued one a clock: `more` says another follows, `step` says this
-// is not the first, and `pop` how many extension words this one takes (the
+// they are issued one a clock: `more` says another follows, `seq` how many
+// went before, and `pop` how many extension words this one takes (the
 // operation word is the decode stage's to take, on the first). The decode stage
-// holds the operation word and the instruction's address for the rest.
+// holds the operation word, the instruction's address and the prelude flags
+// (`ind_out`, returned as `ind_in`) for the rest.
+//
+// An <ea> with memory indirection (PRM 2.2.8-2.2.10) is two addresses: a
+// prelude reads the pointer into T3, and the instruction then addresses from
+// T3. The prelude comes first, before the instruction's own micro-operations,
+// or -- for MOVE's destination -- before the micro-operation that needs it.
 //
 //   MOVE <mem>,<mem>   load the source into T0; store T0 at the destination
 //   PEA <ea>           T0 = <ea>; push T0
@@ -23,6 +29,12 @@
 //   ADDX, SUBX -(Ay),-(Ax)   load -(Ay) into T0; the operation on -(Ax)
 //   CMPM (Ay)+,(Ax)+   load (Ay)+ into T0; compare (Ax)+ with it
 //   RTR                the CCR from (A7)+; then RTS
+//   ABCD, SBCD -(Ay),-(Ax)   as ADDX
+//   PACK, UNPK -(Ax),-(Ay)   two reads and a write, or a read and two writes
+//   CMP2, CHK2         the lower bound into T0; the upper, compared
+//   CAS2               both operands read under LOCK into T0 and T1, the two
+//                      compares, the two updates or the write-back, each
+//                      conditional on the compares (`cx`), and Dc1, Dc2
 //   MOVEP              one byte a micro-operation, two or four
 //   MOVEM              one register a micro-operation, after T0 = <ea> for the
 //                      control modes, or T0 = An - size for -(An) when An is
@@ -40,58 +52,96 @@
 
 module rd68041_decode (
     input  logic [15:0]  op,           // the operation word
-    input  logic [111:0] w,            // extension words: w[0] in 111:96, then w[1]...
-    input  logic         step,         // 0: the first micro-operation, 1: a later one
+    input  logic [175:0] w,            // extension words: w[0] in 175:160, then w[1]...
+    input  logic  [4:0]  seq,          // micro-operations of this instruction issued already
+    input  logic  [1:0]  ind_in,       // the preludes issued (bit 0 the source's or op[5:0]'s)
+    input  logic  [4:0]  len_in,       // the instruction's length, as the first one said
     input  logic [31:0]  pc,           // the instruction's address
     input  logic  [3:0]  mv_reg,       // MOVEM: the next register (0-7 D, 8-15 A)
     input  logic         mv_last,      // ... and it is the list's last
     input  logic  [4:0]  mv_k,         // MOVEM, MOVEP: transfers already issued
     output logic [rd68041_pkg::UOP_W-1:0] uop,
-    output logic  [2:0]  need,         // extension words the instruction has (step 0)
-    output logic  [2:0]  pop,          // extension words this micro-operation takes
+    output logic  [3:0]  need,         // extension words the instruction has (seq 0)
+    output logic  [3:0]  pop,          // extension words this micro-operation takes
     output logic         more,         // another micro-operation follows
-    output logic         mv_used       // this one transfers mv_reg (or MOVEP's byte)
+    output logic         mv_used,      // this one transfers mv_reg (or MOVEP's byte)
+    output logic  [1:0]  ind_out       // seq 0: the preludes this instruction has
 );
 
   // ---------------------------------------------------------------------------
   // Extension words, numbered from w[0].
   // ---------------------------------------------------------------------------
-  function automatic logic [15:0] ew(input logic [111:0] v, input int k);
-    ew = v[111 - 16*k -: 16];
+  function automatic logic [15:0] ew(input logic [175:0] v, input int k);
+    ew = v[175 - 16*k -: 16];
   endfunction
   // Its low byte, and the word sign-extended (a select on a function's result
   // is not portable: yosys and iverilog refuse it).
-  function automatic logic [7:0] ewb(input logic [111:0] v, input int k);
-    ewb = v[103 - 16*k -: 8];
+  function automatic logic [7:0] ewb(input logic [175:0] v, input int k);
+    ewb = v[167 - 16*k -: 8];
   endfunction
-  function automatic logic [31:0] ews(input logic [111:0] v, input int k);
-    ews = {{16{v[111 - 16*k]}}, v[111 - 16*k -: 16]};
+  function automatic logic [31:0] ews(input logic [175:0] v, input int k);
+    ews = {{16{v[175 - 16*k]}}, v[175 - 16*k -: 16]};
+  endfunction
+  function automatic logic [31:0] ewl(input logic [175:0] v, input int k);
+    ewl = {v[175 - 16*k -: 16], v[159 - 16*k -: 16]};
   endfunction
 
-  // How many extension words an <ea> has (PRM 2.2, Table 2-?), for an operand
-  // of `sz`; mode 6 with bit 8 set is the full format, which M6 does not build
-  // (`full`).
-  function automatic logic [2:0] ea_len(input logic [2:0] m, input logic [2:0] r,
-                                        input logic [1:0] sz);
-    case (m)
-      3'd5, 3'd6: ea_len = 3'd1;
-      3'd7: case (r)
-              3'd0, 3'd2, 3'd3: ea_len = 3'd1;
-              3'd1:             ea_len = 3'd2;
-              3'd4:             ea_len = (sz == rd68041_pkg::SZ_L) ? 3'd2 : 3'd1;
-              default:          ea_len = 3'd0;
-            endcase
-      default: ea_len = 3'd0;
-    endcase
+  // An indexed mode with the full extension-word format (PRM 2.2.6-2.2.10):
+  // mode 6, or mode 7 register 3, whose first extension word has bit 8 set.
+  function automatic logic is_full(input logic [2:0] m, input logic [2:0] r,
+                                   input logic [15:0] x);
+    is_full = ((m == 3'd6) || (m == 3'd7 && r == 3'd3)) && x[8];
+  endfunction
+  // Its words: the base displacement's (BD SIZE, bits 5-4: 01 none, 10 a word,
+  // 11 a long) and the outer displacement's (I/IS, bits 1-0, the same).
+  function automatic logic [3:0] bd_words(input logic [15:0] x);
+    bd_words = (x[5:4] == 2'b10) ? 4'd1 : (x[5:4] == 2'b11) ? 4'd2 : 4'd0;
+  endfunction
+  function automatic logic [3:0] od_words(input logic [15:0] x);
+    od_words = (x[2:0] == 3'd0 || x[2:0] == 3'd4) ? 4'd0 :
+               (x[1:0] == 2'b10) ? 4'd1 : (x[1:0] == 2'b11) ? 4'd2 : 4'd0;
+  endfunction
+  // Memory indirect: I/IS not zero (PRM Table 2-2).
+  function automatic logic is_ind(input logic [2:0] m, input logic [2:0] r,
+                                  input logic [15:0] x);
+    is_ind = is_full(m, r, x) && (x[2:0] != 3'd0);
+  endfunction
+  // ... and post-indexed (I/IS 101-111 with the index not suppressed).
+  function automatic logic is_post(input logic [15:0] x);
+    is_post = !x[6] && x[2];
+  endfunction
+  // The encodings PRM Table 2-2 reserves.
+  function automatic logic full_bad(input logic [15:0] x);
+    full_bad = x[3] || (x[5:4] == 2'b00) || (x[2:0] == 3'd4) || (x[6] && x[2]);
+  endfunction
+
+  // How many extension words an <ea> has (PRM 2.2), for an operand of `sz`,
+  // its first extension word x.
+  function automatic logic [3:0] ea_len(input logic [2:0] m, input logic [2:0] r,
+                                        input logic [1:0] sz, input logic [15:0] x);
+    if (is_full(m, r, x)) begin
+      ea_len = 4'd1 + bd_words(x) + od_words(x);
+    end else begin
+      case (m)
+        3'd5, 3'd6: ea_len = 4'd1;
+        3'd7: case (r)
+                3'd0, 3'd2, 3'd3: ea_len = 4'd1;
+                3'd1:             ea_len = 4'd2;
+                3'd4:             ea_len = (sz == rd68041_pkg::SZ_L) ? 4'd2 : 4'd1;
+                default:          ea_len = 4'd0;
+              endcase
+        default: ea_len = 4'd0;
+      endcase
+    end
   endfunction
 
   // The immediate an <ea> of mode 7.4 carries, at extension word k.
-  function automatic logic [31:0] imm_of(input logic [111:0] v, input int k,
+  function automatic logic [31:0] imm_of(input logic [175:0] v, input int k,
                                          input logic [1:0] sz);
     case (sz)
       rd68041_pkg::SZ_B: imm_of = {24'h0, ewb(v, k)};
       rd68041_pkg::SZ_W: imm_of = {16'h0, ew(v, k)};
-      default:           imm_of = {ew(v, k), ew(v, k + 1)};
+      default:           imm_of = ewl(v, k);
     endcase
   endfunction
 
@@ -115,65 +165,124 @@ module rd68041_decode (
     ctrl = (m == 3'd2) || (m == 3'd5) || (m == 3'd6) || ((m == 3'd7) && (r <= 3'd3));
   endfunction
 
-  // ---------------------------------------------------------------------------
-  // The decoder.
-  // ---------------------------------------------------------------------------
   // One <ea>'s fields into a micro-operation, for an operand of size sz, its
-  // extension words at w[k].
+  // extension words at w[k]. With the full format and memory indirection,
+  // `pre` asks for the first of the two addresses -- where the pointer is
+  // read, into T3 -- and otherwise this is the second: T3 plus the post-index
+  // and the outer displacement (PRM 2.2.8-2.2.10).
   function automatic rd68041_pkg::uop_t put_ea(input rd68041_pkg::uop_t ui,
-                                               input logic [111:0] v,
+                                               input logic [175:0] v,
                                                input logic [2:0] m, input logic [2:0] r,
-                                               input logic [1:0] sz, input int k);
+                                               input logic [1:0] sz, input int k,
+                                               input bit pre);
     rd68041_pkg::uop_t o;
     logic [15:0] x;
+    logic [31:0] bd, od;
+    int          kb, ko;
     o = ui;
     x = ew(v, k);
     o.ea_an   = r;
     o.ea_step = (sz == rd68041_pkg::SZ_L) ? 3'd4 :
                 ((sz == rd68041_pkg::SZ_W) || (r == 3'd7)) ? 3'd2 : 3'd1;
-    case (m)
-      3'd2: begin o.ea_en = 1'b1; o.ea_base = rd68041_pkg::B_AN; end
-      3'd3: begin o.ea_en = 1'b1; o.ea_base = rd68041_pkg::B_AN; o.ea_upd = rd68041_pkg::U_POST; end
-      3'd4: begin o.ea_en = 1'b1; o.ea_base = rd68041_pkg::B_AN; o.ea_upd = rd68041_pkg::U_PRE; end
-      3'd5: begin o.ea_en = 1'b1; o.ea_base = rd68041_pkg::B_AN; o.ea_disp = {{16{x[15]}}, x}; end
-      3'd6: begin
-        o.ea_en    = 1'b1;
-        o.ea_base  = rd68041_pkg::B_AN;
-        o.ea_xen   = 1'b1;
-        o.ea_xn    = x[15:12];
-        o.ea_xl    = x[11];
-        o.ea_scale = x[10:9];
-        o.ea_disp  = {{24{x[7]}}, x[7:0]};
-        if (x[8]) o.halt = 1'b1;                      // the full format: M7
+    if (is_full(m, r, x)) begin
+      kb = k + 1;
+      ko = k + 1 + int'(bd_words(x));
+      bd = (x[5:4] == 2'b10) ? ews(v, kb) : (x[5:4] == 2'b11) ? ewl(v, kb) : 32'h0;
+      od = (od_words(x) == 4'd1) ? ews(v, ko) : (od_words(x) == 4'd2) ? ewl(v, ko) : 32'h0;
+      o.ea_en    = 1'b1;
+      o.ea_xn    = x[15:12];
+      o.ea_xl    = x[11];
+      o.ea_scale = x[10:9];
+      if (full_bad(x)) o.halt = 1'b1;
+      if (x[2:0] != 3'd0 && !pre) begin
+        // The second address: T3, the post-index, the outer displacement.
+        o.ea_base = rd68041_pkg::B_REG;
+        o.ea_reg  = 5'd19;
+        o.ea_xen  = is_post(x);
+        o.ea_disp = od;
+      end else begin
+        // The base (An or the PC, unless BS suppresses it), the index (unless
+        // IS does, or it comes after the indirection) and the base
+        // displacement. PRM 2.2.11: the PC is the first extension word's.
+        o.ea_xen  = !x[6] && !(x[2:0] != 3'd0 && is_post(x));
+        if (x[7]) begin
+          o.ea_base = rd68041_pkg::B_NONE;
+          o.ea_disp = bd;
+        end else if (m == 3'd7) begin
+          o.ea_base = rd68041_pkg::B_PC;
+          o.ea_disp = bd + 32'(2 + 2*k);
+        end else begin
+          o.ea_base = rd68041_pkg::B_AN;
+          o.ea_disp = bd;
+        end
       end
-      3'd7: begin
-        o.ea_en = (r != 3'd4);
-        case (r)
-          3'd0: o.ea_disp = {{16{x[15]}}, x};
-          3'd1: o.ea_disp = {x, ew(v, k + 1)};
-          // PRM 2.2.11: the PC is "the address of the extension word".
-          3'd2: begin o.ea_base = rd68041_pkg::B_PC; o.ea_disp = {{16{x[15]}}, x} + 32'(2 + 2*k); end
-          3'd3: begin
-            o.ea_base  = rd68041_pkg::B_PC;
-            o.ea_xen   = 1'b1;
-            o.ea_xn    = x[15:12];
-            o.ea_xl    = x[11];
-            o.ea_scale = x[10:9];
-            o.ea_disp  = {{24{x[7]}}, x[7:0]} + 32'(2 + 2*k);
-            if (x[8]) o.halt = 1'b1;
-          end
-          default: ;
-        endcase
-      end
-      default: ;
-    endcase
+    end else begin
+      case (m)
+        3'd2: begin o.ea_en = 1'b1; o.ea_base = rd68041_pkg::B_AN; end
+        3'd3: begin o.ea_en = 1'b1; o.ea_base = rd68041_pkg::B_AN; o.ea_upd = rd68041_pkg::U_POST; end
+        3'd4: begin o.ea_en = 1'b1; o.ea_base = rd68041_pkg::B_AN; o.ea_upd = rd68041_pkg::U_PRE; end
+        3'd5: begin o.ea_en = 1'b1; o.ea_base = rd68041_pkg::B_AN; o.ea_disp = {{16{x[15]}}, x}; end
+        3'd6: begin
+          o.ea_en    = 1'b1;
+          o.ea_base  = rd68041_pkg::B_AN;
+          o.ea_xen   = 1'b1;
+          o.ea_xn    = x[15:12];
+          o.ea_xl    = x[11];
+          o.ea_scale = x[10:9];
+          o.ea_disp  = {{24{x[7]}}, x[7:0]};
+        end
+        3'd7: begin
+          o.ea_en = (r != 3'd4);
+          case (r)
+            3'd0: o.ea_disp = {{16{x[15]}}, x};
+            3'd1: o.ea_disp = ewl(v, k);
+            3'd2: begin o.ea_base = rd68041_pkg::B_PC; o.ea_disp = {{16{x[15]}}, x} + 32'(2 + 2*k); end
+            3'd3: begin
+              o.ea_base  = rd68041_pkg::B_PC;
+              o.ea_xen   = 1'b1;
+              o.ea_xn    = x[15:12];
+              o.ea_xl    = x[11];
+              o.ea_scale = x[10:9];
+              o.ea_disp  = {{24{x[7]}}, x[7:0]} + 32'(2 + 2*k);
+            end
+            default: ;
+          endcase
+        end
+        default: ;
+      endcase
+    end
     put_ea = o;
+  endfunction
+
+  // The first micro-operation of an <ea> with memory indirection: the pointer,
+  // a long word, read into T3.
+  function automatic rd68041_pkg::uop_t ind_uop(input rd68041_pkg::uop_t ui,
+                                                input logic [175:0] v,
+                                                input logic [2:0] m, input logic [2:0] r,
+                                                input int k);
+    rd68041_pkg::uop_t o;
+    o = put_ea(ui, v, m, r, rd68041_pkg::SZ_L, k, 1'b1);
+    o.ld     = 1'b1;
+    o.sz     = rd68041_pkg::SZ_L;
+    o.b_sel  = rd68041_pkg::S_MEM;
+    o.op     = rd68041_pkg::OP_PASSB;
+    o.cc     = rd68041_pkg::CC_NONE;
+    o.br     = rd68041_pkg::BR_NONE;
+    o.st     = 1'b0;
+    o.wr     = 1'b1;
+    o.wr_reg = 5'd19;
+    o.wr_sz  = rd68041_pkg::SZ_L;
+    o.wr2    = 1'b0;
+    o.crw    = 1'b0;
+    o.trap   = 1'b0;
+    o.last   = 1'b0;
+    ind_uop  = o;
   endfunction
 
   // The operand of an <ea> as a source on side A (to_a) or B: a register, the
   // immediate, or the memory operand (and then a load).
   function automatic rd68041_pkg::uop_t src_ea(input rd68041_pkg::uop_t ui,
-                                               input logic [111:0] v,
+                                               input logic [175:0] v,
                                                input logic [2:0] m, input logic [2:0] r,
                                                input logic [1:0] sz, input int k,
                                                input bit to_a);
@@ -190,7 +299,7 @@ module rd68041_decode (
     end else begin
       sel = rd68041_pkg::S_MEM;
       o.ld = 1'b1;
-      o = put_ea(o, v, m, r, sz, k);
+      o = put_ea(o, v, m, r, sz, k, 1'b0);
     end
     if (to_a) begin o.a_sel = sel; o.a_reg = rr; end
     else      begin o.b_sel = sel; o.b_reg = rr; end
@@ -203,10 +312,15 @@ module rd68041_decode (
   // Shorthands for the fields the operation words share.
   logic [2:0] sm, sr, dm, dr;     // <ea> mode and register; bits 8-6 and 11-9
   logic [1:0] sz;
-  logic [2:0] n_src, n_dst;
+  logic [3:0] n_src, n_dst;
   logic [4:0] dn, an_r;           // Dn and An at bits 11-9, as register numbers
   logic [4:0] dy, ay;             // Dn and An at bits 2-0
   logic [4:0] k;                  // the transfer this is (MOVEM, MOVEP)
+  logic [4:0] sq;                 // the micro-operation, not counting a prelude
+  logic       stp;                // ... not the instruction's first
+  logic [3:0] eak;                // where op[5:0]'s <ea> extension words start
+  logic       uses_ea;            // op[5:0] is an <ea> of this instruction
+  logic       pre_s;              // a prelude was issued for op[5:0]'s <ea>
 
   // The data register of a 1-bit-wide field, as a register number.
   function automatic logic [4:0] dreg(input logic [2:0] r);
@@ -251,17 +365,49 @@ module rd68041_decode (
     u.br     = rd68041_pkg::BR_NONE;
     u.wr_sz  = rd68041_pkg::SZ_L;
     bad      = 1'b0;
-    need     = 3'd0;
-    pop      = 3'd0;
+    need     =  4'd0;
+    pop      =  4'd0;
     more     = 1'b0;
     mv_used  = 1'b0;
+    ind_out  = 2'b00;
     sm = op[5:3];  sr = op[2:0];
     dm = op[8:6];  dr = op[11:9];
     dn = dreg(op[11:9]);  an_r = areg(op[11:9]);
     dy = dreg(op[2:0]);   ay = areg(op[2:0]);
     sz = rd68041_pkg::SZ_L;
-    n_src = 3'd0;  n_dst = 3'd0;
-    k  = step ? mv_k : 5'd0;
+    n_src =  4'd0;  n_dst =  4'd0;
+    // The indirection prelude, if any, comes first; the instruction's own
+    // micro-operations are counted after it (doc/microarch.md).
+    pre_s = (seq == 5'd0) ? 1'b0 : ind_in[0];
+    sq  = seq - {4'h0, pre_s};
+    stp = (sq != 5'd0);
+    k   = stp ? mv_k : 5'd0;
+    // Where op[5:0]'s extension words start, and whether it is an <ea> at all,
+    // for the prelude below. MOVE decides its own.
+    eak = 4'd0;
+    uses_ea = 1'b1;
+    case (op[15:12])
+      4'b0000: begin
+        if (op[8] && sm == 3'd1)       uses_ea = 1'b0;                // MOVEP
+        else if (op[8])                eak = 4'd0;                    // BTST Dn,<ea>...
+        else if (op[11:8] == 4'b1000)  eak = 4'd1;                    // BTST #n,<ea>...
+        else if (op[7:6] == 2'b11 || op[11:8] == 4'b1110) eak = 4'd1; // CAS, CMP2, MOVES
+        else                           eak = (op[7:6] == 2'b10) ? 4'd2 : 4'd1; // the immediates
+      end
+      4'b0100: begin
+        if (op[11:4] == 8'hE7)                      uses_ea = 1'b0;  // RTE, RTS, MOVEC...
+        if (op[11:7] == 5'b11000 || op[11:7] == 5'b10001 || op[11:7] == 5'b11001)
+                                                    eak = 4'd1;      // MUL.L, DIV.L, MOVEM
+      end
+      4'b0101: if (op[7:6] == 2'b11 && (sm == 3'd1 || sm == 3'd7 && sr >= 3'd2))
+                 uses_ea = 1'b0;                                      // DBcc, TRAPcc
+      4'b0110, 4'b0111, 4'b1010, 4'b1111: uses_ea = 1'b0;
+      4'b1110: begin
+        if (op[7:6] != 2'b11) uses_ea = 1'b0;                         // the register shifts
+        else if (op[11])      eak = 4'd1;                             // the bit fields
+      end
+      default: ;
+    endcase
 
     case (op[15:12])
       // =======================================================================
@@ -272,13 +418,13 @@ module rd68041_decode (
           // MOVEP (PRM 4): bytes at (d16,Ay), +2, +4, +6, one a micro-op.
           logic [2:0] nb;
           nb   = op[6] ? 3'd4 : 3'd2;
-          need = 3'd1;
+          need =  4'd1;
           u.len = 5'd4;
-          pop  = (k == 5'(nb - 3'd1)) ? 3'd1 : 3'd0;
+          pop  = (k == 5'(nb - 3'd1)) ? 4'd1 : 4'd0;
           more = (k != 5'(nb - 3'd1));
           u.last = !more;
           mv_used = 1'b1;
-          u = put_ea(u, w, 3'd5, sr, rd68041_pkg::SZ_B, 0);
+          u = put_ea(u, w, 3'd5, sr, rd68041_pkg::SZ_B, 0, 1'b0);
           u.ea_disp = u.ea_disp + {26'h0, k, 1'b0};
           u.sz = rd68041_pkg::SZ_B;
           u.op = rd68041_pkg::OP_MOVEP;
@@ -297,9 +443,9 @@ module rd68041_decode (
           // immediate word; a long word in Dn, a byte in memory.
           logic st_form;
           st_form = !op[8];
-          n_src   = st_form ? 3'd1 : 3'd0;
+          n_src   = st_form ? 4'd1 : 4'd0;
           sz      = (sm == 3'd0) ? rd68041_pkg::SZ_L : rd68041_pkg::SZ_B;
-          n_dst   = ea_len(sm, sr, sz);
+          n_dst   = ea_len(sm, sr, sz, ew(w, int'(n_src)));
           need    = n_src + n_dst;
           pop     = need;
           u.len   = 5'(2 + 2*need);
@@ -320,10 +466,132 @@ module rd68041_decode (
             if (sm == 3'd0) begin u.wr = 1'b1; u.wr_reg = dy; end
             else            u.st = 1'b1;
           end
+        end else if (op[7:6] == 2'b11 && !op[11]) begin
+          // CMP2, CHK2 (PRM 4): Rn against the bounds pair at <ea>, the lower
+          // first. The lower into T0; then the upper, compared.
+          logic [15:0] x;
+          x  = ew(w, 0);
+          sz = op[10:9];
+          if (sz == 2'b11 || !ctrl(sm, sr) || x[10:0] != 11'h0) bad = 1'b1;
+          need  = 4'd1 + ea_len(sm, sr, sz, ew(w, 1));
+          u.len = 5'(2 + 2*need);
+          u.sz  = sz;
+          u = put_ea(u, w, sm, sr, sz, 1, 1'b0);
+          u.ld = 1'b1;
+          if (!stp) begin
+            u.b_sel = rd68041_pkg::S_MEM;
+            u.wr = 1'b1; u.wr_reg = 5'd16;
+            u.last = 1'b0; more = 1'b1;
+          end else begin
+            u.ea_disp = u.ea_disp + ((sz == rd68041_pkg::SZ_B) ? 32'd1 :
+                                     (sz == rd68041_pkg::SZ_W) ? 32'd2 : 32'd4);
+            u.a_reg = 5'd16;
+            u.b_sel = rd68041_pkg::S_MEM;
+            u.wr2_reg = {1'b0, x[15:12]};          // Rn, the third operand
+            u.op = rd68041_pkg::OP_CMP2;
+            u.trap = x[11];                        // CHK2
+            pop = need;
+          end
+        end else if (op[7:6] == 2'b11 && sm == 3'd7 && sr == 3'd4) begin
+          // CAS2 (PRM 4): both read under LOCK, compared, then either both
+          // updates written or the second operand written back (UM 7.4.5),
+          // and the compare registers loaded.
+          logic [15:0] x1, x2;
+          logic [4:0]  rn1, rn2;
+          x1 = ew(w, 0); x2 = ew(w, 1);
+          rn1 = {1'b0, x1[15:12]}; rn2 = {1'b0, x2[15:12]};
+          sz  = (op[10:9] == 2'b10) ? rd68041_pkg::SZ_W : rd68041_pkg::SZ_L;
+          if (op[10:9] == 2'b00 || op[10:9] == 2'b01) bad = 1'b1;
+          need  = 4'd2;
+          u.len = 5'd6;
+          u.sz  = sz;
+          u.wr_sz = sz;
+          more  = (sq != 5'd8);
+          u.last = !more;
+          case (sq)
+            5'd0, 5'd1: begin                      // the two operands, locked
+              u.ea_en = 1'b1; u.ea_base = rd68041_pkg::B_REG;
+              u.ea_reg = (sq == 5'd0) ? rn1 : rn2;
+              u.ld = 1'b1; u.lk = 1'b1;
+              u.b_sel = rd68041_pkg::S_MEM;
+              u.wr = 1'b1; u.wr_reg = (sq == 5'd0) ? 5'd16 : 5'd17;
+            end
+            5'd2: begin                            // compare the first
+              u.a_reg = dreg(x1[2:0]); u.b_reg = 5'd16;
+              u.op = rd68041_pkg::OP_CMP; u.cc = rd68041_pkg::CC_CMP;
+            end
+            5'd3: begin                            // ... and, if equal, the second
+              u.a_reg = dreg(x2[2:0]); u.b_reg = 5'd17;
+              u.op = rd68041_pkg::OP_CMP; u.cc = rd68041_pkg::CC_CMP;
+              u.cx = 1'b1; u.cond = 4'h7;
+            end
+            5'd4, 5'd5: begin                      // equal: the updates, the second first
+              u.ea_en = 1'b1; u.ea_base = rd68041_pkg::B_REG;
+              u.ea_reg = (sq == 5'd4) ? rn2 : rn1;
+              u.b_reg  = (sq == 5'd4) ? dreg(x2[8:6]) : dreg(x1[8:6]);
+              u.st = 1'b1; u.lk = 1'b1; u.lke = (sq == 5'd5);
+              u.cx = 1'b1; u.cond = 4'h7;
+            end
+            5'd6: begin                            // not: the second written back
+              u.ea_en = 1'b1; u.ea_base = rd68041_pkg::B_REG; u.ea_reg = rn2;
+              u.b_reg = 5'd17;
+              u.st = 1'b1; u.lk = 1'b1; u.lke = 1'b1;
+              u.cx = 1'b1; u.cond = 4'h6;
+            end
+            default: begin                         // ... and Dc1, Dc2 loaded
+              u.b_reg = (sq == 5'd7) ? 5'd16 : 5'd17;
+              u.wr = 1'b1; u.wr_reg = (sq == 5'd7) ? dreg(x1[2:0]) : dreg(x2[2:0]);
+              u.cx = 1'b1; u.cond = 4'h6;
+              if (sq == 5'd8) pop = 4'd2;
+            end
+          endcase
         end else if (op[7:6] == 2'b11) begin
-          bad = 1'b1;                              // CAS, CAS2, CMP2, CHK2: M7, part 2
+          // CAS Dc,Du,<ea> (PRM 4): read under LOCK, compared with Dc; Du
+          // written if equal, else the operand written back (UM 7.4.5) and Dc
+          // loaded with it.
+          logic [15:0] x;
+          x  = ew(w, 0);
+          sz = (op[10:9] == 2'b01) ? rd68041_pkg::SZ_B :
+               (op[10:9] == 2'b10) ? rd68041_pkg::SZ_W : rd68041_pkg::SZ_L;
+          if (op[10:9] == 2'b00 || !malt(sm, sr) || x[15:9] != 7'h0 || x[5:3] != 3'h0)
+            bad = 1'b1;
+          need  = 4'd1 + ea_len(sm, sr, sz, ew(w, 1)); pop = need;
+          u.len = 5'(2 + 2*need);
+          u.sz  = sz;
+          u = put_ea(u, w, sm, sr, sz, 1, 1'b0);
+          u.ld = 1'b1; u.st = 1'b1; u.lk = 1'b1; u.lke = 1'b1;
+          u.a_reg = dreg(x[2:0]);
+          u.b_sel = rd68041_pkg::S_MEM;
+          u.wr2_reg = dreg(x[8:6]);                // Du, the third operand
+          u.op = rd68041_pkg::OP_CAS; u.cc = rd68041_pkg::CC_CMP;
+          u.wr = 1'b1; u.wr_reg = dreg(x[2:0]); u.wr_sz = sz;
         end else if (op[11:8] == 4'b1110) begin
-          bad = 1'b1;                              // MOVES: M7, part 2
+          // MOVES (PRM 6): the source or destination in the space SFC or
+          // DFC names (UM 7.4: an alternate function code access).
+          logic [15:0] x;
+          x  = ew(w, 0);
+          sz = op[7:6];
+          if (!malt(sm, sr) || x[10:0] != 11'h0) bad = 1'b1;
+          need  = 4'd1 + ea_len(sm, sr, sz, ew(w, 1)); pop = need;
+          u.len = 5'(2 + 2*need);
+          u.sz  = sz;
+          u = put_ea(u, w, sm, sr, sz, 1, 1'b0);
+          u.alt = 1'b1;
+          if (x[11]) begin
+            u.st = 1'b1;
+            u.b_reg = {1'b0, x[15:12]};
+          end else begin
+            u.ld = 1'b1;
+            u.b_sel = rd68041_pkg::S_MEM;
+            u.wr = 1'b1; u.wr_reg = {1'b0, x[15:12]};
+            if (x[15]) begin
+              // To An: the whole register, the operand sign-extended.
+              u.b_sxw = (sz == rd68041_pkg::SZ_W);
+              if (sz == rd68041_pkg::SZ_B) u.op = rd68041_pkg::OP_EXTBL;
+            end else begin
+              u.wr_sz = sz;
+            end
+          end
         end else if (op[11:9] == 3'd0 || op[11:9] == 3'd1 || op[11:9] == 3'd2 ||
                      op[11:9] == 3'd3 || op[11:9] == 3'd5 || op[11:9] == 3'd6) begin
           sz = op[7:6];
@@ -331,7 +599,7 @@ module rd68041_decode (
             // To CCR (byte); to SR (word) is M8's.
             if (sz == rd68041_pkg::SZ_B &&
                 (op[11:9] == 3'd0 || op[11:9] == 3'd1 || op[11:9] == 3'd5)) begin
-              need = 3'd1; pop = 3'd1;
+              need =  4'd1; pop =  4'd1;
               u.len = 5'd4;
               u.a_sel = rd68041_pkg::S_IMM; u.imm = {24'h0, ewb(w, 0)};
               u.op = rd68041_pkg::OP_CCR;
@@ -341,8 +609,8 @@ module rd68041_decode (
               bad = 1'b1;
             end
           end else begin
-            n_src = (sz == rd68041_pkg::SZ_L) ? 3'd2 : 3'd1;
-            n_dst = ea_len(sm, sr, sz);
+            n_src = (sz == rd68041_pkg::SZ_L) ? 4'd2 : 4'd1;
+            n_dst = ea_len(sm, sr, sz, ew(w, int'(n_src)));
             need  = n_src + n_dst;
             pop   = need;
             u.len = 5'(2 + 2*need);
@@ -378,48 +646,91 @@ module rd68041_decode (
       // 0001, 0010, 0011: MOVE, MOVEA
       // =======================================================================
       4'b0001, 4'b0010, 4'b0011: begin
+        // The phases (doc/microarch.md): [the source's prelude] [the source
+        // into T0] [the destination's prelude] the move. ind_in says which
+        // preludes were issued; ph counts the phases from 0.
+        logic       mm;
+        logic [4:0] ph;
+        uses_ea = 1'b0;                          // MOVE handles its own preludes
         sz = (op[13:12] == 2'b01) ? rd68041_pkg::SZ_B :
              (op[13:12] == 2'b11) ? rd68041_pkg::SZ_W : rd68041_pkg::SZ_L;
-        n_src = ea_len(sm, sr, sz);
-        n_dst = ea_len(dm, dr, sz);
+        n_src = ea_len(sm, sr, sz, ew(w, 0));
+        n_dst = ea_len(dm, dr, sz, ew(w, int'(n_src)));
         need  = n_src + n_dst;
         u.sz  = sz;
         u.len = 5'(2 + 2*need);
+        mm    = (sm >= 3'd2) && !is_imm(sm, sr) && (dm >= 3'd2);
         if (!ok_mode(sm, sr) || (sm == 3'd1 && sz == rd68041_pkg::SZ_B)) bad = 1'b1;
-        if (dm == 3'd1) begin
-          // MOVEA: no byte form; the word is sign-extended (PRM 4).
-          if (sz == rd68041_pkg::SZ_B) bad = 1'b1;
-          u = src_ea(u, w, sm, sr, sz, 0, 1'b0);
-          u.b_sxw = (sz == rd68041_pkg::SZ_W);
-          u.wr = 1'b1; u.wr_reg = an_r;
-          pop = n_src;
-        end else if (!dalt(dm, dr)) begin
-          bad = 1'b1;
-        end else if (dm == 3'd0) begin
-          u = src_ea(u, w, sm, sr, sz, 0, 1'b0);
-          u.cc = rd68041_pkg::CC_LOGIC;
-          u.wr = 1'b1; u.wr_reg = dn; u.wr_sz = sz;
-          pop = n_src;
-        end else if (!step && sm >= 3'd2 && !is_imm(sm, sr)) begin
-          // Memory to memory, first: the source into T0.
-          u = src_ea(u, w, sm, sr, sz, 0, 1'b0);
-          u.last = 1'b0; more = 1'b1;
-          u.wr = 1'b1; u.wr_reg = 5'd16;
-          pop = n_src;
-        end else if (step) begin
-          // ... second: T0 to the destination, its extension words now at w[0].
-          u.b_reg = 5'd16;
-          u = put_ea(u, w, dm, dr, sz, 0);
-          u.st = 1'b1;
-          u.cc = rd68041_pkg::CC_LOGIC;
-          pop = n_dst;
-        end else begin
-          u = src_ea(u, w, sm, sr, sz, 0, 1'b0);
-          u = put_ea(u, w, dm, dr, sz, int'(n_src));
-          u.st = 1'b1;
-          u.cc = rd68041_pkg::CC_LOGIC;
-          pop = n_src + n_dst;
+        if (dm >= 3'd2 && !dalt(dm, dr)) bad = 1'b1;
+        if (dm == 3'd1 && sz == rd68041_pkg::SZ_B) bad = 1'b1;
+        if (seq == 5'd0) begin
+          ind_out[0] = (sm >= 3'd2) && is_ind(sm, sr, ew(w, 0));
+          ind_out[1] = (dm >= 3'd2) && is_ind(dm, dr, ew(w, int'(n_src)));
         end
+        // Map the micro-operation to its phase: 0 source prelude, 1 source to
+        // T0, 2 destination prelude, 3 the move.
+        begin
+          logic si, di;
+          si = (seq == 5'd0) ? ind_out[0] : ind_in[0];
+          di = (seq == 5'd0) ? ind_out[1] : ind_in[1];
+          ph = 5'd3;
+          if (mm) begin
+            case (seq)
+              5'd0: ph = si ? 5'd0 : 5'd1;
+              5'd1: ph = si ? 5'd1 : (di ? 5'd2 : 5'd3);
+              5'd2: ph = (si && di) ? 5'd2 : 5'd3;
+              default: ph = 5'd3;
+            endcase
+          end else if (dm >= 3'd2) begin
+            ph = (seq == 5'd0 && di) ? 5'd2 : 5'd3;
+          end else begin
+            ph = (seq == 5'd0 && si) ? 5'd0 : 5'd3;
+          end
+        end
+        case (ph)
+          5'd0: begin
+            u = ind_uop(u, w, sm, sr, 0);
+            more = 1'b1;
+          end
+          5'd2: begin
+            // Before it, with memory to memory, the source took its words.
+            u = ind_uop(u, w, dm, dr, mm ? 0 : int'(n_src));
+            more = 1'b1;
+          end
+          5'd1: begin
+            u = src_ea(u, w, sm, sr, sz, 0, 1'b0);
+            u.last = 1'b0; more = 1'b1;
+            u.wr = 1'b1; u.wr_reg = 5'd16;
+            pop = n_src;
+          end
+          default: begin
+            if (dm == 3'd1) begin
+              // MOVEA: no byte form; the word is sign-extended (PRM 4).
+              u = src_ea(u, w, sm, sr, sz, 0, 1'b0);
+              u.b_sxw = (sz == rd68041_pkg::SZ_W);
+              u.wr = 1'b1; u.wr_reg = an_r;
+              pop = n_src;
+            end else if (dm == 3'd0) begin
+              u = src_ea(u, w, sm, sr, sz, 0, 1'b0);
+              u.cc = rd68041_pkg::CC_LOGIC;
+              u.wr = 1'b1; u.wr_reg = dn; u.wr_sz = sz;
+              pop = n_src;
+            end else if (mm) begin
+              // T0 to the destination, its extension words now at w[0].
+              u.b_reg = 5'd16;
+              u = put_ea(u, w, dm, dr, sz, 0, 1'b0);
+              u.st = 1'b1;
+              u.cc = rd68041_pkg::CC_LOGIC;
+              pop = n_dst;
+            end else begin
+              u = src_ea(u, w, sm, sr, sz, 0, 1'b0);
+              u = put_ea(u, w, dm, dr, sz, int'(n_src), 1'b0);
+              u.st = 1'b1;
+              u.cc = rd68041_pkg::CC_LOGIC;
+              pop = n_src + n_dst;
+            end
+          end
+        endcase
       end
 
       // =======================================================================
@@ -429,26 +740,26 @@ module rd68041_decode (
         priority casez (op[11:0])
           12'b0000_11??_????: begin                // MOVE from SR
             if (!dalt(sm, sr)) bad = 1'b1;
-            need = ea_len(sm, sr, rd68041_pkg::SZ_W); pop = need;
+            need = ea_len(sm, sr, rd68041_pkg::SZ_W, ew(w, 0)); pop = need;
             u.len = 5'(2 + 2*need);
             u.sz = rd68041_pkg::SZ_W;
             u.crr = 1'b1; u.cr = rd68041_pkg::CR_SR;
             if (sm == 3'd0) begin u.wr = 1'b1; u.wr_reg = dy; u.wr_sz = rd68041_pkg::SZ_W; end
-            else begin u = put_ea(u, w, sm, sr, rd68041_pkg::SZ_W, 0); u.st = 1'b1; end
+            else begin u = put_ea(u, w, sm, sr, rd68041_pkg::SZ_W, 0, 1'b0); u.st = 1'b1; end
           end
           12'b0010_11??_????: begin                // MOVE from CCR
             if (!dalt(sm, sr)) bad = 1'b1;
-            need = ea_len(sm, sr, rd68041_pkg::SZ_W); pop = need;
+            need = ea_len(sm, sr, rd68041_pkg::SZ_W, ew(w, 0)); pop = need;
             u.len = 5'(2 + 2*need);
             u.sz = rd68041_pkg::SZ_W;
             u.crr = 1'b1; u.cr = rd68041_pkg::CR_SR;
             u.op = rd68041_pkg::OP_AND; u.a_sel = rd68041_pkg::S_IMM; u.imm = 32'h1F;
             if (sm == 3'd0) begin u.wr = 1'b1; u.wr_reg = dy; u.wr_sz = rd68041_pkg::SZ_W; end
-            else begin u = put_ea(u, w, sm, sr, rd68041_pkg::SZ_W, 0); u.st = 1'b1; end
+            else begin u = put_ea(u, w, sm, sr, rd68041_pkg::SZ_W, 0, 1'b0); u.st = 1'b1; end
           end
           12'b0100_11??_????: begin                // MOVE to CCR
             if (sm == 3'd1 || !ok_mode(sm, sr)) bad = 1'b1;
-            need = ea_len(sm, sr, rd68041_pkg::SZ_W); pop = need;
+            need = ea_len(sm, sr, rd68041_pkg::SZ_W, ew(w, 0)); pop = need;
             u.len = 5'(2 + 2*need);
             u.sz = rd68041_pkg::SZ_W;
             u = src_ea(u, w, sm, sr, rd68041_pkg::SZ_W, 0, 1'b1);
@@ -459,7 +770,7 @@ module rd68041_decode (
           12'b0010_????_????: begin                // CLR <ea>
             sz = op[7:6];
             if (!dalt(sm, sr)) bad = 1'b1;
-            need = ea_len(sm, sr, sz); pop = need;
+            need = ea_len(sm, sr, sz, ew(w, 0)); pop = need;
             u.len = 5'(2 + 2*need);
             u.sz = sz;
             u.op = rd68041_pkg::OP_CLR; u.cc = rd68041_pkg::CC_LOGIC;
@@ -467,7 +778,7 @@ module rd68041_decode (
               u.wr = 1'b1; u.wr_reg = dy; u.wr_sz = sz;
             end else begin
               // PRM 4: the MC68020 on does not read the operand first.
-              u = put_ea(u, w, sm, sr, sz, 0);
+              u = put_ea(u, w, sm, sr, sz, 0, 1'b0);
               u.st = 1'b1;
             end
           end
@@ -476,7 +787,7 @@ module rd68041_decode (
           12'b0110_????_????: begin                // NOT
             sz = op[7:6];
             if (!dalt(sm, sr)) bad = 1'b1;
-            need = ea_len(sm, sr, sz); pop = need;
+            need = ea_len(sm, sr, sz, ew(w, 0)); pop = need;
             u.len = 5'(2 + 2*need);
             u.sz = sz;
             case (op[10:9])
@@ -497,9 +808,9 @@ module rd68041_decode (
           end
           12'b???1_11??_????: begin                // LEA <ea>,An
             if (!ctrl(sm, sr)) bad = 1'b1;
-            need = ea_len(sm, sr, rd68041_pkg::SZ_L); pop = need;
+            need = ea_len(sm, sr, rd68041_pkg::SZ_L, ew(w, 0)); pop = need;
             u.len = 5'(2 + 2*need);
-            u = put_ea(u, w, sm, sr, rd68041_pkg::SZ_L, 0);
+            u = put_ea(u, w, sm, sr, rd68041_pkg::SZ_L, 0, 1'b0);
             u.b_sel = rd68041_pkg::S_EA;
             u.wr = 1'b1; u.wr_reg = an_r;
           end
@@ -507,7 +818,7 @@ module rd68041_decode (
           12'b???1_00??_????: begin                // CHK.L
             sz = op[7] ? rd68041_pkg::SZ_W : rd68041_pkg::SZ_L;
             if (sm == 3'd1 || !ok_mode(sm, sr)) bad = 1'b1;
-            need = ea_len(sm, sr, sz); pop = need;
+            need = ea_len(sm, sr, sz, ew(w, 0)); pop = need;
             u.len = 5'(2 + 2*need);
             u.sz = sz;
             u = src_ea(u, w, sm, sr, sz, 0, 1'b1);
@@ -516,9 +827,9 @@ module rd68041_decode (
             u.trap = 1'b1;
           end
           12'b1000_0000_1???: begin                // LINK.L An,#d32
-            need = 3'd2; pop = 3'd2;
+            need =  4'd2; pop =  4'd2;
             u.len = 5'd6;
-            u = put_ea(u, w, 3'd4, 3'd7, rd68041_pkg::SZ_L, 0);
+            u = put_ea(u, w, 3'd4, 3'd7, rd68041_pkg::SZ_L, 0, 1'b0);
             u.a_reg = ay;
             u.imm = {ew(w, 0), ew(w, 1)};
             u.op = rd68041_pkg::OP_LINK;
@@ -526,7 +837,16 @@ module rd68041_decode (
             u.wr = (op[2:0] != 3'd7); u.wr_reg = ay;
             u.wr2 = 1'b1; u.wr2_reg = 5'd15;
           end
-          12'b1000_00??_????: bad = 1'b1;          // NBCD: M7, part 2
+          12'b1000_00??_????: begin                // NBCD <ea>
+            if (!dalt(sm, sr)) bad = 1'b1;
+            need = ea_len(sm, sr, rd68041_pkg::SZ_B, ew(w, 0)); pop = need;
+            u.len = 5'(2 + 2*need);
+            u.sz = rd68041_pkg::SZ_B;
+            u.op = rd68041_pkg::OP_BCD; u.fn = 4'd2;
+            u = src_ea(u, w, sm, sr, rd68041_pkg::SZ_B, 0, 1'b0);
+            if (sm == 3'd0) begin u.wr = 1'b1; u.wr_reg = dy; u.wr_sz = rd68041_pkg::SZ_B; end
+            else            u.st = 1'b1;
+          end
           12'b1000_0100_0???: begin                // SWAP Dn
             u.len = 5'd2;
             u.b_reg = dy;
@@ -536,16 +856,16 @@ module rd68041_decode (
           12'b1000_0100_1???: bad = 1'b1;          // BKPT: M8
           12'b1000_01??_????: begin                // PEA <ea>
             if (!ctrl(sm, sr)) bad = 1'b1;
-            need = ea_len(sm, sr, rd68041_pkg::SZ_L);
+            need = ea_len(sm, sr, rd68041_pkg::SZ_L, ew(w, 0));
             u.len = 5'(2 + 2*need);
-            if (!step) begin
-              u = put_ea(u, w, sm, sr, rd68041_pkg::SZ_L, 0);
+            if (!stp) begin
+              u = put_ea(u, w, sm, sr, rd68041_pkg::SZ_L, 0, 1'b0);
               pop = need;
               u.b_sel = rd68041_pkg::S_EA;
               u.wr = 1'b1; u.wr_reg = 5'd16;
               u.last = 1'b0; more = 1'b1;
             end else begin
-              u = put_ea(u, w, 3'd4, 3'd7, rd68041_pkg::SZ_L, 0);
+              u = put_ea(u, w, 3'd4, 3'd7, rd68041_pkg::SZ_L, 0, 1'b0);
               u.b_reg = 5'd16;
               u.st = 1'b1; u.sz = rd68041_pkg::SZ_L;
             end
@@ -569,7 +889,7 @@ module rd68041_decode (
             sz   = op[6] ? rd68041_pkg::SZ_L : rd68041_pkg::SZ_W;
             if (ld_form ? !(ctrl(sm, sr) || post) : !((ctrl(sm, sr) && malt(sm, sr)) || pre))
               bad = 1'b1;
-            need  = 3'd1 + ea_len(sm, sr, rd68041_pkg::SZ_L);
+            need  =  4'd1 + ea_len(sm, sr, rd68041_pkg::SZ_L, ew(w, 1));
             u.len = 5'(2 + 2*need);
             u.sz  = sz;
             // A prelude for the control modes (T0 = <ea>), and for -(An) when
@@ -578,15 +898,15 @@ module rd68041_decode (
             // reversed, is 7 - n. Every extension word goes with the first
             // micro-operation; the decode stage keeps the mask from there.
             prel = !(pre || post) || (pre && mask0[4'(7 - sr)]);
-            if (!step) pop = need;
-            if (!step && mask0 == 16'h0000) begin
+            if (!stp) pop = need;
+            if (!stp && mask0 == 16'h0000) begin
               // No registers: nothing moves, and An is left alone.
-            end else if (!step && prel) begin
+            end else if (!stp && prel) begin
               if (pre) begin
-                u = put_ea(u, w, 3'd5, sr, rd68041_pkg::SZ_L, 0);
+                u = put_ea(u, w, 3'd5, sr, rd68041_pkg::SZ_L, 0, 1'b0);
                 u.ea_disp = (sz == rd68041_pkg::SZ_L) ? -32'd4 : -32'd2;
               end else begin
-                u = put_ea(u, w, sm, sr, rd68041_pkg::SZ_L, 1);
+                u = put_ea(u, w, sm, sr, rd68041_pkg::SZ_L, 1, 1'b0);
               end
               u.b_sel = rd68041_pkg::S_EA;
               u.wr = 1'b1; u.wr_reg = 5'd16;
@@ -597,10 +917,10 @@ module rd68041_decode (
               more    = !mv_last;
               u.last  = mv_last;
               if (pre || post) begin
-                u = put_ea(u, w, sm, sr, sz, 0);
+                u = put_ea(u, w, sm, sr, sz, 0, 1'b0);
               end else begin
                 u.ea_en = 1'b1;
-                u.ea_base = rd68041_pkg::B_REG; u.a_reg = 5'd16;
+                u.ea_base = rd68041_pkg::B_REG; u.ea_reg = 5'd16;
                 u.ea_disp = (sz == rd68041_pkg::SZ_L) ? {25'h0, k, 2'b00} : {26'h0, k, 1'b0};
               end
               if (ld_form) begin
@@ -617,11 +937,23 @@ module rd68041_decode (
             end
           end
           12'b1010_1111_1100: bad = 1'b1;          // ILLEGAL: M8
-          12'b1010_11??_????: bad = 1'b1;          // TAS: M7, part 2
+          12'b1010_11??_????: begin                // TAS <ea>: a locked read-modify-write
+            if (!dalt(sm, sr)) bad = 1'b1;
+            need = ea_len(sm, sr, rd68041_pkg::SZ_B, ew(w, 0)); pop = need;
+            u.len = 5'(2 + 2*need);
+            u.sz = rd68041_pkg::SZ_B;
+            u.op = rd68041_pkg::OP_TAS;
+            u = src_ea(u, w, sm, sr, rd68041_pkg::SZ_B, 0, 1'b0);
+            if (sm == 3'd0) begin
+              u.wr = 1'b1; u.wr_reg = dy; u.wr_sz = rd68041_pkg::SZ_B;
+            end else begin
+              u.st = 1'b1; u.lk = 1'b1; u.lke = 1'b1;
+            end
+          end
           12'b1010_????_????: begin                // TST <ea>
             sz = op[7:6];
             if (!ok_mode(sm, sr) || (sm == 3'd1 && sz == rd68041_pkg::SZ_B)) bad = 1'b1;
-            need = ea_len(sm, sr, sz); pop = need;
+            need = ea_len(sm, sr, sz, ew(w, 0)); pop = need;
             u.len = 5'(2 + 2*need);
             u.sz = sz;
             u = src_ea(u, w, sm, sr, sz, 0, 1'b0);
@@ -631,7 +963,7 @@ module rd68041_decode (
             logic [15:0] x;
             x = ew(w, 0);
             if (sm == 3'd1 || !ok_mode(sm, sr) || x[15] || x[9:3] != 7'h0) bad = 1'b1;
-            need = 3'd1 + ea_len(sm, sr, rd68041_pkg::SZ_L); pop = need;
+            need =  4'd1 + ea_len(sm, sr, rd68041_pkg::SZ_L, ew(w, 1)); pop = need;
             u.len = 5'(2 + 2*need);
             u.sz = rd68041_pkg::SZ_L;
             u = src_ea(u, w, sm, sr, rd68041_pkg::SZ_L, 1, 1'b1);
@@ -645,7 +977,7 @@ module rd68041_decode (
             logic [15:0] x;
             x = ew(w, 0);
             if (sm == 3'd1 || !ok_mode(sm, sr) || x[15] || x[9:3] != 7'h0) bad = 1'b1;
-            need = 3'd1 + ea_len(sm, sr, rd68041_pkg::SZ_L); pop = need;
+            need =  4'd1 + ea_len(sm, sr, rd68041_pkg::SZ_L, ew(w, 1)); pop = need;
             u.len = 5'(2 + 2*need);
             u.sz = rd68041_pkg::SZ_L;
             u = src_ea(u, w, sm, sr, rd68041_pkg::SZ_L, 1, 1'b1);
@@ -661,9 +993,9 @@ module rd68041_decode (
           end
           12'b1110_0100_????: bad = 1'b1;          // TRAP #n: M8
           12'b1110_0101_0???: begin                // LINK.W An,#d16
-            need = 3'd1; pop = 3'd1;
+            need =  4'd1; pop =  4'd1;
             u.len = 5'd4;
-            u = put_ea(u, w, 3'd4, 3'd7, rd68041_pkg::SZ_L, 0);
+            u = put_ea(u, w, 3'd4, 3'd7, rd68041_pkg::SZ_L, 0, 1'b0);
             u.a_reg = ay;
             u.imm = ews(w, 0);
             u.op = rd68041_pkg::OP_LINK;
@@ -673,7 +1005,7 @@ module rd68041_decode (
           end
           12'b1110_0101_1???: begin                // UNLK An
             u.len = 5'd2;
-            u = put_ea(u, w, 3'd2, sr, rd68041_pkg::SZ_L, 0);
+            u = put_ea(u, w, 3'd2, sr, rd68041_pkg::SZ_L, 0, 1'b0);
             u.ld = 1'b1; u.sz = rd68041_pkg::SZ_L;
             u.b_sel = rd68041_pkg::S_MEM;
             u.wr = 1'b1; u.wr_reg = ay;
@@ -694,9 +1026,9 @@ module rd68041_decode (
             u.len = 5'd2;
           end
           12'b1110_0111_0100: begin                // RTD #d16
-            need = 3'd1; pop = 3'd1;
+            need =  4'd1; pop =  4'd1;
             u.len = 5'd4;
-            u = put_ea(u, w, 3'd3, 3'd7, rd68041_pkg::SZ_L, 0);
+            u = put_ea(u, w, 3'd3, 3'd7, rd68041_pkg::SZ_L, 0, 1'b0);
             u.ld = 1'b1; u.sz = rd68041_pkg::SZ_L;
             u.b_sel = rd68041_pkg::S_MEM;
             u.br = rd68041_pkg::BR_MEM;
@@ -705,7 +1037,7 @@ module rd68041_decode (
           end
           12'b1110_0111_0101: begin                // RTS
             u.len = 5'd2;
-            u = put_ea(u, w, 3'd3, 3'd7, rd68041_pkg::SZ_L, 0);
+            u = put_ea(u, w, 3'd3, 3'd7, rd68041_pkg::SZ_L, 0, 1'b0);
             u.ld = 1'b1; u.sz = rd68041_pkg::SZ_L;
             u.br = rd68041_pkg::BR_MEM;
           end
@@ -715,15 +1047,15 @@ module rd68041_decode (
           end
           12'b1110_0111_0111: begin                // RTR: the CCR, then RTS
             u.len = 5'd2;
-            if (!step) begin
-              u = put_ea(u, w, 3'd3, 3'd7, rd68041_pkg::SZ_W, 0);
+            if (!stp) begin
+              u = put_ea(u, w, 3'd3, 3'd7, rd68041_pkg::SZ_W, 0, 1'b0);
               u.ld = 1'b1; u.sz = rd68041_pkg::SZ_W;
               u.a_sel = rd68041_pkg::S_MEM;
               u.op = rd68041_pkg::OP_TOCCR;
               u.cc = rd68041_pkg::CC_SET; u.cond = 4'd3;
               u.last = 1'b0; more = 1'b1;
             end else begin
-              u = put_ea(u, w, 3'd3, 3'd7, rd68041_pkg::SZ_L, 0);
+              u = put_ea(u, w, 3'd3, 3'd7, rd68041_pkg::SZ_L, 0, 1'b0);
               u.ld = 1'b1; u.sz = rd68041_pkg::SZ_L;
               u.br = rd68041_pkg::BR_MEM;
             end
@@ -733,7 +1065,7 @@ module rd68041_decode (
             logic [3:0]  c;
             x = ew(w, 0);
             c = cr_of(x[11:0]);
-            need = 3'd1; pop = 3'd1;
+            need =  4'd1; pop =  4'd1;
             u.len = 5'd4;
             if (c == 4'hF) bad = 1'b1;
             if (op[0]) begin                     // Rn -> Rc
@@ -748,17 +1080,19 @@ module rd68041_decode (
           end
           12'b1110_10??_????: begin                // JSR <ea>
             if (!ctrl(sm, sr)) bad = 1'b1;
-            need = ea_len(sm, sr, rd68041_pkg::SZ_L);
+            need = ea_len(sm, sr, rd68041_pkg::SZ_L, ew(w, 0));
             u.len = 5'(2 + 2*need);
-            if (!step) begin
-              u = put_ea(u, w, sm, sr, rd68041_pkg::SZ_L, 0);
+            if (!stp) begin
+              u = put_ea(u, w, sm, sr, rd68041_pkg::SZ_L, 0, 1'b0);
               pop = need;
               u.b_sel = rd68041_pkg::S_EA;
               u.wr = 1'b1; u.wr_reg = 5'd16;
               u.last = 1'b0; more = 1'b1;
             end else begin
-              u = put_ea(u, w, 3'd4, 3'd7, rd68041_pkg::SZ_L, 0);
-              u.a_sel = rd68041_pkg::S_IMM; u.imm = pc + 32'(2 + 2*need);
+              u = put_ea(u, w, 3'd4, 3'd7, rd68041_pkg::SZ_L, 0, 1'b0);
+              // The return address: the instruction's length is the first
+              // micro-operation's, the extension words being gone by now.
+              u.a_sel = rd68041_pkg::S_IMM; u.imm = pc + {27'h0, len_in};
               u.op = rd68041_pkg::OP_PASSA;
               u.st = 1'b1; u.sz = rd68041_pkg::SZ_L;
               u.b_reg = 5'd16;
@@ -767,9 +1101,9 @@ module rd68041_decode (
           end
           12'b1110_11??_????: begin                // JMP <ea>
             if (!ctrl(sm, sr)) bad = 1'b1;
-            need = ea_len(sm, sr, rd68041_pkg::SZ_L); pop = need;
+            need = ea_len(sm, sr, rd68041_pkg::SZ_L, ew(w, 0)); pop = need;
             u.len = 5'(2 + 2*need);
-            u = put_ea(u, w, sm, sr, rd68041_pkg::SZ_L, 0);
+            u = put_ea(u, w, sm, sr, rd68041_pkg::SZ_L, 0, 1'b0);
             u.b_sel = rd68041_pkg::S_EA;
             u.br = rd68041_pkg::BR_EA;
           end
@@ -784,7 +1118,7 @@ module rd68041_decode (
         if (op[7:6] == 2'b11) begin
           if (sm == 3'd1) begin
             // DBcc Dn,<label>
-            need = 3'd1; pop = 3'd1;
+            need =  4'd1; pop =  4'd1;
             u.len = 5'd4;
             u.b_reg = dy;
             u.op = rd68041_pkg::OP_DBCC;
@@ -795,20 +1129,20 @@ module rd68041_decode (
           end else if (sm == 3'd7 && sr >= 3'd2) begin
             // TRAPcc, with no operand, a word or a long (PRM 4).
             if (sr > 3'd4) bad = 1'b1;
-            need = (sr == 3'd2) ? 3'd1 : (sr == 3'd3) ? 3'd2 : 3'd0;
+            need = (sr == 3'd2) ? 4'd1 : (sr == 3'd3) ? 4'd2 : 4'd0;
             pop  = need;
             u.len = 5'(2 + 2*need);
             u.trap = 1'b1; u.cond = op[11:8];
           end else begin
             // Scc <ea>
             if (!dalt(sm, sr)) bad = 1'b1;
-            need = ea_len(sm, sr, rd68041_pkg::SZ_B); pop = need;
+            need = ea_len(sm, sr, rd68041_pkg::SZ_B, ew(w, 0)); pop = need;
             u.len = 5'(2 + 2*need);
             u.sz = rd68041_pkg::SZ_B;
             u.op = rd68041_pkg::OP_SCC;
             u.cond = op[11:8];
             if (sm == 3'd0) begin u.wr = 1'b1; u.wr_reg = dy; u.wr_sz = rd68041_pkg::SZ_B; end
-            else begin u = put_ea(u, w, sm, sr, rd68041_pkg::SZ_B, 0); u.st = 1'b1; end
+            else begin u = put_ea(u, w, sm, sr, rd68041_pkg::SZ_B, 0, 1'b0); u.st = 1'b1; end
           end
         end else begin
           sz = op[7:6];
@@ -816,7 +1150,7 @@ module rd68041_decode (
               (sm == 3'd1 && sz == rd68041_pkg::SZ_B)) begin
             bad = 1'b1;
           end else begin
-            need = ea_len(sm, sr, sz); pop = need;
+            need = ea_len(sm, sr, sz, ew(w, 0)); pop = need;
             u.len = 5'(2 + 2*need);
             u.sz = sz;
             u.a_sel = rd68041_pkg::S_IMM; u.imm = (op[11:9] == 3'd0) ? 32'd8 : {29'h0, op[11:9]};
@@ -843,11 +1177,11 @@ module rd68041_decode (
       4'b0110: begin
         logic [31:0] d;
         if (op[7:0] == 8'h00) begin
-          need = 3'd1; d = ews(w, 0);
+          need =  4'd1; d = ews(w, 0);
         end else if (op[7:0] == 8'hFF) begin
-          need = 3'd2; d = {ew(w, 0), ew(w, 1)};
+          need =  4'd2; d = {ew(w, 0), ew(w, 1)};
         end else begin
-          need = 3'd0; d = {{24{op[7]}}, op[7:0]};
+          need =  4'd0; d = {{24{op[7]}}, op[7:0]};
         end
         pop = need;
         u.len = 5'(2 + 2*need);
@@ -856,7 +1190,7 @@ module rd68041_decode (
         u.br  = rd68041_pkg::BR_DISP;
         u.cond = (op[11:8] == 4'd1) ? 4'd0 : op[11:8];    // BSR's 1 is "true", as BRA's 0
         if (op[11:8] == 4'd1) begin
-          u = put_ea(u, w, 3'd4, 3'd7, rd68041_pkg::SZ_L, 0);
+          u = put_ea(u, w, 3'd4, 3'd7, rd68041_pkg::SZ_L, 0, 1'b0);
           u.a_sel = rd68041_pkg::S_IMM; u.imm = pc + 32'(2 + 2*need);
           u.op = rd68041_pkg::OP_PASSA;
           u.st = 1'b1; u.sz = rd68041_pkg::SZ_L;
@@ -887,7 +1221,7 @@ module rd68041_decode (
         if ((op[15:12] == 4'b1000 || op[15:12] == 4'b1100) && (om == 3'd3 || om == 3'd7)) begin
           // DIVU.W, DIVS.W (1000); MULU.W, MULS.W (1100)
           if (sm == 3'd1 || !ok_mode(sm, sr)) bad = 1'b1;
-          need = ea_len(sm, sr, rd68041_pkg::SZ_W); pop = need;
+          need = ea_len(sm, sr, rd68041_pkg::SZ_W, ew(w, 0)); pop = need;
           u.len = 5'(2 + 2*need);
           u.sz = rd68041_pkg::SZ_W;
           u = src_ea(u, w, sm, sr, rd68041_pkg::SZ_W, 0, 1'b1);
@@ -897,9 +1231,98 @@ module rd68041_decode (
           u.wr = 1'b1; u.wr_reg = dn;
         end else if ((op[15:12] == 4'b1000 || op[15:12] == 4'b1100) && om[2] &&
                      (sm == 3'd0 || sm == 3'd1) && om[1:0] == 2'b00) begin
-          bad = 1'b1;                              // ABCD, SBCD: M7, part 2
+          // ABCD, SBCD: Dy,Dx or -(Ay),-(Ax), as ADDX and SUBX.
+          u.sz = rd68041_pkg::SZ_B;
+          u.op = rd68041_pkg::OP_BCD; u.fn = (op[15:12] == 4'b1100) ? 4'd0 : 4'd1;
+          u.len = 5'd2;
+          if (sm == 3'd0) begin
+            u.a_reg = dy; u.b_reg = dn;
+            u.wr = 1'b1; u.wr_reg = dn; u.wr_sz = rd68041_pkg::SZ_B;
+          end else if (!stp) begin
+            u = put_ea(u, w, 3'd4, sr, rd68041_pkg::SZ_B, 0, 1'b0);
+            u.ld = 1'b1;
+            u.b_sel = rd68041_pkg::S_MEM;
+            u.op = rd68041_pkg::OP_PASSB;
+            u.wr = 1'b1; u.wr_reg = 5'd16;
+            u.last = 1'b0; more = 1'b1;
+          end else begin
+            u = put_ea(u, w, 3'd4, dr, rd68041_pkg::SZ_B, 0, 1'b0);
+            u.ld = 1'b1; u.st = 1'b1;
+            u.a_reg = 5'd16;
+            u.b_sel = rd68041_pkg::S_MEM;
+          end
         end else if (op[15:12] == 4'b1000 && om[2] && (sm == 3'd0 || sm == 3'd1)) begin
-          bad = 1'b1;                              // PACK, UNPK: M7, part 2
+          // PACK (10100), UNPK (11000): Dx,Dy,#adj or -(Ax),-(Ay),#adj; the
+          // source at bits 2-0, the destination at 11-9 (PRM 4).
+          logic unpk;
+          // Bits 8-4: 10100 PACK, 11000 UNPK.
+          unpk = (op[7:4] == 4'b1000);
+          if (op[7:4] != 4'b0100 && op[7:4] != 4'b1000) bad = 1'b1;
+          need  = 4'd1;
+          u.len = 5'd4;
+          u.imm = {16'h0, ew(w, 0)};
+          u.a_sel = rd68041_pkg::S_REG;
+          if (sm == 3'd0) begin
+            pop = 4'd1;
+            u.b_reg = dy;
+            u.op = unpk ? rd68041_pkg::OP_UNPK : rd68041_pkg::OP_PACK;
+            u.wr = 1'b1; u.wr_reg = dn;
+            u.wr_sz = unpk ? rd68041_pkg::SZ_W : rd68041_pkg::SZ_B;
+          end else if (!unpk) begin
+            // PACK: the first byte read is the low one; then the high, the
+            // pack; then the byte written.
+            u.sz = rd68041_pkg::SZ_B;
+            more = (sq != 5'd2);
+            u.last = !more;
+            case (sq)
+              5'd0: begin
+                u = put_ea(u, w, 3'd4, sr, rd68041_pkg::SZ_B, 0, 1'b0);
+                u.ld = 1'b1; u.b_sel = rd68041_pkg::S_MEM;
+                u.wr = 1'b1; u.wr_reg = 5'd16;
+              end
+              5'd1: begin
+                u = put_ea(u, w, 3'd4, sr, rd68041_pkg::SZ_B, 0, 1'b0);
+                u.imm = {16'h0, ew(w, 0)};
+                u.ld = 1'b1; u.b_sel = rd68041_pkg::S_MEM;
+                u.a_reg = 5'd16;
+                u.op = rd68041_pkg::OP_PACK; u.fn = 4'd1;
+                u.wr = 1'b1; u.wr_reg = 5'd17;
+              end
+              default: begin
+                u = put_ea(u, w, 3'd4, dr, rd68041_pkg::SZ_B, 0, 1'b0);
+                u.b_reg = 5'd17;
+                u.st = 1'b1;
+                pop = 4'd1;
+              end
+            endcase
+          end else begin
+            // UNPK: the byte read and unpacked; the low byte written, then the
+            // high.
+            u.sz = rd68041_pkg::SZ_B;
+            more = (sq != 5'd2);
+            u.last = !more;
+            case (sq)
+              5'd0: begin
+                u = put_ea(u, w, 3'd4, sr, rd68041_pkg::SZ_B, 0, 1'b0);
+                u.imm = {16'h0, ew(w, 0)};
+                u.ld = 1'b1; u.b_sel = rd68041_pkg::S_MEM;
+                u.op = rd68041_pkg::OP_UNPK;
+                u.wr = 1'b1; u.wr_reg = 5'd16;
+              end
+              5'd1: begin
+                u = put_ea(u, w, 3'd4, dr, rd68041_pkg::SZ_B, 0, 1'b0);
+                u.b_reg = 5'd16;
+                u.st = 1'b1;
+              end
+              default: begin
+                u = put_ea(u, w, 3'd4, dr, rd68041_pkg::SZ_B, 0, 1'b0);
+                u.b_reg = 5'd16;
+                u.op = rd68041_pkg::OP_MOVEP; u.fn = 4'b1001;
+                u.st = 1'b1;
+                pop = 4'd1;
+              end
+            endcase
+          end
         end else if (op[15:12] == 4'b1100 && om[2] && (sm == 3'd0 || sm == 3'd1)) begin
           // EXG (PRM 4): 01000 Dx,Dy; 01001 Ax,Ay; 10001 Dx,Ay.
           u.len = 5'd2;
@@ -921,15 +1344,15 @@ module rd68041_decode (
           if (sm == 3'd0) begin
             u.a_reg = dy; u.b_reg = dn;
             u.wr = 1'b1; u.wr_reg = dn; u.wr_sz = sz;
-          end else if (!step) begin
-            u = put_ea(u, w, 3'd4, sr, sz, 0);
+          end else if (!stp) begin
+            u = put_ea(u, w, 3'd4, sr, sz, 0, 1'b0);
             u.ld = 1'b1;
             u.b_sel = rd68041_pkg::S_MEM;
             u.op = rd68041_pkg::OP_PASSB; u.cc = rd68041_pkg::CC_NONE;
             u.wr = 1'b1; u.wr_reg = 5'd16;
             u.last = 1'b0; more = 1'b1;
           end else begin
-            u = put_ea(u, w, 3'd4, dr, sz, 0);
+            u = put_ea(u, w, 3'd4, dr, sz, 0, 1'b0);
             u.ld = 1'b1; u.st = 1'b1;
             u.a_reg = 5'd16;
             u.b_sel = rd68041_pkg::S_MEM;
@@ -938,21 +1361,21 @@ module rd68041_decode (
           // CMPM (Ay)+,(Ax)+
           u.sz = sz;
           u.len = 5'd2;
-          if (!step) begin
-            u = put_ea(u, w, 3'd3, sr, sz, 0);
+          if (!stp) begin
+            u = put_ea(u, w, 3'd3, sr, sz, 0, 1'b0);
             u.ld = 1'b1;
             u.b_sel = rd68041_pkg::S_MEM;
             u.wr = 1'b1; u.wr_reg = 5'd16;
             u.last = 1'b0; more = 1'b1;
           end else begin
-            u = put_ea(u, w, 3'd3, dr, sz, 0);
+            u = put_ea(u, w, 3'd3, dr, sz, 0, 1'b0);
             u.ld = 1'b1;
             u.a_reg = 5'd16;
             u.b_sel = rd68041_pkg::S_MEM;
             u.op = rd68041_pkg::OP_CMP; u.cc = rd68041_pkg::CC_CMP;
           end
         end else begin
-          need = ea_len(sm, sr, sz); pop = need;
+          need = ea_len(sm, sr, sz, ew(w, 0)); pop = need;
           u.len = 5'(2 + 2*need);
           u.sz = sz;
           case (op[15:12])
@@ -1010,11 +1433,90 @@ module rd68041_decode (
       4'b1110: begin
         if (op[7:6] == 2'b11) begin
           if (op[11]) begin
-            bad = 1'b1;                            // BFxxx: M7, part 2
+            // The bit fields (PRM 4): <ea>{offset:width}, both from the
+            // extension word or from data registers. The width and offset
+            // into T3 (and, for memory, the field's byte address into T0);
+            // for memory, the five bytes read into T1 and T2; the operation;
+            // for memory and a modifying one, the five bytes written back.
+            logic [15:0] x;
+            logic [2:0]  t;
+            logic        rg, md, mm;
+            x  = ew(w, 0);
+            t  = op[10:8];              // 0 TST 1 EXTU 2 CHG 3 EXTS 4 CLR 5 FFO 6 SET 7 INS
+            rg = (sm == 3'd0);
+            md = (t == 3'd2) || (t == 3'd4) || (t == 3'd6) || (t == 3'd7);
+            mm = md && !rg;
+            if (!(rg || (md ? (ctrl(sm, sr) && malt(sm, sr)) : ctrl(sm, sr)))) bad = 1'b1;
+            if (x[15]) bad = 1'b1;
+            need  = 4'd1 + ea_len(sm, sr, rd68041_pkg::SZ_L, ew(w, 1));
+            u.len = 5'(2 + 2*need);
+            u.sz  = rd68041_pkg::SZ_L;
+            more  = rg ? (sq == 5'd0) : (sq != (mm ? 5'd5 : 5'd3));
+            u.last = !more;
+            if (!more) pop = need;
+            if (sq == 5'd0) begin
+              // The parameters, and for memory the address.
+              if (x[11]) u.a_reg = dreg(x[8:6]);
+              else begin u.a_sel = rd68041_pkg::S_IMM; u.imm = {27'h0, x[10:6]}; end
+              if (x[5])  u.b_reg = dreg(x[2:0]);
+              else begin u.b_sel = rd68041_pkg::S_IMM; u.imm[15:8] = {3'h0, x[4:0]}; end
+              u.fn = {2'b00, x[11], x[5]};
+              u.op = rd68041_pkg::OP_BFPRM;
+              u.wr = 1'b1; u.wr_reg = 5'd19;
+              if (!rg) begin
+                u = put_ea(u, w, sm, sr, rd68041_pkg::SZ_L, 1, 1'b0);
+                u.wr2 = 1'b1; u.wr2_reg = 5'd16;
+              end
+            end else if (!rg && (sq == 5'd1 || sq == 5'd2)) begin
+              // The five bytes: a long word, then the fifth with the
+              // parameters beside it.
+              u.ea_en = 1'b1; u.ea_base = rd68041_pkg::B_REG; u.ea_reg = 5'd16;
+              u.ld = 1'b1;
+              u.b_sel = rd68041_pkg::S_MEM;
+              if (sq == 5'd1) begin
+                u.wr = 1'b1; u.wr_reg = 5'd17;
+              end else begin
+                u.ea_disp = 32'd4; u.sz = rd68041_pkg::SZ_B;
+                u.a_reg = 5'd19;
+                u.op = rd68041_pkg::OP_BFPK;
+                u.wr = 1'b1; u.wr_reg = 5'd18;
+              end
+            end else if (rg ? (sq == 5'd1) : (sq == 5'd3)) begin
+              // The operation. A: what BFINS inserts, or BFFFO's offset; B:
+              // the register or the first four bytes; C: the parameters (and
+              // the fifth byte).
+              if (t == 3'd5) begin
+                if (x[11]) u.a_reg = dreg(x[8:6]);
+                else begin u.a_sel = rd68041_pkg::S_IMM; u.imm = {27'h0, x[10:6]}; end
+              end else begin
+                u.a_reg = dreg(x[14:12]);
+              end
+              u.b_reg   = rg ? dy : 5'd17;
+              u.wr2_reg = rg ? 5'd19 : 5'd18;
+              u.op = rd68041_pkg::OP_BF;
+              u.fn = {rg, t};
+              u.cc = rd68041_pkg::CC_SET; u.cond = 4'hF;       // set by the operation
+              if (t == 3'd1 || t == 3'd3 || t == 3'd5) begin
+                u.wr = 1'b1; u.wr_reg = dreg(x[14:12]);
+              end else if (md) begin
+                u.wr = 1'b1; u.wr_reg = rg ? dy : 5'd17;
+                if (!rg) begin u.wr2 = 1'b1; end
+              end
+            end else begin
+              // Memory, modified: written back, a long word and a byte.
+              u.ea_en = 1'b1; u.ea_base = rd68041_pkg::B_REG; u.ea_reg = 5'd16;
+              u.st = 1'b1;
+              if (sq == 5'd4) begin
+                u.b_reg = 5'd17;
+              end else begin
+                u.ea_disp = 32'd4; u.sz = rd68041_pkg::SZ_B;
+                u.b_reg = 5'd18;
+              end
+            end
           end else begin
             // A memory word, by one (PRM 4).
             if (!malt(sm, sr)) bad = 1'b1;
-            need = ea_len(sm, sr, rd68041_pkg::SZ_W); pop = need;
+            need = ea_len(sm, sr, rd68041_pkg::SZ_W, ew(w, 0)); pop = need;
             u.len = 5'(2 + 2*need);
             u.sz = rd68041_pkg::SZ_W;
             u = src_ea(u, w, sm, sr, rd68041_pkg::SZ_W, 0, 1'b0);
@@ -1044,6 +1546,22 @@ module rd68041_decode (
       default: bad = 1'b1;
     endcase
 
+    // The indirection prelude of an instruction whose <ea> is op[5:0]: its
+    // first micro-operation reads the pointer into T3, and the instruction's
+    // own follow (doc/microarch.md). It takes no extension word: the second
+    // address needs them.
+    if (uses_ea && seq == 5'd0 && sm >= 3'd2 && is_ind(sm, sr, ew(w, int'(eak)))) begin
+      u = ind_uop(u, w, sm, sr, int'(eak));
+      ind_out = 2'b01;
+      pop  = 4'd0;
+      more = 1'b1;
+      mv_used = 1'b0;
+    end
+
+    // After the first micro-operation the instruction's extension words may
+    // be gone from the queue, and with them what its length was computed from.
+    if (seq != 5'd0) u.len = len_in;
+
     // put_ea marks an <ea> not built yet (the full extension-word format) with
     // halt. `need` is kept: whether an instruction is built can depend on its
     // extension words (MOVEC's register field, the full format's bit 8), so
@@ -1054,7 +1572,7 @@ module rd68041_decode (
       u.last  = 1'b1;
       u.halt  = 1'b1;
       u.pc    = pc;
-      pop     = 3'd0;
+      pop     =  4'd0;
       more    = 1'b0;
       mv_used = 1'b0;
     end

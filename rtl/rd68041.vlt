@@ -31,3 +31,14 @@ lint_off -rule UNUSEDSIGNAL -file "*rtl/rd68041_core.sv" -match "*Bits of signal
 lint_off -rule UNUSEDSIGNAL -file "*rtl/rd68041_core.sv" -match "*Bits of signal are not used: 'o'*"
 lint_off -rule UNUSEDSIGNAL -file "*rtl/rd68041_core.sv" -match "*Bits of signal are not used: 'x'*"
 lint_off -rule UNUSEDSIGNAL -file "*rtl/rd68041_core.sv" -match "*Bits of signal are not used: 'w'*"
+
+// The decoder's helpers take an extension word and look at the fields their
+// format has (PRM 2.2, Table 2-2); CAS2's words likewise. Unused bits of them
+// are the format's other fields, read by another helper.
+lint_off -rule UNUSEDSIGNAL -file "*rtl/rd68041_decode.sv" -match "*Bits of signal are not used: 'x'*"
+lint_off -rule UNUSEDSIGNAL -file "*rtl/rd68041_decode.sv" -match "*Bits of signal are not used: 'x1'*"
+lint_off -rule UNUSEDSIGNAL -file "*rtl/rd68041_decode.sv" -match "*Bits of signal are not used: 'x2'*"
+
+// PACK keeps bits 11-8 and 3-0 of its sum and drops the others, by definition
+// (PRM 4).
+lint_off -rule UNUSEDSIGNAL -file "*rtl/rd68041_core.sv" -match "*Bits of signal are not used: 't'*"

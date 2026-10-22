@@ -113,7 +113,7 @@ module rd68041_top #(
   );
 
   // The integer unit, with instruction fetch and the data memory unit (M6).
-  logic         req_valid, req_ready, req_write;
+  logic         req_valid, req_ready, req_write, req_lock, req_locke, lock_seq;
   logic [31:0]  req_addr;
   logic  [1:0]  req_siz, req_tt;
   logic  [2:0]  req_tm;
@@ -134,7 +134,8 @@ module rd68041_top #(
       .clk(clk), .rst_n(rst_n), .crst(crst),
       .req_valid(req_valid), .req_ready(req_ready), .req_addr(req_addr),
       .req_write(req_write), .req_siz(req_siz), .req_tt(req_tt), .req_tm(req_tm),
-      .req_wdata(req_wdata), .rsp_valid(rsp_valid), .rsp_data(rsp_data),
+      .req_wdata(req_wdata), .req_lock(req_lock), .req_locke(req_locke),
+      .lock_seq(lock_seq), .rsp_valid(rsp_valid), .rsp_data(rsp_data),
       .rsp_done(rsp_done), .rsp_err(rsp_err),
       .retire(retire), .retire_pc(retire_pc), .retire_npc(retire_npc),
       .halted(halted), .sr(sr));
@@ -153,11 +154,11 @@ module rd68041_top #(
       .req_tln   (2'b00),
       .req_upa   (2'b00),
       .req_ciout (1'b0),
-      .req_lock  (1'b0),
-      .req_locke (1'b0),
+      .req_lock  (req_lock),
+      .req_locke (req_locke),
       .req_more  (1'b0),
       .req_wdata (req_wdata),
-      .lock_seq  (1'b0),
+      .lock_seq  (lock_seq),
       .rsp_valid (rsp_valid),
       .rsp_beat  (rsp_beat),
       .rsp_lw    (rsp_lw),

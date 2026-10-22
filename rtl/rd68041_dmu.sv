@@ -27,6 +27,8 @@ module rd68041_dmu (
     input  logic          rst_n,
     input  logic          crst,
     input  logic          sup,       // supervisor data space (TM 101), else user (001)
+    input  logic  [2:0]   sfc,       // MOVES's spaces (UM 7.4, Table 5-4)
+    input  logic  [2:0]   dfc,
 
     // A read, from OF: held until done.
     input  logic          ld_valid,
@@ -36,14 +38,20 @@ module rd68041_dmu (
     output logic [31:0]   ld_data,     // right justified, zero extended
     output logic          ld_err,
     input  logic          ld_cancel,   // the read is no longer wanted: finish it silently
+    input  logic          ld_lock,     // a locked read (UM 7.4.5)
+    input  logic          ld_alt,      // in SFC's space
 
     // A write, from W.
     input  logic          st_valid,
     input  logic [31:0]   st_addr,
     input  logic  [1:0]   st_sz,
     input  logic [31:0]   st_data,     // right justified
+    input  logic          st_lock,     // a locked write
+    input  logic          st_locke,    // ... the sequence's last
+    input  logic          st_alt,      // in DFC's space
     output logic          st_ready,    // taken this clock
     output logic          st_empty,    // nothing waiting (NOP, M8)
+    output logic          lock_open,   // a locked sequence is under way
 
     // The bus, through the arbiter.
     output logic          d_valid,
@@ -51,7 +59,10 @@ module rd68041_dmu (
     output logic [31:0]   d_addr,
     output logic          d_write,
     output logic  [1:0]   d_siz,
+    output logic  [1:0]   d_tt,
     output logic  [2:0]   d_tm,
+    output logic          d_lock,
+    output logic          d_locke,
     output logic [31:0]   d_wdata,
     input  logic          d_rsp,
     input  logic [31:0]   d_data,
@@ -63,6 +74,7 @@ module rd68041_dmu (
   logic [31:0] qa [0:2];
   logic  [1:0] qs [0:2];
   logic [31:0] qd [0:2];
+  logic  [2:0] qf [0:2];         // per write: lock, locke, alternate
   logic  [1:0] qn;               // writes held
 
   // The bytes an operand of size sz occupies at address a, as long words.
@@ -94,6 +106,7 @@ module rd68041_dmu (
   logic        xbusy;            // a transfer of it is on the bus
   logic        xerr;
   logic        xcancel;          // the read under way was cancelled
+  logic        xlk, xlke, xalt;  // the operand under way is locked, last, alternate
   logic  [2:0] cur_n;            // the bytes of the transfer on the bus
   logic  [1:0] cur_siz;
   logic  [1:0] cur_a10;
@@ -148,7 +161,15 @@ module rd68041_dmu (
   assign d_addr  = xa;
   assign d_write = (x == X_ST);
   assign d_siz   = t_siz;
-  assign d_tm    = sup ? rd68041_pkg::TM_SUP_DATA : rd68041_pkg::TM_USER_DATA;
+  // UM 5.3.2 and Table 5-4: an alternate function code access carries the
+  // function code on TM; a normal one, user or supervisor data.
+  assign d_tt    = xalt ? rd68041_pkg::TT_ALTFC : rd68041_pkg::TT_NORMAL;
+  assign d_tm    = xalt ? ((x == X_ST) ? dfc : sfc)
+                        : (sup ? rd68041_pkg::TM_SUP_DATA : rd68041_pkg::TM_USER_DATA);
+  // UM 7.4.5: LOCK on every transfer of the sequence, LOCKE on the last
+  // write's last transfer.
+  assign d_lock  = xlk;
+  assign d_locke = xlke && (xn == t_n);
   assign d_wdata = to_lanes(st_bytes(xd, xn, t_n), t_siz);
 
   // A read's bytes so far, and this transfer's added below them.
@@ -157,8 +178,13 @@ module rd68041_dmu (
 
   // A load starts when nothing is under way, nothing it reads is waiting to be
   // written, and it is asked for; a queued write starts otherwise.
-  wire start_ld = (x == X_IDLE) && ld_valid && !ld_blocked && !ld_done && !ld_cancel;
-  wire start_st = (x == X_IDLE) && !start_ld && (qn != 2'd0);
+  // A locked sequence: its first read waits for the queue to empty, and while
+  // it is open nothing unlocked starts (UM 7.4.5: the transfers are
+  // indivisible).
+  wire start_ld = (x == X_IDLE) && ld_valid && !ld_blocked && !ld_done && !ld_cancel &&
+                  (ld_lock ? (qn == 2'd0) : !lock_open);
+  wire start_st = (x == X_IDLE) && !start_ld && (qn != 2'd0) &&
+                  (!lock_open || qf[0][2]);
 
   assign st_ready = st_valid && (qn != 2'd3);
 
@@ -170,7 +196,11 @@ module rd68041_dmu (
 
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      for (int i = 0; i < 3; i++) begin qa[i] <= '0; qs[i] <= '0; qd[i] <= '0; end
+      for (int i = 0; i < 3; i++) begin qa[i] <= '0; qs[i] <= '0; qd[i] <= '0; qf[i] <= '0; end
+      lock_open <= 1'b0;
+      xlk     <= 1'b0;
+      xlke    <= 1'b0;
+      xalt    <= 1'b0;
       qn      <= '0;
       x       <= X_IDLE;
       xa      <= '0;
@@ -190,6 +220,7 @@ module rd68041_dmu (
       x       <= X_IDLE;
       xbusy   <= 1'b0;
       ld_done <= 1'b0;
+      lock_open <= 1'b0;
     end else begin
       ld_done <= 1'b0;
       // A cancelled read still finishes on the bus, as every transfer must,
@@ -217,9 +248,11 @@ module rd68041_dmu (
             ld_err  <= d_err || xerr;
             ld_data <= accum;
           end else begin
-            // The oldest write is done: the queue moves up.
-            qa[0] <= qa[1]; qs[0] <= qs[1]; qd[0] <= qd[1];
-            qa[1] <= qa[2]; qs[1] <= qs[2]; qd[1] <= qd[2];
+            // The oldest write is done: the queue moves up. The locked
+            // sequence's last write closes it.
+            qa[0] <= qa[1]; qs[0] <= qs[1]; qd[0] <= qd[1]; qf[0] <= qf[1];
+            qa[1] <= qa[2]; qs[1] <= qs[2]; qd[1] <= qd[2]; qf[1] <= qf[2];
+            if (xlke) lock_open <= 1'b0;
           end
           x    <= X_IDLE;
           xerr <= 1'b0;
@@ -231,16 +264,24 @@ module rd68041_dmu (
         xa   <= ld_addr;
         xn   <= nbytes(ld_sz);
         xd   <= '0;
+        xlk  <= ld_lock;
+        xlke <= 1'b0;
+        xalt <= ld_alt;
+        if (ld_lock) lock_open <= 1'b1;
       end else if (start_st) begin
         x    <= X_ST;
         xa   <= qa[0];
         xn   <= nbytes(qs[0]);
         xd   <= qd[0];
+        xlk  <= qf[0][2];
+        xlke <= qf[0][1];
+        xalt <= qf[0][0];
       end
 
       // A new write joins the queue behind those still there.
       if (st_ready) begin
         qa[q_in] <= st_addr; qs[q_in] <= st_sz; qd[q_in] <= st_data;
+        qf[q_in] <= {st_lock, st_locke, st_alt};
       end
       qn <= qn - {1'b0, q_out} + {1'b0, st_ready};
     end

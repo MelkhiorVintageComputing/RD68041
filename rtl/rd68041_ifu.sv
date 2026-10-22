@@ -8,8 +8,9 @@
 // instruction queue, and the decode stage's window on it.
 //
 // M6, uncached: one long-word read at a time from the bus, two instruction
-// words each, into a queue of twelve words. Decode sees the first eight and how
-// many of them are there, and says how many it took. A redirect -- a taken
+// words each, into a queue of twelve words -- room for the longest
+// instruction, eleven (PRM 2.2: MOVE with two full-format <ea>s). Decode sees
+// all of it and how many words are there, and says how many it took. A redirect -- a taken
 // branch, from EX -- empties the queue and fetches from the target; a read
 // already on the bus when it comes is let finish and its words thrown away.
 //
@@ -27,10 +28,10 @@ module rd68041_ifu (
     input  logic          sup,       // supervisor program space (TM 110), else user (010)
 
     // To decode.
-    output logic [127:0]  q_win,       // words 0-7 from the head, word 0 in 127:112
-    output logic  [3:0]   q_cnt,       // how many of them are there (0-8)
+    output logic [191:0]  q_win,       // the queue from its head, word 0 in 191:176
+    output logic  [3:0]   q_cnt,       // how many words are there (0-12)
     output logic [31:0]   q_pc,        // the head word's address
-    input  logic  [3:0]   q_pop,       // words decode takes this clock (0-8)
+    input  logic  [3:0]   q_pop,       // words decode takes this clock (0-12)
 
     // The bus, through the arbiter.
     output logic          f_valid,
@@ -55,13 +56,13 @@ module rd68041_ifu (
 
   // The window.
   always_comb begin
-    for (int k = 0; k < 8; k++) begin
+    for (int k = 0; k < QN; k++) begin
       logic [3:0] i;
       i = 4'((int'(head) + k) % QN);
-      q_win[127 - 16*k -: 16] = q[i];
+      q_win[191 - 16*k -: 16] = q[i];
     end
   end
-  assign q_cnt = (cnt > 4'd8) ? 4'd8 : cnt;
+  assign q_cnt = cnt;
   assign q_pc  = hpc;
 
   // Room for a long word's two, counting those already asked for.

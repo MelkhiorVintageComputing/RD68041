@@ -48,7 +48,7 @@ package rd68041_pkg;
   localparam logic [1:0] B_NONE = 2'd0;   // zero: absolute, immediate, register direct
   localparam logic [1:0] B_AN   = 2'd1;   // address register ea_an
   localparam logic [1:0] B_PC   = 2'd2;   // the instruction's address (disp folded, PRM 2.2.11)
-  localparam logic [1:0] B_REG  = 2'd3;   // any register, a_reg (a temporary holding an address)
+  localparam logic [1:0] B_REG  = 2'd3;   // any register, ea_reg (a temporary holding an address)
 
   // An update in EA.
   localparam logic [1:0] U_NONE = 2'd0;
@@ -68,38 +68,46 @@ package rd68041_pkg;
 
   // EX operations: the result from A (the register or immediate side) and B
   // (the memory, register or immediate side).
-  localparam logic [4:0] OP_PASSB = 5'd0;   // MOVE, MOVEA, LEA, MOVEQ: B
-  localparam logic [4:0] OP_ADD   = 5'd1;   // B + A
-  localparam logic [4:0] OP_SUB   = 5'd2;   // B - A
-  localparam logic [4:0] OP_AND   = 5'd3;
-  localparam logic [4:0] OP_OR    = 5'd4;
-  localparam logic [4:0] OP_EOR   = 5'd5;
-  localparam logic [4:0] OP_CMP   = 5'd6;   // B - A, flags only
-  localparam logic [4:0] OP_EXTW  = 5'd7;   // B's byte sign-extended to a word
-  localparam logic [4:0] OP_EXTL  = 5'd8;   // B's word sign-extended to a long
-  localparam logic [4:0] OP_EXTBL = 5'd9;   // B's byte sign-extended to a long
-  localparam logic [4:0] OP_SWAP  = 5'd10;
-  localparam logic [4:0] OP_CLR   = 5'd11;  // zero
-  localparam logic [4:0] OP_PASSA = 5'd12;  // A (a store of a register)
-  localparam logic [4:0] OP_ADDA  = 5'd13;  // B + A at 32 bits, no flags (ADDA, SUBQ to An...)
-  localparam logic [4:0] OP_SUBA  = 5'd14;
-  localparam logic [4:0] OP_CCR   = 5'd15;  // ANDI/ORI/EORI to CCR: CCR op= the immediate
-  localparam logic [4:0] OP_SHIFT = 5'd16;  // fn: {left, kind}; B shifted by A (rd68041_shifter)
-  localparam logic [4:0] OP_NEG   = 5'd17;  // 0 - B
-  localparam logic [4:0] OP_NEGX  = 5'd18;  // 0 - B - X
-  localparam logic [4:0] OP_NOT   = 5'd19;
-  localparam logic [4:0] OP_ADDX  = 5'd20;  // B + A + X
-  localparam logic [4:0] OP_SUBX  = 5'd21;  // B - A - X
-  localparam logic [4:0] OP_SCC   = 5'd22;  // $FF if cond, else $00
-  localparam logic [4:0] OP_DBCC  = 5'd23;  // B.W - 1, and the branch unless cond or -1
-  localparam logic [4:0] OP_BIT   = 5'd24;  // fn: 0 BTST 1 BCHG 2 BCLR 3 BSET; bit A of B
-  localparam logic [4:0] OP_MUL   = 5'd25;  // fn: {long, signed, 64-bit}
-  localparam logic [4:0] OP_DIV   = 5'd26;  // fn: {long, signed, 64-bit dividend}
-  localparam logic [4:0] OP_EXG   = 5'd27;  // result A, second result B
-  localparam logic [4:0] OP_TOCCR = 5'd28;  // the CCR from A's low five bits
-  localparam logic [4:0] OP_BCD   = 5'd29;  // fn: 0 ABCD, 1 SBCD, 2 NBCD
-  localparam logic [4:0] OP_LINK  = 5'd30;  // result the address, second result the address + imm
-  localparam logic [4:0] OP_MOVEP = 5'd31;  // fn: {store, -, byte}: B's byte fn[1:0] in or out
+  localparam logic [5:0] OP_PASSB = 6'd0;   // MOVE, MOVEA, LEA, MOVEQ: B
+  localparam logic [5:0] OP_ADD = 6'd1;   // B + A
+  localparam logic [5:0] OP_SUB = 6'd2;   // B - A
+  localparam logic [5:0] OP_AND = 6'd3;
+  localparam logic [5:0] OP_OR = 6'd4;
+  localparam logic [5:0] OP_EOR = 6'd5;
+  localparam logic [5:0] OP_CMP = 6'd6;   // B - A, flags only
+  localparam logic [5:0] OP_EXTW = 6'd7;   // B's byte sign-extended to a word
+  localparam logic [5:0] OP_EXTL = 6'd8;   // B's word sign-extended to a long
+  localparam logic [5:0] OP_EXTBL = 6'd9;   // B's byte sign-extended to a long
+  localparam logic [5:0] OP_SWAP = 6'd10;
+  localparam logic [5:0] OP_CLR = 6'd11;  // zero
+  localparam logic [5:0] OP_PASSA = 6'd12;  // A (a store of a register)
+  localparam logic [5:0] OP_ADDA = 6'd13;  // B + A at 32 bits, no flags (ADDA, SUBQ to An...)
+  localparam logic [5:0] OP_SUBA = 6'd14;
+  localparam logic [5:0] OP_CCR = 6'd15;  // ANDI/ORI/EORI to CCR: CCR op= the immediate
+  localparam logic [5:0] OP_SHIFT = 6'd16;  // fn: {left, kind}; B shifted by A (rd68041_shifter)
+  localparam logic [5:0] OP_NEG = 6'd17;  // 0 - B
+  localparam logic [5:0] OP_NEGX = 6'd18;  // 0 - B - X
+  localparam logic [5:0] OP_NOT = 6'd19;
+  localparam logic [5:0] OP_ADDX = 6'd20;  // B + A + X
+  localparam logic [5:0] OP_SUBX = 6'd21;  // B - A - X
+  localparam logic [5:0] OP_SCC = 6'd22;  // $FF if cond, else $00
+  localparam logic [5:0] OP_DBCC = 6'd23;  // B.W - 1, and the branch unless cond or -1
+  localparam logic [5:0] OP_BIT = 6'd24;  // fn: 0 BTST 1 BCHG 2 BCLR 3 BSET; bit A of B
+  localparam logic [5:0] OP_MUL = 6'd25;  // fn: {long, signed, 64-bit}
+  localparam logic [5:0] OP_DIV = 6'd26;  // fn: {long, signed, 64-bit dividend}
+  localparam logic [5:0] OP_EXG = 6'd27;  // result A, second result B
+  localparam logic [5:0] OP_TOCCR = 6'd28;  // the CCR from A's low five bits
+  localparam logic [5:0] OP_BCD = 6'd29;  // fn: 0 ABCD, 1 SBCD, 2 NBCD
+  localparam logic [5:0] OP_LINK = 6'd30;  // result the address, second result the address + imm
+  localparam logic [5:0] OP_MOVEP = 6'd31;  // fn: {store, -, byte}: B's byte fn[1:0] in or out
+  localparam logic [5:0] OP_PACK  = 6'd32;  // fn[0]: memory form, {B, A} bytes; + imm, packed
+  localparam logic [5:0] OP_UNPK  = 6'd33;  // B's byte unpacked to a word, + imm
+  localparam logic [5:0] OP_CAS   = 6'd34;  // compare A (Dc) with the operand read; Du (C) or it back
+  localparam logic [5:0] OP_TAS   = 6'd35;  // the byte read with bit 7 set
+  localparam logic [5:0] OP_CMP2  = 6'd36;  // the register (C) against A (lower) and B (upper)
+  localparam logic [5:0] OP_BFPRM = 6'd37;  // a bit field's width (B) and offset (A); the byte address
+  localparam logic [5:0] OP_BFPK  = 6'd38;  // ... with the fifth byte read
+  localparam logic [5:0] OP_BF    = 6'd39;  // fn: {register, type}: the operation (rd68041_bitfield)
 
   // How the condition codes are set (PRM 3.4, Table 3-18).
   localparam logic [2:0] CC_NONE  = 3'd0;
@@ -143,6 +151,7 @@ package rd68041_pkg;
     logic        ea_en;
     logic  [1:0] ea_base;
     logic  [2:0] ea_an;
+    logic  [4:0] ea_reg;     // B_REG's register
     logic        ea_xen;     // an index register
     logic  [3:0] ea_xn;
     logic        ea_xl;      // the index is long (else its low word, sign-extended)
@@ -162,7 +171,7 @@ package rd68041_pkg;
     logic        a_sxw;      // A is a word, sign-extended to a long first (ADDA.W, CMPA.W)
     logic        b_sxw;      // B likewise (MOVEA.W)
     logic [31:0] imm;
-    logic  [4:0] op;
+    logic  [5:0] op;
     logic  [2:0] cc;
     logic  [3:0] cond;       // Bcc's condition (PRM Table 3-19); 0 = true
     logic  [1:0] br;
@@ -172,6 +181,10 @@ package rd68041_pkg;
     logic        crr;        // B is control register cr
     logic        crw;        // the result goes to control register cr
     logic  [3:0] cr;
+    logic        lk;         // a locked transfer (CAS, CAS2, TAS; UM 7.4.5)
+    logic        lke;        // ... the sequence's last
+    logic        alt;        // MOVES: the space SFC or DFC names (UM 7.4, TT = 10)
+    logic        cx;         // only if cond holds: else no store, no write, no CCR (CAS2)
     // the register result
     logic        wr;
     logic  [4:0] wr_reg;
@@ -181,8 +194,8 @@ package rd68041_pkg;
   } uop_t;
 
   // Its width, written out: yosys has no $bits of a type. 40 (valid, last, halt,
-  // pc, len) + 51 (the <ea>) + 4 (ld, st, sz) + 105 (execute) + 14 (the
+  // pc, len) + 56 (the <ea>) + 4 (ld, st, sz) + 110 (execute) + 14 (the
   // results). sim/tb/core_*_tb check it against $bits.
-  localparam int UOP_W = 214;
+  localparam int UOP_W = 224;
 
 endpackage
