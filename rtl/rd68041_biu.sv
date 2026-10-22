@@ -4,8 +4,9 @@
 
 // RD68041 -- SystemVerilog MC68040
 //
-// The bus unit: the MC68040's bus as a master (UM 7.4-7.6), and arbitration
-// (UM 7.8). Snooping (UM 7.9) is a separate unit from M2.
+// The bus unit: the MC68040's bus as a master (UM 7.4-7.6), arbitration (UM
+// 7.8), and -- through rd68041_snoop, instantiated here so that every pin has
+// one owner -- the snooping of an alternate master's transfers (UM 7.9).
 //
 // Above this module, a request is ONE bus transfer: a byte, word or long word
 // already placed on its byte lanes by the requester (UM 7.2, Table 7-1: the
@@ -65,25 +66,32 @@ module rd68041_biu (
     output logic         owner,         // the core is, or is about to be, bus master
 
     // The pins (doc/pinout.md) -----------------------------------------------
+    input  logic [31:0]  a_i,
     output logic [31:0]  a_o,
     output logic         a_oe,
     input  logic [31:0]  d_i,
     output logic [31:0]  d_o,
     output logic         d_oe,
+    input  logic  [1:0]  tt_i,
     output logic  [1:0]  tt_o,
     output logic  [2:0]  tm_o,
     output logic  [1:0]  tln_o,
     output logic  [1:0]  upa_o,
+    input  logic         rw_i,
     output logic         rw_o,
+    input  logic  [1:0]  siz_i,
     output logic  [1:0]  siz_o,
     output logic         lock_n_o,
     output logic         locke_n_o,
     output logic         ciout_n_o,
     output logic         attr_oe,
+    input  logic         ts_n_i,
     output logic         ts_n_o,
     output logic         tip_n_o,
     output logic         tip_oe,
     input  logic         ta_n_i,
+    output logic         ta_n_o,
+    output logic         ta_oe,
     input  logic         tea_n_i,
     input  logic         tci_n_i,
     input  logic         tbi_n_i,
@@ -93,7 +101,20 @@ module rd68041_biu (
     input  logic         bb_n_i,
     output logic         bb_n_o,
     output logic         bb_oe,
-    output logic         mi_n_o
+    input  logic  [1:0]  sc_i,
+    output logic         mi_n_o,
+
+    // The caches, for the snooper (rd68041_snoop) --------------------------------
+    output logic [31:0]  sn_addr,
+    input  logic         sn_dhit,
+    input  logic         sn_ddirty,
+    input  logic         sn_ihit,
+    input  logic [31:0]  sn_rdata,
+    output logic         sn_wr,
+    output logic  [3:0]  sn_wbe,
+    output logic [31:0]  sn_wdata,
+    output logic         sn_dinv,
+    output logic         sn_iinv
 );
 
   // ---------------------------------------------------------------------------
@@ -208,6 +229,34 @@ module rd68041_biu (
   rd68041_late_release u_tip_rel (
       .clk(clk), .rst_n(rst_n), .on_d(tip_on_d), .oe(tip_oe));
 
+  // ---------------------------------------------------------------------------
+  // The snooper, and the pins it shares: D, TA, MI.
+  // ---------------------------------------------------------------------------
+  logic [31:0] m_d_o, s_d_o;
+  logic        m_d_oe, s_d_oe;
+  logic        sn_mi_release_d, s_ta_on_d;
+
+  rd68041_snoop u_snoop (
+      .clk(clk), .rst_n(rst_n), .crst(crst), .owner(owner),
+      .ts_n_i(ts_n_i), .a_i(a_i), .d_i(d_i), .tt_i(tt_i), .rw_i(rw_i),
+      .siz_i(siz_i), .sc_i(sc_i), .ta_n_i(ta_n_i), .tea_n_i(tea_n_i),
+      .tbi_n_i(tbi_n_i),
+      .mi_release_d(sn_mi_release_d), .d_o(s_d_o), .d_oe(s_d_oe),
+      .ta_n_o(ta_n_o), .ta_on_d(s_ta_on_d),
+      .sn_addr(sn_addr), .sn_dhit(sn_dhit), .sn_ddirty(sn_ddirty),
+      .sn_ihit(sn_ihit), .sn_rdata(sn_rdata), .sn_wr(sn_wr), .sn_wbe(sn_wbe),
+      .sn_wdata(sn_wdata), .sn_dinv(sn_dinv), .sn_iinv(sn_iinv)
+  );
+
+  rd68041_late_release u_ta_rel (
+      .clk(clk), .rst_n(rst_n), .on_d(s_ta_on_d), .oe(ta_oe));
+
+  // The data bus is the bus unit's in a transfer of its own and the snooper's
+  // when it answers an alternate master; never both, and a clock apart at the
+  // least (the bus changes hands through an idle clock, UM 7.8.1).
+  assign d_o  = m_d_oe ? m_d_o : s_d_o;
+  assign d_oe = m_d_oe | s_d_oe;
+
   // The next state, and what each state drives.
   st_e st_d;
   always_comb begin
@@ -247,6 +296,23 @@ module rd68041_biu (
   wire owns_d = (st_d == ST_C1) || (st_d == ST_DATA) || (st_d == ST_PARK) ||
                 (st_d == ST_IMPL);
 
+  // MI (UM 5.5.2, 7.9.1). Negated while the core is master, "from the same edge
+  // that the M68040 asserts the TS signal"; otherwise asserted -- during and
+  // after reset until the core's first cycle, "from the last TA of the current
+  // bus cycle if the M68040 owns the bus and loses it", and between an
+  // alternate master's transfers -- except where the snooper lets memory answer.
+  wire master_d = (st_d == ST_C1) || (st_d == ST_DATA) || (st_d == ST_PARK);
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      mi_n_o <= 1'b0;
+    end else if (crst) begin
+      mi_n_o <= 1'b0;
+    end else begin
+      mi_n_o <= master_d || sn_mi_release_d;
+    end
+  end
+
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       st        <= ST_RESET;
@@ -266,8 +332,8 @@ module rd68041_biu (
       rerun     <= 1'b0;
       a_o       <= '0;
       a_oe      <= 1'b0;
-      d_o       <= '0;
-      d_oe      <= 1'b0;
+      m_d_o     <= '0;
+      m_d_oe    <= 1'b0;
       tt_o      <= rd68041_pkg::TT_NORMAL;
       tm_o      <= '0;
       tln_o     <= '0;
@@ -282,7 +348,6 @@ module rd68041_biu (
       tip_n_o   <= 1'b1;
       bb_n_o    <= 1'b1;
       br_n_o    <= 1'b1;
-      mi_n_o    <= 1'b0;
       owner     <= 1'b0;
       rsp_valid <= 1'b0;
       rsp_beat  <= '0;
@@ -302,7 +367,7 @@ module rd68041_biu (
       tbi_mode  <= 1'b0;
       rerun     <= 1'b0;
       a_oe      <= 1'b0;
-      d_oe      <= 1'b0;
+      m_d_oe      <= 1'b0;
       attr_oe   <= 1'b0;
       ts_n_o    <= 1'b1;
       tip_n_o   <= 1'b1;
@@ -310,7 +375,6 @@ module rd68041_biu (
       br_n_o    <= 1'b1;
       lock_n_o  <= 1'b1;
       locke_n_o <= 1'b1;
-      mi_n_o    <= 1'b0;
       owner     <= 1'b0;
       rsp_valid <= 1'b0;
       rsp_done  <= 1'b0;
@@ -394,10 +458,7 @@ module rd68041_biu (
         ts_n_o  <= 1'b0;
         tip_n_o <= 1'b0;
         bb_n_o  <= 1'b0;
-        // UM 5.5.2: "MI is negated when the M68040 is the bus master"; UM 7.9.1:
-        // negated "from the same edge that the M68040 asserts the TS signal".
-        mi_n_o  <= 1'b1;
-        d_oe    <= 1'b0;
+        m_d_oe    <= 1'b0;
       end else if (tbi_next) begin
         // A burst-inhibited line's next long word: "the processor increments A3
         // and A2 for each read, and the new address is placed on the address
@@ -405,37 +466,35 @@ module rd68041_biu (
         a_o     <= {x_addr[31:4], lw_of(x_addr[3:2], beat + 2'd1), x_addr[1:0]};
         siz_o   <= rd68041_pkg::SIZ_LONG;
         ts_n_o  <= 1'b0;
-        d_oe    <= 1'b0;
+        m_d_oe    <= 1'b0;
       end else if (st == ST_C1) begin
         // C2: TS negated; a write drives its data (UM 7.4.3, 7.4.4).
         ts_n_o  <= 1'b1;
         if (x_write) begin
-          d_o  <= wd_of(x_wdata, beat);
-          d_oe <= 1'b1;
+          m_d_o  <= wd_of(x_wdata, beat);
+          m_d_oe <= 1'b1;
         end
       end else if (burst_on) begin
         // C3-C5 of a line burst: the next long word of a write (UM 7.4.4).
-        if (x_write) d_o <= wd_of(x_wdata, beat + 2'd1);
+        if (x_write) m_d_o <= wd_of(x_wdata, beat + 2'd1);
       end else if (x_end || t_retry) begin
         // The transfer is over. UM 7.4.3: "the processor also three-states the
         // data bus during the first half of the next clock following termination
         // of the write transfer"; TIP negates unless another transfer begins
         // (UM 7.4.1). LOCKE negates after the locked sequence's last write
         // (UM 7.4.5), LOCK unless the sequence continues.
-        d_oe      <= 1'b0;
+        m_d_oe      <= 1'b0;
         tip_n_o   <= 1'b1;
         locke_n_o <= 1'b1;
         lock_n_o  <= !(lock_seq && !x_locke);
         if (!grant) begin
           // Losing the bus: everything but BB and TIP leaves it at this edge
           // (specification 38); BB and TIP are driven negated through REL
-          // (specification 39). UM 7.9.1: "MI is asserted from the last TA of
-          // the current bus cycle if the M68040 owns the bus and loses it."
+          // (specification 39).
           a_oe     <= 1'b0;
           attr_oe  <= 1'b0;
           bb_n_o   <= 1'b1;
           lock_n_o <= 1'b1;
-          mi_n_o   <= 1'b0;
         end
       end else if ((st == ST_PARK || st == ST_IMPL) && grant) begin
         // Owning the bus between transfers: LOCK follows the requester, so a
@@ -447,7 +506,6 @@ module rd68041_biu (
         attr_oe  <= 1'b0;
         bb_n_o   <= 1'b1;
         lock_n_o <= 1'b1;
-        mi_n_o   <= 1'b0;
       end else if (st == ST_IDLE && grant && bb_free) begin
         // Implicit ownership: "the processor drives its output pins with
         // undetermined values and three-states BB, but does not perform a bus

@@ -42,16 +42,35 @@ logic  [1:0] tt_o, tln_o, upa_o, siz_o;
 logic  [2:0] tm_o;
 logic        rw_o, lock_n_o, locke_n_o, ciout_n_o, ts_n_o, tip_n_o, tip_oe;
 logic        br_n_o, bb_n_o, bb_oe, mi_n_o;
-logic        ta_n, tea_n, tbi_n, tci_n, avec_n;
+logic        ta_n_o, ta_oe;
+logic        s_ta_n, tea_n, tbi_n, tci_n, avec_n;   // the slave's
+logic  [1:0] sc = 2'b00;            // the snoop control an alternate master drives
+
+// The alternate master (sim/models/rd68041_altmaster.sv): a DMA controller.
+logic        am_own, am_d_oe, am_ts_n, am_bb_n, am_rw;
+logic [31:0] am_a, am_d;
+logic  [1:0] am_tt, am_siz, am_sc;
 logic        bg_n = 1'b0;           // the arbiter: granted unless a test says otherwise
 logic        alt_bb_n = 1'b1;       // an alternate master's BB
 logic        alt_bb_oe = 1'b0;
 
-// The board: what is on each wire.
-wire [31:0] dbus  = d_oe ? d_o : (slave_d_oe ? slave_d : 32'hzzzz_zzzz);
-wire        bb_w  = bb_oe ? bb_n_o : (alt_bb_oe ? alt_bb_n : 1'b1);
+// The board: what is on each wire. A wire nobody drives reads as its pull-up.
+wire [31:0] dbus  = d_oe ? d_o : (slave_d_oe ? slave_d : (am_d_oe ? am_d : 32'hzzzz_zzzz));
+wire        bb_w  = bb_oe ? bb_n_o : (alt_bb_oe ? alt_bb_n : (am_own ? am_bb_n : 1'b1));
 wire        tip_w = tip_oe ? tip_n_o : 1'b1;
-wire        ts_w  = attr_oe ? ts_n_o : 1'b1;
+wire        ts_w  = attr_oe ? ts_n_o : (am_own ? am_ts_n : 1'b1);
+wire [31:0] a_w   = a_oe ? a_o : (am_own ? am_a : 32'hFFFF_FFFF);
+wire  [1:0] tt_w  = attr_oe ? tt_o : (am_own ? am_tt : 2'b11);
+wire  [1:0] siz_w = attr_oe ? siz_o : (am_own ? am_siz : 2'b11);
+wire        rw_w  = attr_oe ? rw_o : (am_own ? am_rw : 1'b1);
+wire  [1:0] sc_w  = am_own ? am_sc : sc;
+// TA: the slave's, or the core's when it answers a snooped transfer.
+wire        ta_n  = s_ta_n & (ta_oe ? ta_n_o : 1'b1);
+
+// The snooper's port, answered by a stand-in for the caches.
+logic [31:0] sn_addr, sn_rdata, sn_wdata;
+logic        sn_dhit, sn_ddirty, sn_ihit, sn_wr, sn_dinv, sn_iinv;
+logic  [3:0] sn_wbe;
 
 rd68041_biu u_biu (
     .clk(clk), .rst_n(rst_n), .crst(crst),
@@ -63,20 +82,37 @@ rd68041_biu u_biu (
     .rsp_valid(rsp_valid), .rsp_beat(rsp_beat), .rsp_lw(rsp_lw),
     .rsp_data(rsp_data), .rsp_tci(rsp_tci), .rsp_avec(rsp_avec),
     .rsp_done(rsp_done), .rsp_err(rsp_err), .owner(owner),
-    .a_o(a_o), .a_oe(a_oe), .d_i(dbus), .d_o(d_o), .d_oe(d_oe),
-    .tt_o(tt_o), .tm_o(tm_o), .tln_o(tln_o), .upa_o(upa_o), .rw_o(rw_o),
-    .siz_o(siz_o), .lock_n_o(lock_n_o), .locke_n_o(locke_n_o),
-    .ciout_n_o(ciout_n_o), .attr_oe(attr_oe), .ts_n_o(ts_n_o),
-    .tip_n_o(tip_n_o), .tip_oe(tip_oe), .ta_n_i(ta_n), .tea_n_i(tea_n),
+    .a_i(a_w), .a_o(a_o), .a_oe(a_oe), .d_i(dbus), .d_o(d_o), .d_oe(d_oe),
+    .tt_i(tt_w), .tt_o(tt_o), .tm_o(tm_o), .tln_o(tln_o), .upa_o(upa_o),
+    .rw_i(rw_w), .rw_o(rw_o), .siz_i(siz_w), .siz_o(siz_o),
+    .lock_n_o(lock_n_o), .locke_n_o(locke_n_o),
+    .ciout_n_o(ciout_n_o), .attr_oe(attr_oe), .ts_n_i(ts_w), .ts_n_o(ts_n_o),
+    .tip_n_o(tip_n_o), .tip_oe(tip_oe), .ta_n_i(ta_n), .ta_n_o(ta_n_o),
+    .ta_oe(ta_oe), .tea_n_i(tea_n),
     .tci_n_i(tci_n), .tbi_n_i(tbi_n), .avec_n_i(avec_n), .br_n_o(br_n_o),
     .bg_n_i(bg_n), .bb_n_i(bb_w), .bb_n_o(bb_n_o), .bb_oe(bb_oe),
-    .mi_n_o(mi_n_o)
+    .sc_i(sc_w), .mi_n_o(mi_n_o),
+    .sn_addr(sn_addr), .sn_dhit(sn_dhit), .sn_ddirty(sn_ddirty), .sn_ihit(sn_ihit),
+    .sn_rdata(sn_rdata), .sn_wr(sn_wr), .sn_wbe(sn_wbe), .sn_wdata(sn_wdata),
+    .sn_dinv(sn_dinv), .sn_iinv(sn_iinv)
+);
+
+rd68041_snoopcache u_cache (
+    .clk(clk), .sn_addr(sn_addr), .sn_dhit(sn_dhit), .sn_ddirty(sn_ddirty),
+    .sn_ihit(sn_ihit), .sn_rdata(sn_rdata), .sn_wr(sn_wr), .sn_wbe(sn_wbe),
+    .sn_wdata(sn_wdata), .sn_dinv(sn_dinv), .sn_iinv(sn_iinv)
+);
+
+rd68041_altmaster u_am (
+    .clk(clk), .own(am_own), .a(am_a), .d(am_d), .d_oe(am_d_oe), .tt(am_tt),
+    .siz(am_siz), .rw(am_rw), .sc(am_sc), .ts_n(am_ts_n), .bb_n(am_bb_n),
+    .d_in(dbus), .ta_n(ta_n), .tea_n(tea_n), .tbi_n(tbi_n)
 );
 
 rd68041_slave #(.MEM_BYTES(65536)) u_slave (
-    .clk(clk), .a(a_o), .d_in(dbus), .d_out(slave_d), .d_oe(slave_d_oe),
-    .tt(tt_o), .tm(tm_o), .rw(rw_o), .siz(siz_o), .ts_n(ts_w), .mi_n(mi_n_o),
-    .ta_n(ta_n), .tea_n(tea_n), .tbi_n(tbi_n), .tci_n(tci_n), .avec_n(avec_n)
+    .clk(clk), .a(a_w), .d_in(dbus), .d_out(slave_d), .d_oe(slave_d_oe),
+    .tt(tt_w), .tm(tm_o), .rw(rw_w), .siz(siz_w), .ts_n(ts_w), .mi_n(mi_n_o),
+    .ta_n(s_ta_n), .tea_n(tea_n), .tbi_n(tbi_n), .tci_n(tci_n), .avec_n(avec_n)
 );
 
 rd68041_busmon u_mon (
@@ -84,7 +120,7 @@ rd68041_busmon u_mon (
     .tt_o(tt_o), .tm_o(tm_o), .siz_o(siz_o), .rw_o(rw_o), .d_oe(d_oe),
     .ts_n_o(ts_n_o), .tip_n_o(tip_n_o), .tip_oe(tip_oe), .bb_n_o(bb_n_o),
     .bb_oe(bb_oe), .slave_d_oe(slave_d_oe), .ta_n(ta_n), .tea_n(tea_n),
-    .tbi_n(tbi_n), .alt_owns(alt_bb_oe && !alt_bb_n)
+    .tbi_n(tbi_n), .alt_owns((alt_bb_oe && !alt_bb_n) || am_own), .core_slave(ta_oe)
 );
 
 // --- the request queue --------------------------------------------------------

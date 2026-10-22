@@ -6,8 +6,8 @@
 //
 // Top level: the MC68040's pins (doc/pinout.md), split into _i/_o/_oe.
 //
-// M1: the bus unit and the reset, and no processor yet: nothing asks for a
-// transfer.
+// M2: the bus unit with its snooper, and the reset; no processor yet, so
+// nothing asks for a transfer and no cache answers a snoop.
 
 module rd68041_top #(
     // Whether the floating-point unit is built: 1 is the MC68040, 0 the
@@ -119,6 +119,10 @@ module rd68041_top #(
   logic  [1:0]  rsp_beat, rsp_lw;
   logic [31:0]  rsp_data;
   logic         owner;
+  // The snooper's port to the caches; no caches until M9, so nothing hits.
+  logic [31:0]  sn_addr, sn_wdata;
+  logic  [3:0]  sn_wbe;
+  logic         sn_wr, sn_dinv, sn_iinv;
 
   rd68041_biu u_biu (
       .clk       (clk),
@@ -148,25 +152,32 @@ module rd68041_top #(
       .rsp_done  (rsp_done),
       .rsp_err   (rsp_err),
       .owner     (owner),
+      .a_i       (a_i),
       .a_o       (a_o),
       .a_oe      (a_oe),
       .d_i       (d_i),
       .d_o       (d_o),
       .d_oe      (d_oe),
+      .tt_i      (tt_i),
       .tt_o      (tt_o),
       .tm_o      (tm_o),
       .tln_o     (tln_o),
       .upa_o     (upa_o),
+      .rw_i      (rw_i),
       .rw_o      (rw_o),
+      .siz_i     (siz_i),
       .siz_o     (siz_o),
       .lock_n_o  (lock_n_o),
       .locke_n_o (locke_n_o),
       .ciout_n_o (ciout_n_o),
       .attr_oe   (attr_oe),
+      .ts_n_i    (ts_n_i),
       .ts_n_o    (ts_n_o),
       .tip_n_o   (tip_n_o),
       .tip_oe    (tip_oe),
       .ta_n_i    (ta_n_i),
+      .ta_n_o    (ta_n_o),
+      .ta_oe     (ta_oe),
       .tea_n_i   (tea_n_i),
       .tci_n_i   (tci_n_i),
       .tbi_n_i   (tbi_n_i),
@@ -176,24 +187,34 @@ module rd68041_top #(
       .bb_n_i    (bb_n_i),
       .bb_n_o    (bb_n_o),
       .bb_oe     (bb_oe),
-      .mi_n_o    (mi_n_o)
+      .sc_i      (sc_i),
+      .mi_n_o    (mi_n_o),
+      .sn_addr   (sn_addr),
+      .sn_dhit   (1'b0),
+      .sn_ddirty (1'b0),
+      .sn_ihit   (1'b0),
+      .sn_rdata  (32'h0000_0000),
+      .sn_wr     (sn_wr),
+      .sn_wbe    (sn_wbe),
+      .sn_wdata  (sn_wdata),
+      .sn_dinv   (sn_dinv),
+      .sn_iinv   (sn_iinv)
   );
 
   // TS shares the address group's enable (specification 38 names it with
-  // them); the snooper (M2) drives TA.
+  // them).
   assign ts_oe     = attr_oe;
-  assign ta_n_o    = 1'b1;
-  assign ta_oe     = 1'b0;
   assign rsto_n_o  = 1'b1;
   assign ipend_n_o = 1'b1;
   assign pst_o     = rd68041_pkg::PST_USER_RUN;
   assign tdo_o     = 1'b0;
   assign tdo_oe    = 1'b0;
 
-  // What M1 deliberately does not read. Each goes when the unit that needs it
-  // arrives: the snooper (M2), the core (M6), the FPU (M11).
+  // What M2 deliberately does not read. Each goes when the unit that needs it
+  // arrives: the caches (M9), the core (M6), the FPU (M11).
   logic unused_ok;
-  assign unused_ok = &{1'b0, pclk, a_i, tt_i, rw_i, siz_i, ts_n_i, dle_i, sc_i,
+  assign unused_ok = &{1'b0, pclk, dle_i, sn_addr, sn_wdata, sn_wbe, sn_wr,
+                       sn_dinv, sn_iinv,
                        tck_i, tms_i, tdi_i, trst_n_i, FPU != 0, mode_mux,
                        mode_dle, mode_ipl, req_ready, rsp_valid, rsp_tci,
                        rsp_avec, rsp_done, rsp_err, rsp_beat, rsp_lw, rsp_data,

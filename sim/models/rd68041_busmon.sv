@@ -42,7 +42,8 @@ module rd68041_busmon (
     input  logic        ta_n,
     input  logic        tea_n,
     input  logic        tbi_n,
-    input  logic        alt_owns     // an alternate master has the bus
+    input  logic        alt_owns,    // an alternate master has the bus
+    input  logic        core_slave   // the core answers it as a slave (snoop intervention)
 );
 
   int errors;
@@ -89,7 +90,9 @@ module rd68041_busmon (
     ts_prev = ts_n_o;
 
     if (d_oe && slave_d_oe) fail("the core and the slave both drive the data bus");
-    if (alt_owns && (a_oe || attr_oe || d_oe || (bb_oe && !bb_n_o) || (tip_oe && !tip_n_o)))
+    // As a slave the core drives the data bus and TA (UM 7.9.3), nothing else.
+    if (alt_owns && (a_oe || attr_oe || (d_oe && !core_slave) || (bb_oe && !bb_n_o) ||
+                     (tip_oe && !tip_n_o)))
       fail("the core drives the bus while an alternate master owns it");
   end
 

@@ -40,6 +40,7 @@ GENSRC  := $(filter-out $(GENPKG),$(wildcard rtl/gen/*.sv))
 SRCS := rtl/rd68041_sync.sv \
         rtl/rd68041_late_release.sv \
         rtl/rd68041_rstctl.sv \
+        rtl/rd68041_snoop.sv \
         rtl/rd68041_biu.sv \
         rtl/rd68041_shifter.sv \
         rtl/rd68041_divider.sv \

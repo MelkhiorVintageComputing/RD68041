@@ -1,8 +1,9 @@
 # The bus unit
 
 `rtl/rd68041_biu.sv`, from M1: the MC68040's bus as a master (UM 7.4–7.6) and its
-arbitration (UM 7.8). The snooper, which answers an alternate master's transfers (UM 7.9),
-is a separate unit (M2). The reset (UM 7.10) is `rtl/rd68041_rstctl.sv`.
+arbitration (UM 7.8). The snooper, `rtl/rd68041_snoop.sv` (M2), answers an alternate
+master's transfers (UM 7.9); the bus unit instantiates it, so every pin has one owner. The
+reset (UM 7.10) is `rtl/rd68041_rstctl.sv`.
 
 ## The contract above it
 
@@ -55,6 +56,34 @@ register. MI is asserted out of reset and whenever the core is not master, and n
 the edge the core asserts TS (UM 7.9.1); from M2 the snooper negates it for alternate
 masters' transfers.
 
+## Snooping (M2)
+
+When the core is not master, the snooper latches an alternate master's address, SIZ, TT,
+R/W and SC1–SC0 on the edge its TS is seen, and:
+
+| Transfer | MI | Who answers | Caches (Tables 4-3, 4-4) |
+|---|---|---|---|
+| TT not normal or MOVE16, or SC = 00 or 11 | negated at once | memory | untouched |
+| snoopable, miss | negated after the lookup | memory | untouched |
+| read, clean hit | negated after the lookup | memory | SC = 10: invalidated (V10); SC = 01: kept (V9) |
+| read, dirty hit | held | **the core**, from the data cache, a line in A3–A2 order | SC = 10: invalidated after (D10); SC = 01: kept (D9) |
+| write of a byte, word or long word, dirty hit, SC = 01 | held | **the core**, into the data cache, D bit set (D12) | kept |
+| any other write that hits | negated after the lookup | memory | invalidated (V11–V13, D11, D13) |
+| any of these hitting an instruction-cache line | | | SC = 10 read or any write: invalidated (V5, V6) |
+
+The lookup is one clock, so a snooped transfer memory answers takes two clocks more than
+an unsnooped one: UM 7.9.2's best case, "the equivalent of two wait states". The core's
+data comes as fast as memory's would: TA from the clock after the lookup. MI is asserted
+between transfers whatever SC and TT say (UM 7.9.1), and while it is asserted the snooper
+ignores TA and TEA (UM 5.5.2). The core's TA is released through
+`rd68041_late_release`, as BB and TIP are (specification 39).
+
+The caches answer on the `sn_*` port: tags looked up combinationally on `sn_addr`, data one
+clock behind its address (a block RAM), writes and invalidations on the clock asked for. At
+M2 nothing answers it in the top level — there are no caches until M9 — and
+`sim/models/rd68041_snoopcache.sv` stands in for them in the testbench. The push buffer is
+snooped with the data cache (M9).
+
 ## Tests
 
 | Testbench | What |
@@ -62,6 +91,7 @@ masters' transfers.
 | `bus_xfer_tb` | every size on every lane, waits, back to back, line bursts read and written, burst-inhibited lines, TCI, attributes |
 | `bus_error_tb` | TEA on reads, writes and a line's third long word; retries, on a line's first transfer and as bus errors on later ones; interrupt acknowledge by vector, autovector, TEA and retry; breakpoint acknowledge |
 | `bus_arb_tb` | implicit ownership, BR without BG, BB held by another master, park and leaving it, giving the bus up (specifications 38 and 39), relinquish and retry, a locked sequence, an internal reset in the middle of a transfer |
+| `bus_snoop_tb` | an alternate master (`sim/models/rd68041_altmaster.sv`) against every row of Table 4-1 on missing, clean and dirty lines: inhibited, sourced (a long word, a line in burst order), sunk (a long word, a byte on its lane), invalidated; the instruction cache; a non-snoopable TT; a line memory burst-inhibits; MI between transfers; TA's release |
 
-All three run the bus unit alone against `sim/models/rd68041_slave.sv` with
+All four run the bus unit alone against `sim/models/rd68041_slave.sv` with
 `sim/models/rd68041_busmon.sv` checking the protocol on every edge.
