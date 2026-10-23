@@ -16,9 +16,9 @@
 //   +image=FILE   the program, as objcopy -O verilog --verilog-data-width=1
 //   +trace=FILE   UAE040's trace of it
 //
-// The run ends when the core halts (M6: an instruction it does not build yet,
-// the programs' ILLEGAL), and PASSes if every boundary before it agreed and the
-// halt is at the trace's next PC.
+// The run ends when the core takes the illegal instruction exception on the
+// program's ILLEGAL ($4AFC), and PASSes if every boundary before it agreed. A
+// halt (an instruction the core does not build) fails it.
 
 `timescale 1ns / 1ps
 
@@ -26,7 +26,7 @@ module core_cosim_tb;
 
 `include "rd68041_core_harness.svh"
 
-  localparam int T_ISP = 16, T_SR = 18;
+  localparam int T_USP = 15, T_SR = 18, T_VBR = 19, T_CACR = 20, T_SFC = 21, T_DFC = 22;
 
   integer      trc;
   int unsigned nstep, nfield, k, nret, nfail;
@@ -63,9 +63,18 @@ module core_cosim_tb;
         bad = 1;
       end
     end
-    if (reg_of(15) !== treg[T_ISP]) begin
-      $display("  FAIL: boundary %0d (pc %h): A7 (ISP) = %h, the trace's %h", nret, tpc,
-               reg_of(15), treg[T_ISP]);
+    for (int i = 0; i < 3; i++) begin
+      if (sp_of(i) !== treg[T_USP + i]) begin
+        $display("  FAIL: boundary %0d (pc %h): %s = %h, the trace's %h", nret, tpc,
+                 (i == 0) ? "USP" : (i == 1) ? "ISP" : "MSP", sp_of(i), treg[T_USP + i]);
+        bad = 1;
+      end
+    end
+    if (dut.u_core.vbr !== treg[T_VBR] || dut.u_core.cacr !== treg[T_CACR] ||
+        {29'h0, dut.u_core.sfc} !== treg[T_SFC] || {29'h0, dut.u_core.dfc} !== treg[T_DFC]) begin
+      $display("  FAIL: boundary %0d (pc %h): VBR CACR SFC DFC = %h %h %h %h, the trace's %h %h %h %h",
+               nret, tpc, dut.u_core.vbr, dut.u_core.cacr, dut.u_core.sfc, dut.u_core.dfc,
+               treg[T_VBR], treg[T_CACR], treg[T_SFC], treg[T_DFC]);
       bad = 1;
     end
     if (dut.u_core.sr !== treg[T_SR][15:0]) begin
@@ -98,11 +107,22 @@ module core_cosim_tb;
   // retire is combinational, true in the clock before the edge that writes the
   // instruction's results: sample it at the edge, compare just after it.
   always @(posedge clk) begin
-    bit          r;
-    logic [31:0] npc;
+    bit          r, fin;
+    logic [31:0] npc, fpc, hw;
     r   = dut.u_core.retire;
     npc = dut.u_core.retire_npc;
+    fpc = dut.u_core.w_u.pc;
+    hw  = u_mem.peek_long({fpc[31:2], 2'b00});
+    fin = dut.u_core.x_flush && dut.u_core.w_u.xvec == 8'd4 &&
+          (fpc[1] ? hw[15:0] : hw[31:16]) == 16'h4AFC;
     #1;
+    if (fin) begin
+      if (nfail == 0)
+        $display("PASS: core_cosim_tb: %0d instructions, every register at every boundary", nret);
+      else
+        $display("FAIL: core_cosim_tb: %0d of %0d boundaries disagree", nfail, nret);
+      $finish;
+    end
     if (r) begin
       if (verbose) $display("  retire %0d: pc %h -> %h", nret, dut.u_core.w_u.pc, npc);
       read_entry();
@@ -119,19 +139,9 @@ module core_cosim_tb;
       end
     end
     if (dut.u_core.halted) begin
-      // The programs end on ILLEGAL; a halt anywhere else is an instruction
-      // the core does not build yet.
-      logic [31:0] hw;
-      hw = u_mem.peek_long({dut.u_core.w_u.pc[31:2], 2'b00});
-      if ((dut.u_core.w_u.pc[1] ? hw[15:0] : hw[31:16]) != 16'h4AFC) begin
-        $display("  FAIL: halted at %h, opcode %h: not the program's ILLEGAL",
-                 dut.u_core.w_u.pc, dut.u_core.w_u.pc[1] ? hw[15:0] : hw[31:16]);
-        nfail = nfail + 1;
-      end
-      if (nfail == 0)
-        $display("PASS: core_cosim_tb: %0d instructions, every register at every boundary", nret);
-      else
-        $display("FAIL: core_cosim_tb: %0d of %0d boundaries disagree", nfail, nret);
+      $display("  FAIL: halted at %h: an instruction the core does not build, or a double bus fault",
+               dut.u_core.w_u.pc);
+      $display("FAIL: core_cosim_tb: %0d boundaries", nret);
       $finish;
     end
   end

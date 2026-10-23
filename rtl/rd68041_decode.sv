@@ -45,10 +45,19 @@
 // passes the next register (mv_reg), whether it is the last (mv_last), and how
 // many have gone (mv_k), and is told when one is used (mv_used).
 //
-// Anything not built yet is a micro-operation with `halt`, which stops the
-// pipeline when it reaches write-back: until M7 completes, the instructions
-// still to come; until M8, those whose work is an exception (TRAP, RTE, STOP,
-// RESET, BKPT, MOVE to SR, ILLEGAL, the unimplemented A- and F-lines).
+// An instruction that takes an exception before it executes -- an illegal
+// one, the A-line, the F-line, one privileged in user mode (UM 8.2.4, 8.2.5) --
+// is one micro-operation that carries the vector (`xvec`) and does nothing
+// else; TRAP #n carries its vector with `xnext`, the frame's PC being the next
+// instruction's. The core takes them at write-back (rd68041_core.sv). What is
+// not built yet -- the F-line's MOVE16, CINV, CPUSH, PFLUSH, PTEST (M9, M10)
+// and the floating-point instructions (M11) -- is a micro-operation with
+// `halt`, which stops the pipeline when it reaches write-back.
+//
+// The status register's writers (MOVE to SR, ANDI, ORI and EORI to SR, RTE,
+// STOP) and NOP and RESET are serialising (`ser`): the core lets nothing after
+// them issue until they are past write-back, and fetches again from the next
+// instruction (doc/microarch.md, "Exceptions").
 
 module rd68041_decode (
     input  logic [15:0]  op,           // the operation word
@@ -60,6 +69,8 @@ module rd68041_decode (
     input  logic  [3:0]  mv_reg,       // MOVEM: the next register (0-7 D, 8-15 A)
     input  logic         mv_last,      // ... and it is the list's last
     input  logic  [4:0]  mv_k,         // MOVEM, MOVEP: transfers already issued
+    input  logic         sup,          // SR's S: supervisor (the privileged instructions)
+    input  logic         msp_on,       // SR's M: A7 is the master stack pointer, not the ISP
     output logic [rd68041_pkg::UOP_W-1:0] uop,
     output logic  [3:0]  need,         // extension words the instruction has (seq 0)
     output logic  [3:0]  pop,          // extension words this micro-operation takes
@@ -289,6 +300,7 @@ module rd68041_decode (
   logic [3:0] eak;                // where op[5:0]'s <ea> extension words start
   logic       uses_ea;            // op[5:0] is an <ea> of this instruction
   logic       pre_s;              // a prelude was issued for op[5:0]'s <ea>
+  logic       priv;               // privileged (UM 8.2.5): in user mode, vector 8
 
   // ---------------------------------------------------------------------------
   // The <ea>s, worked out once: op[5:0]'s (the source, or the only one) with
@@ -446,6 +458,7 @@ module rd68041_decode (
     u.wr_sz  = rd68041_pkg::SZ_L;
     u.sz     = rd68041_pkg::SZ_L;   // SWAP, MOVEQ, EXG...: long unless the case says
     bad      = 1'b0;
+    priv     = 1'b0;
     need     =  4'd0;
     pop      =  4'd0;
     more     = 1'b0;
@@ -569,6 +582,7 @@ module rd68041_decode (
           rn1 = {1'b0, x1[15:12]}; rn2 = {1'b0, x2[15:12]};
           sz  = (op[10:9] == 2'b10) ? rd68041_pkg::SZ_W : rd68041_pkg::SZ_L;
           if (op[10:9] == 2'b00 || op[10:9] == 2'b01) bad = 1'b1;
+          u.cof = 1'b1;
           need  = 4'd2;
           u.len = 5'd6;
           u.sz  = sz;
@@ -626,6 +640,7 @@ module rd68041_decode (
           u.len = 5'(2 + 2*need);
           u.sz  = sz;
           `DEC_EA(ea_s, sz)
+          u.cof = 1'b1;
           u.ld = 1'b1; u.st = 1'b1; u.lk = 1'b1; u.lke = 1'b1;
           u.a_reg = dreg(x[2:0]);
           u.b_sel = rd68041_pkg::S_MEM;
@@ -638,11 +653,14 @@ module rd68041_decode (
           logic [15:0] x;
           x  = ew(w, 0);
           sz = op[7:6];
-          if (!malt(sm, sr) || x[10:0] != 11'h0) bad = 1'b1;
+          // Bits 10-0 of the extension word are reserved; the part ignores
+          // them (the cputest corpus, doc/oracles.md).
+          if (!malt(sm, sr)) bad = 1'b1;
           need  = 4'd1 + ea_len(sm, sr, sz, ew(w, 1)); pop = need;
           u.len = 5'(2 + 2*need);
           u.sz  = sz;
           `DEC_EA(ea_s, sz)
+          priv = 1'b1; u.cof = 1'b1;
           u.alt = 1'b1;
           if (x[11]) begin
             u.st = 1'b1;
@@ -663,7 +681,7 @@ module rd68041_decode (
                      op[11:9] == 3'd3 || op[11:9] == 3'd5 || op[11:9] == 3'd6) begin
           sz = op[7:6];
           if (sm == 3'd7 && sr == 3'd4) begin
-            // To CCR (byte); to SR (word) is M8's.
+            // To CCR (byte), and to SR (word, privileged; serialising).
             if (sz == rd68041_pkg::SZ_B &&
                 (op[11:9] == 3'd0 || op[11:9] == 3'd1 || op[11:9] == 3'd5)) begin
               need =  4'd1; pop =  4'd1;
@@ -672,6 +690,15 @@ module rd68041_decode (
               u.op = rd68041_pkg::OP_CCR;
               u.cc = rd68041_pkg::CC_SET;
               u.cond = (op[11:9] == 3'd0) ? 4'd1 : (op[11:9] == 3'd1) ? 4'd0 : 4'd2;
+            end else if (sz == rd68041_pkg::SZ_W &&
+                         (op[11:9] == 3'd0 || op[11:9] == 3'd1 || op[11:9] == 3'd5)) begin
+              need =  4'd1; pop =  4'd1;
+              u.len = 5'd4;
+              priv = 1'b1;
+              u.a_sel = rd68041_pkg::S_IMM; u.imm = {16'h0, ew(w, 0)};
+              u.op = rd68041_pkg::OP_SR;
+              u.fn = (op[11:9] == 3'd0) ? 4'd1 : (op[11:9] == 3'd1) ? 4'd0 : 4'd2;
+              u.srw = 1'b1; u.ser = 1'b1; u.cof = 1'b1;
             end else begin
               bad = 1'b1;
             end
@@ -807,6 +834,7 @@ module rd68041_decode (
         priority casez (op[11:0])
           12'b0000_11??_????: begin                // MOVE from SR
             if (!dalt(sm, sr)) bad = 1'b1;
+            priv = 1'b1;
             need = ea_len(sm, sr, rd68041_pkg::SZ_W, ew(w, 0)); pop = need;
             u.len = 5'(2 + 2*need);
             u.sz = rd68041_pkg::SZ_W;
@@ -833,7 +861,16 @@ module rd68041_decode (
             u.op = rd68041_pkg::OP_TOCCR;
             u.cc = rd68041_pkg::CC_SET; u.cond = 4'd3;
           end
-          12'b0110_11??_????: bad = 1'b1;          // MOVE to SR: M8
+          12'b0110_11??_????: begin                // MOVE to SR
+            if (sm == 3'd1 || !ok_mode(sm, sr)) bad = 1'b1;
+            priv = 1'b1;
+            need = ea_len(sm, sr, rd68041_pkg::SZ_W, ew(w, 0)); pop = need;
+            u.len = 5'(2 + 2*need);
+            u.sz = rd68041_pkg::SZ_W;
+            `DEC_SRC(rd68041_pkg::SZ_W, 1'b1)
+            u.op = rd68041_pkg::OP_SR; u.fn = 4'd3;
+            u.srw = 1'b1; u.ser = 1'b1; u.cof = 1'b1;
+          end
           12'b0010_????_????: begin                // CLR <ea>
             sz = op[7:6];
             if (!dalt(sm, sr)) bad = 1'b1;
@@ -920,7 +957,15 @@ module rd68041_decode (
             u.op = rd68041_pkg::OP_SWAP; u.cc = rd68041_pkg::CC_LOGIC;
             u.wr = 1'b1; u.wr_reg = dy;
           end
-          12'b1000_0100_1???: bad = 1'b1;          // BKPT: M8
+          12'b1000_0100_1???: begin                // BKPT #n
+            // UM 8.2.8, 7.5.2: a breakpoint acknowledge cycle (TT 11, TM 0,
+            // address 0, a byte); whether TA or TEA ends it, an illegal
+            // instruction exception.
+            u.len = 5'd2;
+            u.ea_en = 1'b1;
+            u.ld = 1'b1; u.sz = rd68041_pkg::SZ_B; u.ack = 1'b1; u.fn = 4'd0;
+            u.xvec = 8'd4;
+          end
           12'b1000_01??_????: begin                // PEA <ea>
             if (!ctrl(sm, sr)) bad = 1'b1;
             need = ea_len(sm, sr, rd68041_pkg::SZ_L, ew(w, 0));
@@ -1003,7 +1048,7 @@ module rd68041_decode (
               end
             end
           end
-          12'b1010_1111_1100: bad = 1'b1;          // ILLEGAL: M8
+          12'b1010_1111_1100: bad = 1'b1;          // ILLEGAL: vector 4 (UM 8.2.4)
           12'b1010_11??_????: begin                // TAS <ea>: a locked read-modify-write
             if (!dalt(sm, sr)) bad = 1'b1;
             need = ea_len(sm, sr, rd68041_pkg::SZ_B, ew(w, 0)); pop = need;
@@ -1058,7 +1103,10 @@ module rd68041_decode (
             u.wr2 = (x[2:0] != x[14:12]);
             u.cc = rd68041_pkg::CC_NONE;
           end
-          12'b1110_0100_????: bad = 1'b1;          // TRAP #n: M8
+          12'b1110_0100_????: begin                // TRAP #n: vector 32 + n (UM 8.2.3)
+            u.len = 5'd2;
+            u.xvec = 8'd32 + {4'h0, op[3:0]}; u.xnext = 1'b1;
+          end
           12'b1110_0101_0???: begin                // LINK.W An,#d16
             need =  4'd1; pop =  4'd1;
             u.len = 5'd4;
@@ -1081,16 +1129,73 @@ module rd68041_decode (
           end
           12'b1110_0110_0???: begin                // MOVE An,USP
             u.len = 5'd2;
+            priv = 1'b1; u.cof = 1'b1;
             u.b_reg = ay;
             u.crw = 1'b1; u.cr = rd68041_pkg::CR_USP;
           end
           12'b1110_0110_1???: begin                // MOVE USP,An
             u.len = 5'd2;
+            priv = 1'b1; u.cof = 1'b1;
             u.crr = 1'b1; u.cr = rd68041_pkg::CR_USP;
             u.wr = 1'b1; u.wr_reg = ay;
           end
-          12'b1110_0111_0001: begin                // NOP
+          12'b1110_0111_0000: begin                // RESET: RSTO for 512 clocks (UM 5.8)
             u.len = 5'd2;
+            priv = 1'b1;
+            u.ser = 1'b1; u.rsto = 1'b1;
+          end
+          12'b1110_0111_0001: begin                // NOP
+            // UM 2.1 (and PRM 4): NOP waits for the pipeline, the writes
+            // pending included, to finish: serialising does that.
+            u.len = 5'd2;
+            u.ser = 1'b1; u.cof = 1'b1;
+          end
+          12'b1110_0111_0010: begin                // STOP #imm
+            need =  4'd1; pop =  4'd1;
+            u.len = 5'd4;
+            priv = 1'b1;
+            u.a_sel = rd68041_pkg::S_IMM; u.imm = {16'h0, ew(w, 0)};
+            u.op = rd68041_pkg::OP_SR; u.fn = 4'd3;
+            u.srw = 1'b1; u.ser = 1'b1; u.stp = 1'b1; u.cof = 1'b1;
+          end
+          12'b1110_0111_0011: begin                // RTE
+            // The SR into T0, the PC into T1, the format word: the stack past
+            // the frame into A7 (or a format error) and the word into T2;
+            // then the SR and the PC (UM 8.4). A throwaway frame ($1) runs
+            // RTE again, on the stack the SR it loaded names (UM 8.4.2).
+            u.len = 5'd2;
+            priv = 1'b1;
+            more = (sq != 5'd3);
+            u.last = !more;
+            case (sq)
+              5'd0: begin
+                `DEC_EA(ea_fix(3'd2, 3'd7, w0), rd68041_pkg::SZ_W)
+                u.ld = 1'b1; u.sz = rd68041_pkg::SZ_W;
+                u.b_sel = rd68041_pkg::S_MEM;
+                u.wr = 1'b1; u.wr_reg = 5'd16;
+              end
+              5'd1: begin
+                `DEC_EA(ea_fix(3'd2, 3'd7, w0), rd68041_pkg::SZ_L)
+                u.ea_disp = 32'd2;
+                u.ld = 1'b1; u.sz = rd68041_pkg::SZ_L;
+                u.b_sel = rd68041_pkg::S_MEM;
+                u.wr = 1'b1; u.wr_reg = 5'd17;
+              end
+              5'd2: begin
+                `DEC_EA(ea_fix(3'd2, 3'd7, w0), rd68041_pkg::SZ_W)
+                u.ea_disp = 32'd6;
+                u.ld = 1'b1; u.sz = rd68041_pkg::SZ_W;
+                u.b_sel = rd68041_pkg::S_MEM;
+                u.op = rd68041_pkg::OP_RTEF;
+                u.wr = 1'b1; u.wr_reg = 5'd15;
+                u.wr2 = 1'b1; u.wr2_reg = 5'd18;
+              end
+              default: begin
+                u.a_reg = 5'd16; u.b_reg = 5'd17; u.wr2_reg = 5'd18;
+                u.op = rd68041_pkg::OP_RTE;
+                u.srw = 1'b1; u.ser = 1'b1; u.cof = 1'b1;
+              end
+            endcase
           end
           12'b1110_0111_0100: begin                // RTD #d16
             need =  4'd1; pop =  4'd1;
@@ -1128,19 +1233,24 @@ module rd68041_decode (
             end
           end
           12'b1110_0111_101?: begin                // MOVEC
+            // The active supervisor stack pointer (the ISP, or the MSP when
+            // M is set) is A7; the other two are the core's.
             logic [15:0] x;
             logic [3:0]  c;
+            logic        act;
             x = ew(w, 0);
             c = cr_of(x[11:0]);
+            act = (c == (msp_on ? rd68041_pkg::CR_MSP : rd68041_pkg::CR_ISP));
             need =  4'd1; pop =  4'd1;
             u.len = 5'd4;
+            priv = 1'b1; u.cof = 1'b1;
             if (c == 4'hF) bad = 1'b1;
             if (op[0]) begin                     // Rn -> Rc
               u.b_reg = {1'b0, x[15:12]};
-              if (c == rd68041_pkg::CR_ISP) begin u.wr = 1'b1; u.wr_reg = 5'd15; end
+              if (act) begin u.wr = 1'b1; u.wr_reg = 5'd15; end
               else begin u.crw = 1'b1; u.cr = c; end
             end else begin                       // Rc -> Rn
-              if (c == rd68041_pkg::CR_ISP) u.b_reg = 5'd15;
+              if (act) u.b_reg = 5'd15;
               else begin u.crr = 1'b1; u.cr = c; end
               u.wr = 1'b1; u.wr_reg = {1'b0, x[15:12]};
             end
@@ -1174,7 +1284,7 @@ module rd68041_decode (
             u.b_sel = rd68041_pkg::S_EA;
             u.br = rd68041_pkg::BR_EA;
           end
-          default: bad = 1'b1;                    // RESET, STOP, RTE: M8
+          default: bad = 1'b1;
         endcase
       end
 
@@ -1514,7 +1624,6 @@ module rd68041_decode (
             md = (t == 3'd2) || (t == 3'd4) || (t == 3'd6) || (t == 3'd7);
             mm = md && !rg;
             if (!(rg || (md ? (ctrl(sm, sr) && malt(sm, sr)) : ctrl(sm, sr)))) bad = 1'b1;
-            if (x[15]) bad = 1'b1;
             need  = 4'd1 + ea_len(sm, sr, rd68041_pkg::SZ_L, ew(w, 1));
             u.len = 5'(2 + 2*need);
             u.sz  = rd68041_pkg::SZ_L;
@@ -1612,8 +1721,29 @@ module rd68041_decode (
         end
       end
 
-      // 1010 and 1111: the A- and F-line (M8; the FPU's at M11).
-      default: bad = 1'b1;
+      // 1010: the A-line, vector 10 (UM 8.2.4).
+      4'b1010: begin
+        u.len = 5'd2;
+        u.xvec = 8'd10;
+      end
+
+      // 1111: the F-line. MOVE16 (M9), CINV and CPUSH ($F4xx, M9), PFLUSH
+      // ($F500-$F51F) and PTEST ($F548, $F568; M10) -- privileged but for
+      // MOVE16 -- and the floating-point instructions (M11) are not built;
+      // the rest is vector 11 (UM 9.4).
+      default: begin
+        u.len = 5'd2;
+        if (op[11:8] == 4'h4 || (op[11:8] == 4'h5 && (op[7:5] == 3'b000 ||
+                                                       op[7:3] == 5'b01001 ||
+                                                       op[7:3] == 5'b01101))) begin
+          priv = 1'b1;
+          u.halt = 1'b1;
+        end else if (op[11:6] == 6'b011000 || op[11:9] == 3'b001) begin
+          u.halt = 1'b1;
+        end else begin
+          u.xvec = 8'd11;
+        end
+      end
     endcase
 
     // The indirection prelude of an instruction whose <ea> is op[5:0]: its
@@ -1632,16 +1762,22 @@ module rd68041_decode (
     // be gone from the queue, and with them what its length was computed from.
     if (seq != 5'd0) u.len = len_in;
 
-    // put_ea marks an <ea> not built yet (the full extension-word format) with
-    // halt. `need` is kept: whether an instruction is built can depend on its
-    // extension words (MOVEC's register field, the full format's bit 8), so
-    // it is decided only once they are all in the queue.
-    if (bad || u.halt) begin
+    // A privileged instruction in user mode is a privilege violation, which
+    // comes before anything else wrong with it; then what is not built
+    // (halt); then an illegal encoding. `need` is kept: whether an
+    // instruction is legal can depend on its extension words (MOVEC's
+    // register field, the full format's reserved encodings), so it is decided
+    // only once they are all in the queue.
+    if ((priv && !sup) || u.halt || bad) begin
+      logic h;
+      h = u.halt && !(priv && !sup);
       u = '0;
       u.valid = 1'b1;
       u.last  = 1'b1;
-      u.halt  = 1'b1;
       u.pc    = pc;
+      u.len   = (seq != 5'd0) ? len_in : 5'd2;
+      u.halt  = h;
+      u.xvec  = h ? 8'd0 : (priv && !sup) ? 8'd8 : 8'd4;
       pop     =  4'd0;
       more    = 1'b0;
       mv_used = 1'b0;

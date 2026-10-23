@@ -34,14 +34,12 @@
  * a register, an aligned memory operand, a MISALIGNED one, and the two that
  * have a side effect on an address register.
  *
- * THE STARTING STATE. Until M8 the core has no exception processing and builds
- * only SR's condition codes, with its system byte fixed at $27 (supervisor,
- * M = 0, T = 0, interrupt mask 7). So every test starts there and varies only
- * the CCR -- except the traps and trace groups' user-mode and traced cases,
- * which core_vec_tb sets aside as pending M8. The control registers the
- * harness cannot deposit yet (USP, MSP, SFC, DFC, VBR, CACR) start at zero,
- * which is what the core's reset leaves and what UM 8.2.10 makes VBR and CACR.
- * When the deposit learns them, they can be made distinctive again.
+ * THE STARTING STATE. Most groups start at SR $27xx (supervisor, M = 0, T = 0,
+ * interrupt mask 7) and vary only the CCR; the traps and trace groups also
+ * start in user mode and traced. core_vec_tb deposits the whole state (since
+ * M8): the SR, the three stack pointers, SFC, DFC, VBR and CACR. Those the
+ * groups do not set start at zero, which is what the core's reset leaves and
+ * what UM 8.2.10 makes VBR and CACR.
  *
  * THE OUTPUT, read positionally by sim/tb/core_vec_tb.sv with $fscanf:
  *
@@ -85,8 +83,8 @@
  * DROPPED TESTS. A test is dropped, and counted, when the oracle made more
  * accesses than there is room to record, when it halted, or when it took a bus
  * error or an address error (an access error, M10's business). Tests that took
- * any other exception are KEPT, frame accesses and all: core_vec_tb counts
- * them as pending M8 until the core builds exception processing.
+ * any other exception are KEPT, frame accesses and all, and core_vec_tb
+ * compares the frame (since M8).
  *
  * MEMORY. 64 KB from 0, repeated through the address space (up to 2 GB here;
  * above that the oracle answers a bus error and the test is dropped), as the
@@ -1642,11 +1640,11 @@ static void move_acc(struct result *r, int from, int to)
 }
 
 /* RD68031's normalisations of UAE030 were each checked against the MC68030's
- * manual; only the one doc/oracles.md has confirmed for UAE040 against UM 8.1
- * is carried over. The rest (RTE's frame-format check order, the format $2
- * frame's instruction address, the bit-field and PACK/UNPK access shapes, the
- * divide's C on overflow) are left for M8 and the M7 sweep's own findings to
- * decide against the MC68040's manuals. */
+ * manual; those doc/oracles.md has confirmed for UAE040 against the MC68040's
+ * are carried over: the vector read's place (UM 8.1), and, since M8, the
+ * format $2 frame's instruction address (UM 8.4.3). The rest (RTE's
+ * frame-format check order, the bit-field and PACK/UNPK access shapes, the
+ * divide's C on overflow) are decided by the sweeps' own findings. */
 static void normalise(const struct test *t, struct result *r, const uae040_state *s)
 {
     int e, j, end, vbr;
@@ -1664,6 +1662,18 @@ static void normalise(const struct test *t, struct result *r, const uae040_state
                 break;
             }
         }
+    }
+    /* UM 8.4.3: the six-word frame of CHK, CHK2, TRAPcc, TRAPV, trace and the
+     * zero divide holds "the address of the instruction that caused the
+     * exception" at +$08. UAE040 stacks the next instruction's there, the
+     * same as the PC; the cputest corpus (WinUAE's copy of the core, checked
+     * against real processors) stacks the instruction's, as the manual says
+     * (doc/oracles.md). Every test's instruction is at PROG_BASE. */
+    if (nexc == 1 && (exc_vec[0] == 5 || exc_vec[0] == 6 || exc_vec[0] == 7 || exc_vec[0] == 9)) {
+        unsigned int sp = (s->sr & 0x1000u) ? s->msp : s->isp;
+        for (j = 0; j < r->nacc; j++)
+            if (!r->acc[j].rw && r->acc[j].bytes == 4 && r->acc[j].addr == sp + 8u)
+                r->acc[j].value = PROG_BASE;
     }
 }
 

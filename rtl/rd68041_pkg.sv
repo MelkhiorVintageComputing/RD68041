@@ -108,6 +108,10 @@ package rd68041_pkg;
   localparam logic [5:0] OP_BFPRM = 6'd37;  // a bit field's width (B) and offset (A); the byte address
   localparam logic [5:0] OP_BFPK  = 6'd38;  // ... with the fifth byte read
   localparam logic [5:0] OP_BF    = 6'd39;  // fn: {register, type}: the operation (rd68041_bitfield)
+  localparam logic [5:0] OP_SR    = 6'd40;  // fn: 0 AND, 1 OR, 2 EOR, 3 MOVE: the SR with A (M8)
+  localparam logic [5:0] OP_RTEF  = 6'd41;  // RTE's format word (B): the stack past the frame, or vector 14
+  localparam logic [5:0] OP_RTE   = 6'd42;  // RTE's last: the SR from A, the PC from B, C the format word
+  localparam logic [5:0] OP_IACK  = 6'd43;  // the vector offset an interrupt acknowledge returned (fn: level)
 
   // How the condition codes are set (PRM 3.4, Table 3-18).
   localparam logic [2:0] CC_NONE  = 3'd0;
@@ -188,6 +192,19 @@ package rd68041_pkg;
     logic  [1:0] bfa;        // a bit field's first (1) or second (2) access: sized at EA
                              // from T3 to the bytes the field covers, the second dropped
                              // if there is none (rd68041_core.sv, bf_bytes)
+    // exceptions and the status register (M8; doc/microarch.md, "Exceptions")
+    logic  [7:0] xvec;       // the exception this micro-operation takes at W, 0 for none;
+                             // with it, imm is the fault address and tgt[15:0] the SSW
+    logic        xnext;      // ... after it completes: the frame's PC is the next instruction's
+    logic        xs;         // part of exception processing (rd68041_exc): a fault is a
+                             // double bus fault
+    logic        ser;        // serialising: nothing younger issues until it is past W
+    logic        srw;        // the result is the new SR (with ser)
+    logic        stp;        // STOP: then wait for an interrupt
+    logic        rsto;       // RESET: assert RSTO
+    logic        ack;        // the read is an acknowledge cycle (TT 11), TM fn[2:0]; a
+                             // transfer error is an answer, not a fault
+    logic        cof;        // a change of flow for tracing (UM 8.2.6), taken or not
     // the register result
     logic        wr;
     logic  [4:0] wr_reg;
@@ -213,8 +230,11 @@ package rd68041_pkg;
   } ea_t;
 
   // Its width, written out: yosys has no $bits of a type. 40 (valid, last, halt,
-  // pc, len) + 56 (the <ea>) + 4 (ld, st, sz) + 112 (execute) + 14 (the
-  // results). sim/tb/core_*_tb check it against $bits.
-  localparam int UOP_W = 226;
+  // pc, len) + 56 (the <ea>) + 4 (ld, st, sz) + 112 (execute) + 16 (exceptions)
+  // + 14 (the results). sim/tb/core_*_tb check it against $bits.
+  localparam int UOP_W = 242;
+
+  // The status register's implemented bits (UM 2.2.1): T1 T0 S M, I2-I0, the CCR.
+  localparam logic [15:0] SR_MASK = 16'hF71F;
 
 endpackage

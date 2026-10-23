@@ -130,13 +130,16 @@ module rd68041_top #(
   logic  [3:0]  sn_wbe;
   logic         sn_wr, sn_dinv, sn_iinv;
 
-  rd68041_core u_core (
+  logic         ipend, rsto;
+
+  rd68041_core #(.FPU(FPU)) u_core (
       .clk(clk), .rst_n(rst_n), .crst(crst),
       .req_valid(req_valid), .req_ready(req_ready), .req_addr(req_addr),
       .req_write(req_write), .req_siz(req_siz), .req_tt(req_tt), .req_tm(req_tm),
       .req_wdata(req_wdata), .req_lock(req_lock), .req_locke(req_locke),
       .lock_seq(lock_seq), .rsp_valid(rsp_valid), .rsp_data(rsp_data),
-      .rsp_done(rsp_done), .rsp_err(rsp_err),
+      .rsp_done(rsp_done), .rsp_err(rsp_err), .rsp_avec(rsp_avec),
+      .ipl_n(ipl_n_i), .ipend(ipend), .rsto(rsto),
       .retire(retire), .retire_pc(retire_pc), .retire_npc(retire_npc),
       .halted(halted), .sr(sr));
 
@@ -220,8 +223,8 @@ module rd68041_top #(
   // TS shares the address group's enable (specification 38 names it with
   // them).
   assign ts_oe     = attr_oe;
-  assign rsto_n_o  = 1'b1;
-  assign ipend_n_o = 1'b1;
+  assign rsto_n_o  = !rsto;
+  assign ipend_n_o = !ipend;
   assign pst_o     = rd68041_pkg::PST_USER_RUN;
   assign tdo_o     = 1'b0;
   assign tdo_oe    = 1'b0;
@@ -231,8 +234,8 @@ module rd68041_top #(
   logic unused_ok;
   assign unused_ok = &{1'b0, pclk, dle_i, sn_addr, sn_wdata, sn_wbe, sn_wr,
                        sn_dinv, sn_iinv,
-                       tck_i, tms_i, tdi_i, trst_n_i, FPU != 0, mode_mux,
-                       mode_dle, mode_ipl, rsp_tci, rsp_avec, rsp_beat, rsp_lw,
+                       tck_i, tms_i, tdi_i, trst_n_i, mode_mux,
+                       mode_dle, mode_ipl, rsp_tci, rsp_beat, rsp_lw,
                        owner, retire, retire_pc, retire_npc, halted, sr};
 
 endmodule

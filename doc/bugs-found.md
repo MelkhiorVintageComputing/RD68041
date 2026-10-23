@@ -10,6 +10,38 @@ synchroniser) are in RD68031's `doc/bugs-found.md`.*
 
 ---
 
+## M8: found while building exception processing
+
+1. **Two always_comb blocks calling the same function hung iverilog 12** at time zero
+   (the M7 decoder refactor, `5e848e8`): no output, a vector run that never ended. The
+   values are continuous assignments now; `doc/coding-standard.md` has the quirk.
+2. **Reserved bits of extension words made an instruction illegal.** The decoder
+   refused BFCHG, BFCLR, BFSET and BFTST with bit 15 of the extension word set, and
+   MOVES with bits 10-0 set; the cputest corpus expects the part to ignore them. Until
+   M8 such an instruction halted and the corpus counted it as not built, which hid it;
+   once "illegal" was an exception, they failed. Caught by cputest.
+3. **A locked read that faulted left the sequence open**: LOCK stayed asserted and
+   the data memory unit started nothing unlocked again, so the access fault's frame
+   could never be written. The fault now ends the sequence (`rd68041_dmu.sv`). Found
+   writing `core_fault_tb`'s TAS case, which covers it.
+4. **RTE of a throwaway frame counted as two instructions**, its first pass (which
+   runs RTE again) as well as its second; the trace of instructions saw one. The first
+   pass is neither retired nor traced now. Caught by `make cosim` (`m8_exc`).
+5. **The one-instruction harness compared before an SR write landed**, since the
+   pipeline is empty while `XS_SR` waits for the writes; it waits for the exception
+   state machine to be idle now. Found while converting the benches, before it could
+   cost a false result.
+6. **The vector was read before the frame was written.** The data memory unit lets a
+   read pass queued writes it does not touch, so the vector fetch went to the bus ahead
+   of the frame's stores; on a double bus fault the processor halted with the frame
+   still queued. UM 8.1 fetches the vector last, and after a double bus fault "the
+   processor does not attempt to alter the current state of memory": exception
+   processing's reads now wait for every write before them. Caught by cputest, whose
+   vectors (wherever the test's memory puts them) are often odd.
+7. **All of $F5xx was taken for PFLUSH and PTEST**, so an undefined $F5xx in user mode
+   was a privilege violation; only $F500-$F51F and $F548, $F568 are, and the rest is
+   the F-line. Caught by cputest (ILLEGAL, $F597).
+
 ## M7: five found by the first vector and cputest sweeps
 
 Found by `make vectors-all` (UAE040) and `make cputest` (WinUAE's corpus), the first

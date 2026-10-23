@@ -50,6 +50,7 @@ SRCS := rtl/rd68041_sync.sv \
         rtl/rd68041_decode.sv \
         rtl/rd68041_ifu.sv \
         rtl/rd68041_dmu.sv \
+        rtl/rd68041_exc.sv \
         rtl/rd68041_core.sv \
         rtl/rd68041_shifter.sv \
         rtl/rd68041_divider.sv \
@@ -98,11 +99,11 @@ help:
 	@echo "  make cputest-gen  WinUAE's cputest corpus for the MC68040, integer and FPU"
 	@echo "                    (build/cputest/), decoded and counted"
 	@echo "  make vectors      the per-opcode sweep on the core against UAE040 (OP=alu,shift ...;"
-	@echo "                    default OP=$(VECGROUPS)); passed / failed / not built / pending M8"
+	@echo "                    default OP=$(VECGROUPS)); passed / failed / not built / pending"
 	@echo "  make vectors-all  ... every group"
 	@echo "  make ea           ... the addressing-mode sweep (OP=ea)"
 	@echo "  make cputest      the integer cputest corpus on the core (CPUTEST_SEL=ADD,MOVE.L"
-	@echo "                    CPUTEST_MAX=$(CPUTEST_MAX) CPUTEST_USER=$(CPUTEST_USER))"
+	@echo "                    CPUTEST_MAX=$(CPUTEST_MAX))"
 	@echo "  make qemu040      build QEMU (m68k-softmmu, build/qemu/) and the qemu040 trace plugin"
 	@echo "  make cosim-qemu-smoke  smoke040.S on QEMU's m68040, its trace compared with"
 	@echo "                    UAE040's; every known difference confirmed"
@@ -207,7 +208,11 @@ TBS := $(filter-out core_cosim_tb core_vec_tb core_cputest_tb,$(patsubst sim/tb/
 MODELS := $(wildcard sim/models/*.sv)
 SIMJOBS ?= 4
 
-sim: dirs
+# The directed benches that run a program (core_exc_tb, core_fault_tb) take it
+# from build/programs/.
+SIMPROGS := m8_int m8_fault
+
+sim: dirs $(patsubst %,$(BUILD)/programs/%.hex,$(SIMPROGS))
 	@rm -f $(addprefix $(BUILD)/,$(addsuffix .simres,$(TBS))); \
 	run_tb() { \
 	  tb=$$1; r=$(BUILD)/$$tb.simres; \
@@ -239,9 +244,10 @@ sim: dirs
 # Each program in sim/programs/ is built with the cross toolchain and linked at
 # 0 (sim/programs/flat.ld); uae040_trace writes its trace, and core_cosim_tb
 # runs it on the core and compares every register at every instruction
-# boundary (UAE040: doc/oracles.md).
+# boundary (UAE040: doc/oracles.md). PROGS defaults to every program but the
+# directed benches' (SIMPROGS), which no oracle runs.
 # ---------------------------------------------------------------------------
-PROGS   ?= m6_basic
+PROGS   ?= m6_basic m7_a m7_b m7_c m8_exc
 
 # Keep the intermediate files: the ELF is what objdump reads when a run fails.
 .SECONDARY:
@@ -491,8 +497,8 @@ uae040-smoke: $(O40BUILD)/uae040_trace $(O40SMOKE)/smoke040.bin
 # UAE040 and writes the stream sim/tb/core_vec_tb.sv replays on the core: the
 # registers, SR, the next PC and the operand accesses are compared, and every
 # test is counted as passed, failed, not built (the core halted on it) or
-# pending M8 (the oracle took an exception, or the test starts in user mode or
-# traced). It passes when nothing fails. `ea` is the addressing-mode group.
+# pending (it needs what the core does not have yet; none since M8). It passes
+# when nothing fails. `ea` is the addressing-mode group.
 #
 #   make vectors OP=alu        one group (or several: OP="alu shift")
 #   make vectors               OP=$(VECGROUPS)
@@ -584,17 +590,13 @@ cputest-gen: dirs $(CTBUILD)/run/stamp $(CTBUILD)/fpu/stamp
 
 # The integer corpus on the core: convert.py bench samples it into
 # build/cputest/cputest.vec and core_cputest_tb replays it; every test is
-# passed, failed, not built or pending M8 (sim/tb/core_cputest_tb.sv). The FPU
-# corpus is counted and skipped (M11). Not in `make check`.
+# passed, failed, not built or pending (sim/tb/core_cputest_tb.sv), each run in
+# its own mode. The FPU corpus is counted and skipped (M11). Not in `make check`.
 #
 #   CPUTEST_SEL=ADD,MOVE.L   only these instructions (a bare name takes every size)
 #   CPUTEST_MAX=N            at most N tests per instruction, sampled evenly; 0 all
-#   CPUTEST_USER=run         the corpus's user-mode tests of unprivileged
-#                            instructions run in the core's supervisor mode,
-#                            A7 = USP; =pending sets them aside as pending M8
 CPUTEST_SEL  ?=
 CPUTEST_MAX  ?= 40
-CPUTEST_USER ?= run
 
 .PHONY: cputest
 cputest: dirs $(CTBUILD)/run/stamp
@@ -605,7 +607,7 @@ cputest: dirs $(CTBUILD)/run/stamp
 	    $(RTL) $(MODELS) sim/tb/core_cputest_tb.sv > $(BUILD)/core_cputest_tb.build.log 2>&1 \
 	  || { grep -v $(NOTES) $(BUILD)/core_cputest_tb.build.log; exit 1; }
 	@vvp $(BUILD)/core_cputest_tb.vvp +vec=$(CTBUILD)/cputest.vec +mem=$(CTBUILD) \
-	    +faillog=$(CTBUILD)/cputest.fail +user=$(if $(filter run,$(CPUTEST_USER)),1,0) \
+	    +faillog=$(CTBUILD)/cputest.fail \
 	    > $(BUILD)/core_cputest_tb.log 2>&1; \
 	 grep -E '^  (FAIL|      )' $(BUILD)/core_cputest_tb.log | head -75; \
 	 grep -E '^core_cputest_tb: ' $(BUILD)/core_cputest_tb.log | sed 's/^core_cputest_tb: /  /'; \

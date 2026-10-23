@@ -14,6 +14,13 @@
 // branch, from EX -- empties the queue and fetches from the target; a read
 // already on the bus when it comes is let finish and its words thrown away.
 //
+// A fetch that ends in a bus error puts its words in the queue marked
+// (q_err), and decode turns the instruction that needs one into an access
+// fault (UM 8.2.1: "bus errors that occur during instruction prefetches are
+// deferred until the processor attempts to use the information"). A redirect
+// to an odd address fetches nothing and says so (q_aerr): the address error
+// (UM 8.2.2).
+//
 // The cached front end, the half-line queue and the instruction ATC (M9, M10)
 // replace the bus port with the instruction memory unit's.
 
@@ -31,6 +38,8 @@ module rd68041_ifu (
     output logic [191:0]  q_win,       // the queue from its head, word 0 in 191:176
     output logic  [3:0]   q_cnt,       // how many words are there (0-12)
     output logic [31:0]   q_pc,        // the head word's address
+    output logic [11:0]   q_err,       // which of them came from a faulted fetch (bit k: word k)
+    output logic          q_aerr,      // fetching was redirected to an odd address
     input  logic  [3:0]   q_pop,       // words decode takes this clock (0-12)
 
     // The bus, through the arbiter.
@@ -47,6 +56,7 @@ module rd68041_ifu (
   localparam int QN = 12;
 
   logic [15:0] q [0:QN-1];
+  logic        qe [0:QN-1];     // ... from a fetch that faulted
   logic  [3:0] head, cnt;       // the head index, the words held
   logic [31:0] hpc;             // the head word's address
   logic [31:0] fa;              // the next word to fetch
@@ -60,6 +70,7 @@ module rd68041_ifu (
       logic [3:0] i;
       i = 4'((int'(head) + k) % QN);
       q_win[191 - 16*k -: 16] = q[i];
+      q_err[k] = qe[i];
     end
   end
   assign q_cnt = cnt;
@@ -67,7 +78,9 @@ module rd68041_ifu (
 
   // Room for a long word's two, counting those already asked for.
   wire room = (int'(cnt) <= QN - 2);
-  assign f_valid = on && !stop && !busy && room && !go;
+  logic aerr;                   // redirected to an odd address: nothing to fetch
+  assign q_aerr  = aerr;
+  assign f_valid = on && !stop && !busy && room && !go && !aerr;
   assign f_addr  = {fa[31:2], 2'b00};
   assign f_tm    = sup ? rd68041_pkg::TM_SUP_CODE : rd68041_pkg::TM_USER_CODE;
 
@@ -78,14 +91,17 @@ module rd68041_ifu (
   // The queue's next count, and where the words of a response go. Computed
   // here, not as variables inside the clocked process: yosys keeps such a
   // variable as a register (doc/coding-standard.md).
-  wire        take    = f_rsp && !drop;
+  // A fault answers with no data: its words go in marked.
+  wire        bad     = busy && f_done && f_err && !drop;
+  wire        take    = (f_rsp && !drop) || bad;
   wire  [3:0] tail    = 4'((int'(head) + int'(cnt)) % QN);
   wire  [3:0] tail1   = 4'((int'(tail) + 1) % QN);
   wire  [3:0] cnt_nxt = cnt - q_pop + (take ? (skip ? 4'd1 : 4'd2) : 4'd0);
 
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      for (int i = 0; i < QN; i++) q[i] <= 16'h0000;
+      for (int i = 0; i < QN; i++) begin q[i] <= 16'h0000; qe[i] <= 1'b0; end
+      aerr <= 1'b0;
       head <= '0;
       cnt  <= '0;
       hpc  <= '0;
@@ -99,6 +115,7 @@ module rd68041_ifu (
       busy <= 1'b0;
       drop <= 1'b0;
       on   <= 1'b0;
+      aerr <= 1'b0;
     end else begin
       if (q_pop != 4'd0) begin
         head <= 4'((int'(head) + int'(q_pop)) % QN);
@@ -110,10 +127,13 @@ module rd68041_ifu (
       if (f_rsp || (busy && f_done)) begin
         if (take) begin
           if (skip) begin
-            q[tail] <= f_data[15:0];
+            q[tail]  <= f_data[15:0];
+            qe[tail] <= bad;
           end else begin
-            q[tail]  <= f_data[31:16];
-            q[tail1] <= f_data[15:0];
+            q[tail]   <= f_data[31:16];
+            q[tail1]  <= f_data[15:0];
+            qe[tail]  <= bad;
+            qe[tail1] <= bad;
           end
           fa <= {fa[31:2] + 30'd1, 2'b00};
         end
@@ -132,6 +152,7 @@ module rd68041_ifu (
         hpc  <= go_pc;
         fa   <= go_pc;
         on   <= 1'b1;
+        aerr <= go_pc[0];
         if (busy && !f_done) drop <= 1'b1;
         if (f_valid && f_ready) drop <= 1'b1;
       end
@@ -139,6 +160,6 @@ module rd68041_ifu (
   end
 
   logic unused_ok;
-  assign unused_ok = &{1'b0, f_err, fa[0]};
+  assign unused_ok = &{1'b0, fa[0]};
 
 endmodule

@@ -30,6 +30,7 @@ module rd68041_regfile (
 
     input  logic  [4:0] ra, rb, rc, rd, re,
     output logic [31:0] qa, qb, qc, qd, qe,
+    output logic [31:0] q15,      // A7, the active stack pointer: the stack swap's (M8)
 
     input  logic        we0,
     input  logic  [4:0] wa0,
@@ -68,5 +69,6 @@ module rd68041_regfile (
   assign qc = (rc < 5'd20) ? r[rc] : 32'h0;
   assign qd = (rd < 5'd20) ? r[rd] : 32'h0;
   assign qe = (re < 5'd20) ? r[re] : 32'h0;
+  assign q15 = r[15];
 
 endmodule

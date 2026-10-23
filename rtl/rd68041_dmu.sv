@@ -40,6 +40,9 @@ module rd68041_dmu (
     input  logic          ld_cancel,   // the read is no longer wanted: finish it silently
     input  logic          ld_lock,     // a locked read (UM 7.4.5)
     input  logic          ld_alt,      // in SFC's space
+    input  logic          ld_ack,      // an acknowledge cycle (TT 11; UM 7.5) ...
+    input  logic  [2:0]   ld_tm,       // ... with this TM
+    output logic          ld_avec,     // ... ended with AVEC (with ld_done)
 
     // A write, from W.
     input  logic          st_valid,
@@ -67,7 +70,8 @@ module rd68041_dmu (
     input  logic          d_rsp,
     input  logic [31:0]   d_data,
     input  logic          d_done,
-    input  logic          d_err
+    input  logic          d_err,
+    input  logic          d_avec
 );
 
   // --- the write queue ------------------------------------------------------
@@ -107,6 +111,8 @@ module rd68041_dmu (
   logic        xerr;
   logic        xcancel;          // the read under way was cancelled
   logic        xlk, xlke, xalt;  // the operand under way is locked, last, alternate
+  logic        xack;             // ... an acknowledge cycle, with TM xtm
+  logic  [2:0] xtm;
   logic  [2:0] cur_n;            // the bytes of the transfer on the bus
   logic  [1:0] cur_siz;
   logic  [1:0] cur_a10;
@@ -163,8 +169,11 @@ module rd68041_dmu (
   assign d_siz   = t_siz;
   // UM 5.3.2 and Table 5-4: an alternate function code access carries the
   // function code on TM; a normal one, user or supervisor data.
-  assign d_tt    = xalt ? rd68041_pkg::TT_ALTFC : rd68041_pkg::TT_NORMAL;
-  assign d_tm    = xalt ? ((x == X_ST) ? dfc : sfc)
+  // An acknowledge cycle carries its own TM: the interrupt's level, or 0 for
+  // a breakpoint (UM 7.5).
+  assign d_tt    = xack ? rd68041_pkg::TT_ACK : xalt ? rd68041_pkg::TT_ALTFC : rd68041_pkg::TT_NORMAL;
+  assign d_tm    = xack ? xtm :
+                   xalt ? ((x == X_ST) ? dfc : sfc)
                         : (sup ? rd68041_pkg::TM_SUP_DATA : rd68041_pkg::TM_USER_DATA);
   // UM 7.4.5: LOCK on every transfer of the sequence, LOCKE on the last
   // write's last transfer.
@@ -201,6 +210,9 @@ module rd68041_dmu (
       xlk     <= 1'b0;
       xlke    <= 1'b0;
       xalt    <= 1'b0;
+      xack    <= 1'b0;
+      xtm     <= '0;
+      ld_avec <= 1'b0;
       qn      <= '0;
       x       <= X_IDLE;
       xa      <= '0;
@@ -246,6 +258,10 @@ module rd68041_dmu (
             ld_done <= !(xcancel || ld_cancel);
             xcancel <= 1'b0;
             ld_err  <= d_err || xerr;
+            // A locked read that faulted ends the sequence: its writes will
+            // not come (the instruction takes the access fault).
+            if (xlk && (d_err || xerr)) lock_open <= 1'b0;
+            ld_avec <= d_avec;
             ld_data <= accum;
           end else begin
             // The oldest write is done: the queue moves up. The locked
@@ -267,6 +283,8 @@ module rd68041_dmu (
         xlk  <= ld_lock;
         xlke <= 1'b0;
         xalt <= ld_alt;
+        xack <= ld_ack;
+        xtm  <= ld_tm;
         if (ld_lock) lock_open <= 1'b1;
       end else if (start_st) begin
         x    <= X_ST;
@@ -276,6 +294,7 @@ module rd68041_dmu (
         xlk  <= qf[0][2];
         xlke <= qf[0][1];
         xalt <= qf[0][0];
+        xack <= 1'b0;
       end
 
       // A new write joins the queue behind those still there.

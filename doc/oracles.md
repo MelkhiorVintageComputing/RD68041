@@ -239,6 +239,35 @@ behaviour and counts each case.
   same bytes read, and the same written with the same values. It prints how many
   vectors needed that (96, all PACK and UNPK: the bit fields match access for access).
 
+### Where the oracles disagree with the manual, or with each other (M8)
+
+- **The format $2 frame's address.** UM 8.4.3: for CHK, CHK2, TRAPcc, TRAPV, trace and
+  the zero divide, +$08 holds "the address of the instruction that caused the
+  exception". UAE040 stacks the next instruction's address there, the same as the PC.
+  The cputest corpus -- WinUAE's copy of the core, whose tester its author checks
+  against real processors -- stacks the instruction's, as the manual says, and RD68031
+  found the same split for the MC68030 (UAE030 against the corpus). `tools/vectors/gen.c`
+  (`normalise`) puts the instruction's address in UAE040's frame; `m8_exc` does not read
+  that word in its handlers.
+- **The stack frame's accesses.** UAE040 writes a frame a word at a time where it can;
+  the core writes long words (UM 8.4: "it uses long-word operand transfers wherever
+  possible"), and UM 8.4 leaves the order to the part. For a test that takes an exception
+  the vector bench compares the bytes written, under the masks of the stacked SR's
+  undefined condition codes.
+- **Reserved bits of extension words.** The corpus runs BFCHG, BFCLR, BFSET and BFTST
+  with bit 15 of the extension word set, and MOVES with bits 10-0 set -- fields PRM 4 and
+  6 show as zero -- and expects them to execute normally: the part ignores those bits.
+  The decoder did not, until M8 made its "illegal" an exception instead of a halt that
+  the corpus counted as not built; it ignores them now.
+- **The undefined condition codes of CHK, CHK2 and the zero divide** follow no rule in
+  UAE040 that the vectors show. PRM 4 leaves them undefined, and the benches that can
+  compare under a mask do; the program comparisons (`make cosim`), which cannot, keep
+  out of them (`m8_exc` has no CHK).
+- **No oracle runs interrupts** (UAE040's harness and the corpus have no interrupt
+  source), and the access error frame is UAE040's to judge only from M10. `core_exc_tb`
+  and `core_fault_tb` check interrupts, STOP, RESET, BKPT, the format $7 frames of read
+  faults and the double bus fault against the manual instead.
+
 ## cputest: WinUAE's instruction tester, for the MC68040 -- M0 spike
 
 **What.** The vector generator that comes with WinUAE (`Inputs/ref/winuae/cputest/`),

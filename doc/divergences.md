@@ -44,3 +44,52 @@ clock, and a register clocked by RSTI would be a second clock domain. Nothing de
 the result -- the modes are not built (above) and the captured levels are only reported --
 so `tools/timing/anchors.py` lists 53 and 54 as not about this design, with this entry as
 the reason. A board that relies on a mode select must hold it for a clock after RSTI.
+
+## Every write finishes before an exception is taken
+
+**UM 8.2.1, 8.4.6.3.** A data access fault "freezes the pipeline", and the writes that
+are pending are stacked in the access error frame's write-back slots, for the handler to
+complete; other exceptions stack nothing of them.
+
+**What this design does.** Exception processing waits until the data memory unit's write
+queue is empty, so every write before the exception reaches memory first, and a format $7
+frame's WB3S, WB2S and WB1S always have V clear. The handler that completes the pending
+write-backs finds none, which the frame allows; what differs is when the writes reach the
+bus. It also keeps the writes' function codes those of the mode they were made in, since
+the SR changes only after them. At M10, when a write can itself fault, the write-back
+slots get their contents (`doc/checkpoint.md`).
+
+**Checked by:** `core_fault_tb` (the WB status words of four frames).
+
+## Not yet: a write that ends in a bus error, and the format $7 continuations
+
+**UM 8.2.1:** "a bus error on a data write access always results in an access fault
+exception". **UM 8.4.6.2, 8.4.6.7:** MOVEM's continuation (CM) and the trace
+continuation (CT).
+
+**What this design does until M10.** A write answered with TEA is dropped, with no
+exception; a MOVEM whose read faults is restarted from its first transfer, so a MOVEM
+whose addressing mode uses a register the list loaded can restart from the wrong address
+(the case CM exists for); CT is never set, and RTE of a format $7 frame resumes at its PC
+whatever the continuation bits say. These are M10's (`doc/plan.md`).
+
+## An address error during exception processing is a double bus fault
+
+**UM 8.2.2:** "If an address error occurs during the exception processing for a bus
+error, address error, or reset, a double bus fault occurs" -- for the other exceptions,
+an odd handler address is an address error exception.
+
+**What this design does.** Any fault on the micro-operations of exception processing,
+an odd vector included, halts the processor as a double bus fault. Only a vector table
+holding an odd handler address for a non-fault exception can tell.
+
+## Format error and odd PC on RTE
+
+**UM 8.4:** "If during restoration, a stack frame has an odd address PC and an SR that
+indicates user trace mode enabled, then an address error is taken. The SR stacked for
+the address error has the SR S-bit set."
+
+**What this design does.** RTE to an odd PC completes (the SR and the stack pointer are
+restored) and the fetch from the odd address is the address error, with the odd address
+as the frame's PC and its address less bit 0 as ADDR (UM 8.4.6.7), whatever the trace
+bits.

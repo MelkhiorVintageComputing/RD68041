@@ -7,10 +7,15 @@
 // tools/vectors/gen.c builds one test per (opcode, starting state), runs it
 // through UAE040 as an MC68040 and records the state it finished in and every
 // operand access it made. This replays each one through the core and compares:
-// D0-D7, A0-A6, A7 (the active stack pointer, the ISP: supervisor, M clear),
-// SR under the mask of the condition codes the manual defines, the next PC,
-// and the operand accesses -- address, size and direction of each, and the
-// value of each write. The stream's format is documented at the top of
+// D0-D7, A0-A6, the three stack pointers, SR under the mask of the condition
+// codes the manual defines, VBR, SFC, DFC and CACR, the next PC, and the
+// operand accesses -- address, size and direction of each, and the value of
+// each write. A test that takes an exception has its frame among the writes
+// and its vector among the reads; the frame's writes are compared byte for
+// byte, because UM 8.4 leaves their order and size to the part ("the
+// processor does not necessarily read or write the stack frame data in
+// sequential order"), and the core writes long words where UAE040 writes
+// words. The stream's format is documented at the top of
 // tools/vectors/gen.c; RD68031's core_vec_tb is the model.
 //
 // UAE040 is an ORACLE, not a source. Where the two disagree the manual decides.
@@ -20,10 +25,8 @@
 //   FAIL        it ran, and something did not (or it never finished);
 //   NOT BUILT   the core halted on it: its decoder does not build the
 //               instruction (or that form of it) yet;
-//   PENDING M8  the oracle took an exception, or the test starts from a state
-//               (user mode, tracing) the core cannot be put in, because it has
-//               no exception processing and SR's system byte is fixed at $27
-//               until M8. Not run.
+//   PENDING     the test needs what the core does not have yet (none since
+//               M8). Not run.
 // The bench PASSes when nothing FAILs.
 //
 // Per test: the data block is filled (the same arithmetic as gen.c), the
@@ -33,13 +36,9 @@
 // run alone (rd68041_core_harness.svh: deposit, run_one). Whatever it wrote
 // outside the refilled areas is put back afterwards.
 //
-// What is not compared yet: the function code of each access (the core's data
-// memory unit drives supervisor data for every operand until M8-M10), and the
-// control registers -- USP, MSP, SFC, DFC, VBR, CACR -- which the bench can
-// neither deposit nor read until the core has them (they start at zero, the
-// reset value, on both sides). The reads and the writes are compared each in
-// order, but not their interleaving: UM 7.7 lets a read pass a write it does
-// not touch.
+// What is not compared: the function code of each access, and the
+// interleaving of reads and writes -- the reads and the writes are compared
+// each in order, but UM 7.7 lets a read pass a write it does not touch.
 //
 //   +vec=FILE      the stream (default build/vectors.hex)
 //   +faillog=FILE  every failing test, one line each, with both access lists
@@ -158,15 +157,6 @@ module core_vec_tb;
   // One test, read; returns early for the ones not run or not built.
   task automatic run_test();
     begin : one
-      // --------------------------------------------------------------------
-      // Pending M8: an exception, or a starting state the core cannot have.
-      // --------------------------------------------------------------------
-      if (excv != 0 || srv[15:8] != 8'h27 || mspv != 0 || uspv != 0 || sfcv != 0 ||
-          dfcv != 0 || vbrv != 0 || cacrv != 0) begin
-        pending++;
-        g_pend[grp]++;
-        disable one;
-      end
 
       // --------------------------------------------------------------------
       // Memory, as the oracle laid it out.
@@ -190,8 +180,14 @@ module core_vec_tb;
       vec_boot();
       for (n = 0; n < 8; n++) dep_d[n] = dv[n];
       for (n = 0; n < 7; n++) dep_a[n] = av[n];
-      dep_a[7] = ispv;
-      dep_sr = srv[15:0];
+      dep_sr   = srv[15:0];
+      dep_usp  = uspv;
+      dep_isp  = ispv;
+      dep_msp  = mspv;
+      dep_vbr  = vbrv;
+      dep_sfc  = sfcv[2:0];
+      dep_dfc  = dfcv[2:0];
+      dep_cacr = cacrv;
       deposit();
       cap_clear();
       cap_on = 1'b1;
@@ -229,9 +225,24 @@ module core_vec_tb;
           bad = 1'b1;
           $sformat(why, "A%0d is %08h, UAE040 says %08h", n, reg_of(8 + n), fa[n]);
         end
-      if (!bad && reg_of(15) !== fisp) begin
+      if (!bad && sp_of(0) !== fusp) begin
         bad = 1'b1;
-        $sformat(why, "A7 (ISP) is %08h, UAE040 says %08h", reg_of(15), fisp);
+        $sformat(why, "USP is %08h, UAE040 says %08h", sp_of(0), fusp);
+      end
+      if (!bad && sp_of(1) !== fisp) begin
+        bad = 1'b1;
+        $sformat(why, "ISP is %08h, UAE040 says %08h", sp_of(1), fisp);
+      end
+      if (!bad && sp_of(2) !== fmsp) begin
+        bad = 1'b1;
+        $sformat(why, "MSP is %08h, UAE040 says %08h", sp_of(2), fmsp);
+      end
+      if (!bad && (dut.u_core.vbr !== fvbr || {29'h0, dut.u_core.sfc} !== fsfc ||
+                   {29'h0, dut.u_core.dfc} !== fdfc || dut.u_core.cacr !== fcacr)) begin
+        bad = 1'b1;
+        $sformat(why, "VBR SFC DFC CACR are %08h %0h %0h %08h, UAE040 says %08h %0h %0h %08h",
+                 dut.u_core.vbr, dut.u_core.sfc, dut.u_core.dfc, dut.u_core.cacr,
+                 fvbr, fsfc, fdfc, fcacr);
       end
       if (!bad && ((dut.u_core.sr ^ fsr[15:0]) & srmask[15:0]) !== 16'd0) begin
         bad = 1'b1;
@@ -263,6 +274,12 @@ module core_vec_tb;
         if (k == 1 && no == 0 && nc == 1 && is_cas(w[0]) &&
             cap_addr[nth(1'b0, 0)] === cap_addr[nth(1'b1, nth_last_rd())]) begin
           cas_waived++;
+        end else if (k == 1 && excv != 0) begin
+          // An exception's frame: the bytes written, whatever the accesses.
+          if (!same_writes()) begin
+            bad = 1'b1;
+            why = "the bytes written (the frame among them) are not UAE040's";
+          end
         end else if (nc != no) begin
           bad = 1'b1;
           if (k == 0) $sformat(why, "it made %0d operand reads, UAE040 made %0d", nc, no);
@@ -354,6 +371,52 @@ module core_vec_tb;
     same_bytes = (j == nc);
   endfunction
 
+  // The bytes the core wrote against those UAE040 wrote, each under the mask
+  // of its access (the stacked SR's undefined condition codes); a byte written
+  // twice is compared at its last value.
+  function automatic bit same_writes();
+    logic [31:0] ca [0:4*MAXCAP-1];
+    logic  [7:0] cv [0:4*MAXCAP-1];
+    logic [31:0] oa [0:4*MAXACC-1];
+    logic  [7:0] ov [0:4*MAXACC-1];
+    logic  [7:0] om [0:4*MAXACC-1];
+    int          nc, no, q, i, c;
+    bit          hit;
+    nc = 0; no = 0;
+    for (q = 0; q < ncap && q < MAXCAP; q++)
+      if (!cap_rd[q])
+        for (i = 0; i < int'(cap_bytes[q]); i++) begin
+          ca[nc] = cap_addr[q] + i;
+          cv[nc] = 8'(cap_data[q] >> (8 * (int'(cap_bytes[q]) - 1 - i)));
+          nc++;
+        end
+    for (q = 0; q < int'(nread); q++)
+      if (!rrw[q][0])
+        for (i = 0; i < int'(rby[q]); i++) begin
+          oa[no] = racc[q] + i;
+          ov[no] = 8'(rval[q] >> (8 * (int'(rby[q]) - 1 - i)));
+          om[no] = 8'(rmsk[q] >> (8 * (int'(rby[q]) - 1 - i)));
+          no++;
+        end
+    // Every byte UAE040 wrote, the core wrote last with the same value; and
+    // the core wrote no byte UAE040 did not.
+    for (q = 0; q < no; q++) begin
+      hit = 1'b0;
+      for (c = nc - 1; c >= 0 && !hit; c--)
+        if (ca[c] == oa[q]) begin
+          hit = 1'b1;
+          if (((cv[c] ^ ov[q]) & om[q]) != 8'h00) return 1'b0;
+        end
+      if (!hit) return 1'b0;
+    end
+    for (c = 0; c < nc; c++) begin
+      hit = 1'b0;
+      for (q = 0; q < no && !hit; q++) if (oa[q] == ca[c]) hit = 1'b1;
+      if (!hit) return 1'b0;
+    end
+    same_writes = 1'b1;
+  endfunction
+
   // CAS and CAS2: 0000 1ss0 11 <ea>, ss not 00.
   function automatic logic is_cas(input logic [31:0] op);
     is_cas = (op[15:11] == 5'b00001) && (op[10:9] != 2'b00) && (op[8:6] == 3'b011);
@@ -427,12 +490,12 @@ module core_vec_tb;
     $fclose(vec);
     if (flog != 0) $fclose(flog);
     $display("core_vec_tb: %-14s %7s %7s %9s %10s", "group", "passed", "failed",
-             "not built", "pending M8");
+             "not built", "pending");
     for (n = 0; n < ngroups; n++)
       if (g_seen[n] != 0)
         $display("core_vec_tb: %-14s %7d %7d %9d %10d", gname[n], g_pass[n], g_fail[n],
                  g_nb[n], g_pend[n]);
-    $display("core_vec_tb: %0d passed, %0d failed, %0d not built, %0d pending M8, of %0d",
+    $display("core_vec_tb: %0d passed, %0d failed, %0d not built, %0d pending, of %0d",
              passed, failed, notbuilt, pending, ntests);
     if (split_waived != 0)
       $display("core_vec_tb: %0d matched byte for byte, split into accesses as UAE040 does not",

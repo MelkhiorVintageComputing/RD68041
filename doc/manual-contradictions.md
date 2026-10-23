@@ -84,3 +84,24 @@ CSV's own second reading agrees), and nothing says which is meant.
 harmless: with specification 49 holding BB's delay to at least 9 ns, it leaves BB a
 window of 9 to 14 ns at 40 MHz, the binding constraint of that column
 (`doc/ac-timing.md`). A board built to the MC68040's small-buffer 24 ns would fail it.
+
+## 5. The throwaway frame's SR: M clear, or M set
+
+**Followed: UM 8.4.2 and the MC68030 -- the throwaway frame holds the SR as it was, with
+S set (so M is still set).**
+
+UM 8.2.9: "The copy of the SR saved on the throwaway frame has the S-bit set, the M-bit
+clear, and the interrupt mask level set to the new interrupt level. It may or may not be
+set in the copy saved on the master stack." UM 8.4.2, RTE of that frame: "In most cases,
+the throwaway frame is on the interrupt stack, and when the SR value is read from the
+stack, the S-bit and M-bit are set. In that case, there is a normal four-word frame on the
+master stack." Both cannot hold: RTE loads the throwaway frame's SR and runs again on the
+stack it names, and with M clear that is the interrupt stack again, above the throwaway
+frame -- not the master stack's frame below the interrupted code. The MC68030's manual
+says what the second sentence of 8.2.9 is left over from: "The copy of the status
+register saved on the throwaway frame is exactly the same as that placed on the master
+stack except that the S bit is set in the version placed on the interrupt stack. (It may
+or may not be set in the copy saved on the master stack.)" -- "it" is the S bit. So the
+throwaway frame's SR is the master frame's with S set, as on the MC68030, and RTE of it
+returns through the master stack (`rd68041_core.sv`, the sequencer's `sr_new`;
+`core_exc_tb` (g)).

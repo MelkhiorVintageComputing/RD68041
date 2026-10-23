@@ -107,6 +107,63 @@ Hazards (`rtl/rd68041_core.sv`):
 - **the condition codes** exist twice: EX's, for the next branch, and those write-back
   committed.
 
+## Exceptions (M8)
+
+UM 8.1's model, a restart one: an exception is taken at an instruction boundary, and
+everything after it is thrown away and fetched again. Here every exception is taken at
+**write-back**, where nothing younger has changed anything architectural
+(`rtl/rd68041_core.sv`, `rtl/rd68041_exc.sv`).
+
+**Where each is found.** A micro-operation carries the vector of the exception it takes
+(`xvec`) and whether the frame's PC is its own instruction or the next (`xnext`):
+
+| Found in | Exceptions |
+|---|---|
+| decode | illegal (4), privilege violation (8), A-line (10), F-line (11), TRAP #n (32 + n, after); an instruction a word of which came from a fetch that faulted (2, format $7); a fetch redirected to an odd address (3) |
+| \<ea\> fetch | an operand read that ended in a bus error (2, format $7: FA and the SSW ride in the micro-operation's `imm` and `tgt`) |
+| execute | divide by zero (5), CHK and CHK2 (6), TRAPcc and TRAPV (7), all after the instruction; RTE's format error (14); a branch to an odd address, or a conditional one with an odd displacement even when not taken (3, UM 8.2.2) |
+| write-back | trace (9) after an instruction traced as T1 and T0 were when it began; an interrupt at a boundary, after a trace |
+
+A micro-operation that takes an exception before completing changes nothing; one that
+takes it after (the traps) completes first. Write-back then empties the pipeline behind
+it and hands over to the exception state machine:
+
+| State | |
+|---|---|
+| `XS_SR` | waits until every queued write has gone (so the frame never holds a pending write-back, and the function codes of the writes are the old mode's), then, in one clock: the SR changes (S set, T1 T0 cleared, an interrupt's level the mask), A7 is saved to the stack pointer it was and loaded with the frame's address on the one it becomes, and the frame's address is worked out |
+| `XS_SEQ` | the sequencer issues, in decode's place, an interrupt's acknowledge (the vector offset into T0), the frame's long words at their absolute addresses, a throwaway frame for an interrupt taken with M set, and the vector fetch, which jumps to the handler. Its end is an instruction boundary: a pending interrupt is taken there (UM 8.3), except after an interrupt's own |
+| `XS_STOP` | STOP, until an interrupt |
+| `XS_RST` | RESET: RSTO for 512 clocks |
+
+A fault on any of the sequencer's micro-operations is a double bus fault: the core halts.
+
+**The status register's writers are serialising** (`ser`): MOVE, ANDI, ORI and EORI to
+SR, RTE, STOP, and also NOP (UM 2.1: it waits for the writes) and RESET. Decode issues
+nothing after one until it has left write-back and `XS_SR` has applied it, then fetching
+starts again from the next instruction, in the new mode's space. So the SR's system byte
+and the stack pointers change only in `XS_SR`, decode reads S and M as they are (for the
+privileged instructions and for which supervisor stack pointer MOVEC means), and nothing
+needs to be undone.
+
+**The stack pointers.** A7 is the active one; the core holds the other two (USP, ISP,
+MSP). Whatever changes S or M swaps them in `XS_SR`. MOVEC of the active one is a plain
+register move of A7; of an inactive one, a control register.
+
+**RTE** is four micro-operations: the SR into T0, the PC into T1, the format word, which
+checks the format (vector 14) and moves A7 past the frame, and the last, serialising,
+which writes the SR and goes to the PC -- or, for a throwaway frame, to the RTE itself,
+which runs again on the stack the loaded SR names (UM 8.4.2).
+
+**Interrupts.** IPL2-IPL0 are synchronised and a level is taken once two consecutive
+samples agree (UM 7.5.1); it is pending above the mask, or on a transition to 7 until that
+is taken. IPEND is that. The acknowledge is a byte read at $FFFFFFFF, TT 11, TM the level:
+a vector on D7-D0, AVEC (24 + level) or TEA (24, spurious).
+
+Not yet (M10): a write that ends in a bus error is not reported (the data memory unit
+drops it); MOVEM's continuation (CM) and the trace continuation (CT) of a format $7 frame
+are neither set nor honoured by RTE -- a faulted MOVEM restarts from its first transfer.
+`doc/divergences.md` has these.
+
 ## Status
 
 **M4: measured.** The storage above (`rtl/rd68041_bram.sv`, `rd68041_atc.sv`,
@@ -134,3 +191,15 @@ none failing (768 wait for M8; MOVE16 is M9's), and `make cosim` runs four progr
 register for register (`m6_basic`, `m7_a`, `m7_b`, `m7_c`). `doc/bugs-found.md` has
 the defects those found, `doc/oracles.md` the three places UAE040 disagrees with the
 manual.
+
+**M8: exceptions.** Every exception of the integer unit but the access faults on a write
+(M10): the traps, the illegal, privileged and unimplemented instructions, trace, the
+interrupts (vectored, autovectored, spurious, level 7), STOP, RESET, BKPT, RTE of every
+MC68040 format and the format error, access faults on instruction fetches and operand
+reads (format $7), and the double bus fault. `make vectors-all` runs all 12,707 vectors,
+none pending and none failing; `make cputest` runs the corpus in each test's own mode,
+exceptions and frames included: 6,649 of the 6,688 sampled pass, none fails, and the 39
+not built are MOVE16 (M9); `make cosim` adds `m8_exc` (traps, privilege, trace, the
+master stack, throwaway and format-error RTEs); `core_exc_tb` (interrupts, STOP, RESET,
+BKPT) and `core_fault_tb` (access faults, the double bus fault) check against the manual
+what no oracle runs.

@@ -26,13 +26,27 @@
 //
 // The condition codes exist twice: as EX has made them (for the next branch)
 // and as write-back has committed them (the architectural ones, which an
-// exception, M8, puts back into EX's).
+// exception puts back into EX's).
 //
-// M6: no exceptions, no caches, no MMU, supervisor mode throughout, SR's system
-// byte as reset leaves it. A micro-operation marked halt stops everything when
-// it reaches write-back (`halted`).
+// Exceptions (M8; doc/microarch.md, "Exceptions") are taken at write-back. A
+// micro-operation carries the vector of the one it takes (`xvec`): decode's
+// (illegal, privileged, A- and F-line, TRAP #n, a fetch that faulted), <ea>
+// fetch's (an operand read that faulted) or execute's (the traps, a format
+// error, an odd branch target). Write-back completes it first or not
+// (`xnext`), empties the pipeline behind it, and the exception state machine
+// (`xs`) changes the SR and the stack pointer once every write has gone, then
+// lets rd68041_exc build the frame and fetch the vector. A trace and an
+// interrupt are taken the same way at an instruction boundary. The SR's
+// writers are serialising: nothing issues after one until it is past
+// write-back, and fetching starts again behind it.
+//
+// No caches and no MMU yet. A micro-operation marked halt (an instruction not
+// built) stops everything when it reaches write-back (`halted`); so does a
+// double bus fault.
 
-module rd68041_core (
+module rd68041_core #(
+    parameter int FPU = 1                    // 0: the MC68LC040
+) (
     input  logic          clk,
     input  logic          rst_n,
     input  logic          crst,
@@ -53,6 +67,12 @@ module rd68041_core (
     input  logic [31:0]   rsp_data,
     input  logic          rsp_done,
     input  logic          rsp_err,
+    input  logic          rsp_avec,
+
+    // Interrupts (UM 8.2.9) and the RESET instruction.
+    input  logic  [2:0]   ipl_n,        // IPL2-IPL0, as on the pins
+    output logic          ipend,        // an interrupt is pending (IPEND, active high)
+    output logic          rsto,         // RSTO, active high
 
     // For testbenches and, later, PST.
     output logic          retire,       // an instruction completed this clock
@@ -65,17 +85,32 @@ module rd68041_core (
   // ===========================================================================
   // State
   // ===========================================================================
-  localparam logic [7:0] SR_SYS = 8'h27;     // UM 8.2.10: S set, I = 7, T clear
-
   logic [4:0] ccr_x, ccr_w;                  // EX's and the committed CCR
-  assign sr = {SR_SYS, 3'b000, ccr_w};
+
+  // The SR's system byte (UM 2.2.1): T1 T0 S M, 0, I2-I0. Reset leaves $27
+  // (UM 8.2.10): S set, M and the trace bits clear, the mask at 7.
+  logic [7:0] sr_sys;
+  wire        sup    = sr_sys[5];
+  wire        msp_on = sr_sys[4];
+  wire  [1:0] tr     = sr_sys[7:6];
+  wire  [2:0] imask  = sr_sys[2:0];
+  assign sr = {sr_sys, 3'b000, ccr_w};
 
   // The control registers (UM 2.2.2, 3.1, 4.2), written at write-back. M7 holds
-  // the MMU's as plain registers for MOVEC; M10 gives them meaning. With M = 0
-  // the interrupt stack pointer is A7 (register 15), and the master stack
-  // pointer is held here (M8 swaps them).
+  // the MMU's as plain registers for MOVEC; M10 gives them meaning. A7
+  // (register 15) is the active stack pointer -- the USP in user mode, the ISP
+  // or, with M set, the MSP in supervisor mode -- and the other two are held
+  // here; whatever changes S or M swaps them.
   logic  [2:0] sfc, dfc;
-  logic [31:0] cacr, tc, itt0, itt1, dtt0, dtt1, usp, vbr, msp, mmusr, urp, srp;
+  logic [31:0] cacr, tc, itt0, itt1, dtt0, dtt1, usp, isp, vbr, msp, mmusr, urp, srp;
+
+  // Interrupts (UM 7.5.1, 8.2.9): IPL2-IPL0 synchronised, and a level taken
+  // once two consecutive samples agree; pending above the mask, or on a
+  // transition to level 7 until that is taken.
+  logic [2:0] ipl_s0, ipl_s1, ipl_s2, ipl_lvl;
+  logic       nmi;
+  wire        int_pend = (ipl_lvl > imask) || nmi;
+  assign ipend = int_pend;
 
   // ===========================================================================
   // The arbiter: the data memory unit first, then instruction fetch.
@@ -84,7 +119,7 @@ module rd68041_core (
   logic [31:0] d_addr, d_wdata;
   logic  [1:0] d_siz, d_tt;
   logic  [2:0] d_tm;
-  logic        d_lock, d_locke, lock_open;
+  logic        d_lock, d_locke, lock_open, d_avec;
   logic        f_valid, f_ready, f_rsp, f_done, f_err;
   logic [31:0] f_addr;
   logic  [2:0] f_tm;
@@ -119,6 +154,7 @@ module rd68041_core (
   assign d_rsp  = rsp_valid &&  rsp_own_d;
   assign d_done = rsp_done  &&  rsp_own_d;
   assign d_err  = rsp_err   &&  rsp_own_d;
+  assign d_avec = rsp_avec  &&  rsp_own_d;
   assign f_rsp  = rsp_valid && !rsp_own_d;
   assign f_done = rsp_done  && !rsp_own_d;
   assign f_err  = rsp_err   && !rsp_own_d;
@@ -137,16 +173,45 @@ module rd68041_core (
   logic [31:0] of_an, ex_an, w_an;            // the address register's update
   logic [31:0] of_md;                         // the operand read
   logic        of_got;                        // ... is in of_md
+  logic        of_er, of_av;                  // ... ended in a bus error, or with AVEC
   logic [31:0] ex_md;
+  logic        ex_er, ex_av;
   logic [31:0] w_res;                         // the result
   logic [31:0] w_res2;                        // the second result
   logic [31:0] w_std;                         // the store's data
   logic        w_nowr;                        // EX cancelled the register results
   logic        w_nost;                        // ... and the store
-  logic        w_trap;                        // EX took a conditional trap (M8)
+  logic        w_cof;                         // a change of flow, for tracing
   logic        div_go, div_done;              // the divider was started; it has answered
   logic [31:0] w_npc;                         // the next instruction's address
   logic  [4:0] w_ccr;                         // the CCR it leaves
+
+  // ===========================================================================
+  // The exception state machine (doc/microarch.md, "Exceptions")
+  // ===========================================================================
+  //   XS_IDLE  running
+  //   XS_SR    a serialising instruction or an exception has left write-back,
+  //            and everything behind it is gone: once every write has, the SR
+  //            and the stack pointers change, in one clock
+  //   XS_SEQ   rd68041_exc builds the frame and fetches the vector
+  //   XS_STOP  STOP: waiting for an interrupt (UM 8.2.9; trace never stops it)
+  //   XS_RST   RESET: RSTO for 512 clocks (UM 7.10)
+  typedef enum logic [2:0] { XS_IDLE, XS_SR, XS_SEQ, XS_STOP, XS_RST } xs_e;
+  xs_e         xs;
+  logic        x_exc;                         // XS_SR: an exception (else serialising only)
+  logic        x_int;                         // ... an interrupt, at level x_lvl
+  logic  [2:0] x_lvl;
+  logic  [7:0] x_vec;
+  logic  [3:0] x_fmt;
+  logic [31:0] x_pc, x_addr;                  // the frame's PC; ADDR or FA
+  logic [15:0] x_ssw, x_sr0;                  // the SSW; the SR the frame holds
+  logic        x_srw, x_stp, x_rst, x_trc;    // serialising: an SR write, STOP, RESET, traced
+  logic  [7:0] x_srn;                         // ... the new SR's system byte
+  logic [31:0] x_npc, x_ipc;                  // ... the next instruction, and this one
+  logic        x_rerun;                       // ... RTE of a throwaway frame: RTE again
+  logic        xs_int;                        // the sequence running is an interrupt's
+  logic  [8:0] rst_cnt;
+  logic        x_flush;                       // write-back empties the pipeline behind it
 
   // ===========================================================================
   // Instruction fetch and decode
@@ -154,6 +219,8 @@ module rd68041_core (
   logic [191:0] q_win;
   logic   [3:0] q_cnt, q_pop;
   logic  [31:0] q_pc;
+  logic  [11:0] q_err;
+  logic         q_aerr;
   logic         go;
   logic  [31:0] go_pc;
   logic         redirect;
@@ -161,8 +228,10 @@ module rd68041_core (
 
   rd68041_ifu u_ifu (
       .clk(clk), .rst_n(rst_n), .crst(crst),
-      .go(go), .go_pc(go_pc), .stop(halted || lock_open), .sup(1'b1),
-      .q_win(q_win), .q_cnt(q_cnt), .q_pc(q_pc), .q_pop(q_pop),
+      .go(go), .go_pc(go_pc),
+      .stop(halted || lock_open || xs == XS_SR || xs == XS_STOP || xs == XS_RST),
+      .sup(sup),
+      .q_win(q_win), .q_cnt(q_cnt), .q_pc(q_pc), .q_err(q_err), .q_aerr(q_aerr), .q_pop(q_pop),
       .f_valid(f_valid), .f_ready(f_ready), .f_addr(f_addr), .f_tm(f_tm),
       .f_rsp(f_rsp), .f_data(rsp_data), .f_done(f_done), .f_err(f_err));
 
@@ -209,6 +278,8 @@ module rd68041_core (
       .mv_reg  (mv_reg),
       .mv_last (mv_last),
       .mv_k    (mv_k),
+      .sup     (sup),
+      .msp_on  (msp_on),
       .uop     (dec_v),
       .need    (dec_need),
       .pop     (dec_pop),
@@ -222,16 +293,67 @@ module rd68041_core (
   wire de_avail = step ? (q_cnt >= dec_pop)
                        : (q_cnt != 4'd0) && ({1'b0, q_cnt} >= 5'd1 + {1'b0, dec_need});
 
+  // An instruction a word of which came from a fetch that faulted is an access
+  // fault (format $7) instead, once its words are all there -- or at once, if
+  // the operation word is one (its `need` means nothing). FA is the faulted
+  // fetch's address; the SSW says a long-word read of program space (UM
+  // 8.4.6.7: "the TM field contains $2 and $6"). A redirect to an odd address
+  // is an address error (format $2, ADDR the address with bit 0 cleared).
+  wire [11:0] de_wmask = (12'h1 << (4'd1 + dec_need)) - 12'h1;
+  wire        de_ferr0 = !step && (q_cnt != 4'd0) && q_err[0];
+  wire        de_ferr  = de_ferr0 || (!step && de_avail && |(q_err & de_wmask));
+  wire        de_aerr  = !step && q_aerr;
+  logic [3:0] de_fk;                          // the first faulted word
+  always_comb begin
+    de_fk = 4'd0;
+    for (int k = 11; k >= 0; k--) if (q_err[k] && de_wmask[k]) de_fk = 4'(k);
+  end
+  wire [31:0] de_fa = q_pc + {27'h0, de_fk, 1'b0};
+  rd68041_pkg::uop_t de_u;                    // what decode issues
+  always_comb begin
+    de_u = dec_u;
+    if (de_aerr || de_ferr) begin
+      de_u = '0;
+      de_u.valid = 1'b1;
+      de_u.last  = 1'b1;
+      de_u.pc    = q_pc;
+      de_u.len   = 5'd2;
+      if (de_aerr) begin
+        de_u.xvec = 8'd3;
+        de_u.imm  = {q_pc[31:1], 1'b0};
+      end else begin
+        de_u.xvec = 8'd2;
+        de_u.imm  = de_fa & 32'hFFFF_FFFC;
+        de_u.tgt  = {16'h0, 4'h0, 2'b00, 1'b0, 1'b1, 1'b0, 2'b00, rd68041_pkg::TT_NORMAL,
+                     sup ? rd68041_pkg::TM_SUP_CODE : rd68041_pkg::TM_USER_CODE};
+      end
+    end
+  end
+  wire de_more = dec_more && !(de_aerr || de_ferr);
+
+  // Nothing issues while a serialising micro-operation is in flight, nor while
+  // exception processing runs.
+  wire ser_fly = (ea_u.valid && ea_u.ser) || (of_u.valid && of_u.ser) ||
+                 (ex_u.valid && ex_u.ser) || (w_u.valid && w_u.ser);
+
   logic ea_stall, of_stall, ex_stall, w_stall;
   wire  running  = (rs == R_RUN) && !halted;
-  wire  de_issue = running && de_avail && !de_halted && !ea_stall && !redirect;
-  assign q_pop = de_issue ? (step ? dec_pop : 4'd1 + dec_pop) : 4'd0;
+  wire  de_issue = running && (de_avail || de_ferr0 || de_aerr) && !de_halted && !ea_stall &&
+                   !redirect && (xs == XS_IDLE) && !ser_fly && !x_flush;
+  assign q_pop = de_issue && !(de_aerr || de_ferr) ? (step ? dec_pop : 4'd1 + dec_pop) : 4'd0;
+
+  // The exception sequencer's micro-operations, in decode's place.
+  logic [rd68041_pkg::UOP_W-1:0] exc_v;
+  logic                          exc_valid;
+  rd68041_pkg::uop_t             exc_u;
+  assign exc_u = exc_v;
+  wire  xs_take = running && (xs == XS_SEQ) && exc_valid && !ea_stall && !redirect && !x_flush;
 
   // ===========================================================================
   // The register file
   // ===========================================================================
   logic [4:0]  ra, rb, rc, rd, re;
-  logic [31:0] qa, qb, qc, qd, qe;
+  logic [31:0] qa, qb, qc, qd, qe, q15;
   logic        we0, we1, we2;
   logic [4:0]  wa0, wa1, wa2;
   logic [31:0] wd0, wd1, wd2;
@@ -240,7 +362,7 @@ module rd68041_core (
   rd68041_regfile u_rf (
       .clk(clk), .rst_n(rst_n),
       .ra(ra), .rb(rb), .rc(rc), .rd(rd), .re(re),
-      .qa(qa), .qb(qb), .qc(qc), .qd(qd), .qe(qe),
+      .qa(qa), .qb(qb), .qc(qc), .qd(qd), .qe(qe), .q15(q15),
       .we0(we0), .wa0(wa0), .wd0(wd0), .wm0(wm0),
       .we1(we1), .wa1(wa1), .wd1(wd1),
       .we2(we2), .wa2(wa2), .wd2(wd2));
@@ -286,8 +408,7 @@ module rd68041_core (
 
   // A result an older micro-operation has not computed yet.
   function automatic logic pending(input rd68041_pkg::uop_t u, input logic [4:0] r);
-    pending = u.valid && ((u.wr && (u.wr_reg == r)) || (u.wr2 && (u.wr2_reg == r)) ||
-                          (u.crw && u.cr == rd68041_pkg::CR_ISP && r == 5'd15));
+    pending = u.valid && ((u.wr && (u.wr_reg == r)) || (u.wr2 && (u.wr2_reg == r)));
   endfunction
   function automatic logic upd_of(input rd68041_pkg::uop_t u, input logic [4:0] r);
     upd_of = u.valid && (u.ea_upd != rd68041_pkg::U_NONE) && ({2'b01, u.ea_an} == r);
@@ -381,13 +502,42 @@ module rd68041_core (
   wire st_ahead = (ex_u.valid && ex_u.st && touches(of_ea, of_u.sz, ex_ea, ex_u.sz)) ||
                   (w_u.valid  && w_u.st  && touches(of_ea, of_u.sz, w_ea,  w_u.sz));
 
-  wire of_wants = of_u.valid && of_u.ld && !of_got && running && !st_ahead;
+  // Exception processing's reads -- the vector -- wait for every write before
+  // them, the frame's: UM 8.1 fetches the vector last, and a double bus fault
+  // on it leaves memory as it then is (UM 8.2.1).
+  wire xs_hold  = of_u.xs && ((ex_u.valid && ex_u.st) || (w_u.valid && w_u.st) || !st_empty);
+  wire of_wants = of_u.valid && of_u.ld && !of_got && running && !st_ahead && !xs_hold;
   assign ld_valid = (rs == R_SSP || rs == R_PC) || of_wants;
   assign ld_addr  = (rs == R_SSP) ? 32'h0 : (rs == R_PC) ? 32'h4 : of_ea;
   assign ld_sz    = (rs == R_RUN) ? of_u.sz : rd68041_pkg::SZ_L;
 
   wire of_ready = !of_u.ld || of_got || ld_done;
   assign of_stall = ex_stall || (of_u.valid && !of_ready);
+
+  // A read that ended in a bus error is an access fault (UM 8.2.1), taken when
+  // the micro-operation reaches write-back: FA its address, the SSW its
+  // attributes (UM 8.4.6.2). The read of a locked read-modify-write counts as
+  // a write ("the data memory unit considers the read portion of
+  // read-modify-write transfers ... a write", UM 8.4.6.7). An acknowledge
+  // cycle's bus error is an answer, not a fault.
+  logic        ld_avec;
+  wire         of_err = of_got ? of_er : ld_err;
+  wire         of_f   = of_u.valid && of_u.ld && !of_u.ack && of_err;
+  wire  [1:0]  of_siz = (of_u.sz == rd68041_pkg::SZ_B) ? rd68041_pkg::SIZ_BYTE :
+                        (of_u.sz == rd68041_pkg::SZ_W) ? rd68041_pkg::SIZ_WORD : rd68041_pkg::SIZ_LONG;
+  wire [15:0]  of_ssw = {4'h0, 2'b00, of_u.lk, !of_u.lk, 1'b0, of_siz,
+                         of_u.alt ? rd68041_pkg::TT_ALTFC : rd68041_pkg::TT_NORMAL,
+                         of_u.alt ? sfc : (sup ? rd68041_pkg::TM_SUP_DATA : rd68041_pkg::TM_USER_DATA)};
+  rd68041_pkg::uop_t of_out;                  // the micro-operation as it goes on to EX
+  always_comb begin
+    of_out = of_u;
+    if (of_f) begin
+      of_out.xvec  = 8'd2;
+      of_out.xnext = 1'b0;
+      of_out.imm   = of_ea;
+      of_out.tgt   = {16'h0, of_ssw};
+    end
+  end
 
   // ===========================================================================
   // Execute
@@ -438,10 +588,11 @@ module rd68041_core (
       rd68041_pkg::CR_USP:   cr_cur = usp;
       rd68041_pkg::CR_VBR:   cr_cur = vbr;
       rd68041_pkg::CR_MSP:   cr_cur = msp;
+      rd68041_pkg::CR_ISP:   cr_cur = isp;
       rd68041_pkg::CR_MMUSR: cr_cur = mmusr;
       rd68041_pkg::CR_URP:   cr_cur = urp;
       rd68041_pkg::CR_SRP:   cr_cur = srp;
-      default:               cr_cur = {16'h0, SR_SYS, 3'b000, ccr_x};
+      default:               cr_cur = {16'h0, sr_sys, 3'b000, ccr_x};
     endcase
   end
 
@@ -538,7 +689,10 @@ module rd68041_core (
       .is_signed(ex_u.fn[0]), .busy(div_busy), .quotient(div_q), .remainder(div_r),
       .div_zero(div_zero), .overflow(div_ovf), .q_mag(div_qmag), .q_neg(div_qneg));
 
-  wire ex_is_div = ex_u.valid && (ex_u.op == rd68041_pkg::OP_DIV);
+  // A micro-operation that already takes an exception (decode's, or a read
+  // that faulted) executes nothing that leaves EX: no branch, no division.
+  wire ex_live   = ex_u.valid && (ex_u.xvec == 8'd0);
+  wire ex_is_div = ex_live && (ex_u.op == rd68041_pkg::OP_DIV);
   assign div_start = ex_is_div && !div_go && running;
   // div_go: started; div_done: the answer is there (the clock after busy falls).
   wire div_wait = ex_is_div && !(div_go && !div_busy && div_done);
@@ -558,6 +712,7 @@ module rd68041_core (
   logic        ex_nowr;                     // the register results are not written
   logic        ex_nost;                     // nor the store (CAS2's conditional ones)
   logic        ex_trap;                     // a conditional trap is taken
+  logic        rte_bad;                     // RTE: a format this processor does not take
   logic        bcd_c, cmp2_out;
   // The ALU's width: the operation's, except that a sign-extended word source
   // (ADDA, SUBA, CMPA .W) is worked on at 32 bits; the load stays a word.
@@ -590,6 +745,7 @@ module rd68041_core (
     ex_nowr = 1'b0;
     ex_nost = 1'b0;
     ex_trap = 1'b0;
+    rte_bad = 1'b0;
     bcd_c   = 1'b0;
     cmp2_out = 1'b0;
     bitn  = ex_u.sz == rd68041_pkg::SZ_L ? av[4:0] : {2'b00, av[2:0]};
@@ -630,8 +786,8 @@ module rd68041_core (
         // The word forms: the remainder in the high word, the quotient low.
         res     = ex_u.fn[1] ? div_q : {div_r[15:0], div_q[15:0]};
         res2    = div_r;
-        ex_nowr = !div_fits;
-        // PRM 4: division by zero traps (M8).
+        // PRM 4: division by zero traps, the registers left alone.
+        ex_nowr = !div_fits || div_zero;
         ex_trap = div_zero;
       end
       rd68041_pkg::OP_EXG: begin
@@ -714,6 +870,42 @@ module rd68041_core (
         if (ex_u.fn[3]) res = (bv >> {ex_u.fn[1:0], 3'b000}) & 32'hFF;
         else            res = (bv & ~(32'hFF << {ex_u.fn[1:0], 3'b000})) |
                               ({24'h0, av[7:0]} << {ex_u.fn[1:0], 3'b000});
+      end
+      rd68041_pkg::OP_SR: begin
+        // The SR with A, as ANDI, ORI, EORI and MOVE to SR, and STOP, make it.
+        logic [15:0] cur, nv;
+        cur = {sr_sys, 3'b000, ccr_x};
+        case (ex_u.fn[1:0])
+          2'd0:    nv = cur & av[15:0];
+          2'd1:    nv = cur | av[15:0];
+          2'd2:    nv = cur ^ av[15:0];
+          default: nv = av[15:0];
+        endcase
+        res = {16'h0, nv & rd68041_pkg::SR_MASK};
+      end
+      rd68041_pkg::OP_RTEF: begin
+        // UM 8.4: the formats RTE takes, and how far each frame reaches; $4
+        // only on the MC68LC040 (UM A.5). The address is A7 + 6.
+        logic [31:0] fsz;
+        case (bv[15:12])
+          4'h0, 4'h1: fsz = 32'd8;
+          4'h2, 4'h3: fsz = 32'd12;
+          4'h4:       fsz = 32'd16;
+          4'h7:       fsz = 32'd60;
+          default:    fsz = 32'd0;
+        endcase
+        rte_bad = (fsz == 32'd0) || (bv[15:12] == 4'h4 && FPU != 0);
+        res  = ex_ea - 32'd6 + fsz;
+        res2 = bv;
+      end
+      rd68041_pkg::OP_RTE: res = {16'h0, av[15:0] & rd68041_pkg::SR_MASK};
+      rd68041_pkg::OP_IACK: begin
+        // UM 7.5.1, Table 7-4: the vector the device put on D7-D0, the
+        // autovector 24 + level with AVEC, the spurious interrupt's 24 on a
+        // bus error; as its offset.
+        logic [7:0] v;
+        v   = ex_er ? 8'd24 : ex_av ? (8'd24 + {5'h0, ex_u.fn[2:0]}) : ex_md[7:0];
+        res = {22'h0, v, 2'b00};
       end
       default: res = bv;
     endcase
@@ -806,6 +998,8 @@ module rd68041_core (
         else cmp2_out = (16'(rv - lb)) > (16'(ub - lb));
         ccr_n = {ccr_x[4], ccr_x[3], (rv == lb) || (rv == ub), ccr_x[1], cmp2_out};
       end
+      // The SR's writers: the CCR is the new SR's.
+      rd68041_pkg::OP_SR, rd68041_pkg::OP_RTE: ccr_n = res[4:0];
       rd68041_pkg::OP_MUL: begin
         // PRM 4: N and Z of the whole result; V set when a 32-bit result has
         // lost bits; C cleared.
@@ -880,33 +1074,142 @@ module rd68041_core (
   // DBcc branches unless the condition holds or the counter has run out.
   wire dbcc_take = (ex_u.op == rd68041_pkg::OP_DBCC) && !cond_true(ex_u.cond, ccr_x[3:0]) &&
                    (bv[15:0] != 16'h0000);
-  wire ex_taken = ex_u.valid && !ex_u.halt && (ex_u.br != rd68041_pkg::BR_NONE) &&
+  wire ex_brc   = ex_live && !ex_u.halt && (ex_u.br != rd68041_pkg::BR_NONE) &&
                   ((ex_u.op == rd68041_pkg::OP_DBCC) ? dbcc_take :
                    ((ex_u.br != rd68041_pkg::BR_DISP) || cond_true(ex_u.cond, ccr_x[3:0])));
   wire [31:0] ex_target = (ex_u.br == rd68041_pkg::BR_DISP) ? ex_u.tgt :
                           (ex_u.br == rd68041_pkg::BR_MEM)  ? ex_md : bv;
-  wire [31:0] ex_npc    = ex_taken ? ex_target : ex_u.pc + {27'h0, ex_u.len};
+  // UM 8.2.2: a branch to an odd address is an address error, before the
+  // prefetch -- and a conditional one with an odd displacement even when it
+  // is not taken. The frame's PC is the branch, ADDR the target less bit 0
+  // (UM 8.4.6.7).
+  wire ex_odd   = ex_live && (ex_u.br != rd68041_pkg::BR_NONE) && ex_target[0] &&
+                  (ex_brc || ex_u.br == rd68041_pkg::BR_DISP);
+  wire ex_taken = ex_brc && !ex_odd;
+  // RTE: the PC from the frame; a throwaway frame runs RTE again (UM 8.4.2).
+  wire [31:0] ex_npc    = (ex_u.op == rd68041_pkg::OP_RTE) ?
+                            ((c_v[15:12] == 4'h1) ? ex_u.pc : bv) :
+                          ex_taken ? ex_target : ex_u.pc + {27'h0, ex_u.len};
+
+  // What EX finds: the traps (UM 8.2.3; vector 5 divide by zero, 6 CHK and
+  // CHK2, 7 TRAPcc and TRAPV), taken once the instruction completes; RTE's
+  // format error (14, UM 8.2.7) and the address error (3), before.
+  logic [7:0] ex_xv;
+  logic       ex_xn;
+  always_comb begin
+    ex_xv = 8'd0;
+    ex_xn = 1'b0;
+    if (ex_live && ex_trap) begin
+      ex_xv = (ex_u.op == rd68041_pkg::OP_DIV) ? 8'd5 :
+              (ex_u.op == rd68041_pkg::OP_CMP2 || ex_u.op == rd68041_pkg::OP_CMP) ? 8'd6 : 8'd7;
+      ex_xn = 1'b1;
+    end
+    if (ex_live && ex_u.op == rd68041_pkg::OP_RTEF && rte_bad) ex_xv = 8'd14;
+    if (ex_odd) ex_xv = 8'd3;
+  end
+  rd68041_pkg::uop_t ex_out;                  // the micro-operation as it goes on to W
+  always_comb begin
+    ex_out = ex_u;
+    if (ex_xv != 8'd0) begin
+      ex_out.xvec  = ex_xv;
+      ex_out.xnext = ex_xn;
+      if (ex_odd) ex_out.imm = {ex_target[31:1], 1'b0};
+    end
+  end
 
   assign ex_stall    = w_stall || div_wait;
-  assign redirect    = ex_taken && !ex_stall && running;
+  assign redirect    = ex_taken && !ex_stall && running && !x_flush;
   assign redirect_pc = ex_target;
 
   // ===========================================================================
   // Write-back
   // ===========================================================================
-  // A halt stays in write-back, and the pipeline behind it with it; so does a
-  // trap EX took, until M8 makes it an exception.
-  wire   w_halts = w_u.halt || w_trap;
-  wire   w_st    = w_u.valid && w_u.st && !w_nost;
-  assign w_stall = w_u.valid && (w_halts || (w_st && !st_ready));
-  wire   w_go    = w_u.valid && !w_stall && running && !w_halts;
+  // A micro-operation leaves write-back when its store, if it has one, is
+  // taken; it completes then, unless the exception it takes comes before it
+  // completes (w_pre), which leaves everything as it was. A halt stays here,
+  // and the pipeline behind it with it.
+  wire   w_x     = w_u.valid && (w_u.xvec != 8'd0);
+  wire   w_pre   = w_x && !w_u.xnext;
+  wire   w_st    = w_u.valid && w_u.st && !w_nost && !w_pre;
+  assign w_stall = w_u.valid && (w_u.halt || (w_st && !st_ready));
+  wire   w_fire  = w_u.valid && !w_stall && running;
+  wire   w_go    = w_fire && !w_pre;
   wire   w_wr    = w_go && !w_nowr;
+  // A fault while an exception is being processed is a double bus fault, and
+  // the processor halts (UM 8.2.1).
+  wire   w_dbl   = w_fire && w_x && w_u.xs;
+  // An instruction boundary: an instruction done, or exception processing.
+  wire   w_end   = w_go && w_u.last && !w_x;
+  // UM 8.2.6: traced as T1 and T0 were when the instruction began, which is
+  // what the SR still holds (only XS_SR changes it, and it traces the
+  // serialising instructions itself); never exception processing.
+  wire   w_trace = w_end && !w_u.xs && !w_u.ser && (tr[1] || (tr[0] && w_cof));
+  // UM 8.2.9, 8.3: an interrupt at a boundary, after a trace; not at the end
+  // of an interrupt's own processing (UM 7.5.1: "at least one instruction in
+  // an interrupt exception handler before recognizing another").
+  wire   w_int   = w_end && !w_u.ser && int_pend && !(w_u.xs && xs_int) && !w_trace;
+  // ... and with any of those, or a serialising micro-operation, everything
+  // behind it goes and XS_SR takes over.
+  assign x_flush = w_fire && !w_dbl && (w_x || w_trace || w_int || w_u.ser);
 
-  assign we0 = (w_wr && w_u.wr) || (rs == R_SSP && ld_done) ||
-               (w_go && w_u.crw && w_u.cr == rd68041_pkg::CR_ISP);
-  assign wa0 = (rs == R_SSP || (w_u.crw && w_u.cr == rd68041_pkg::CR_ISP)) ? 5'd15 : w_u.wr_reg;
-  assign wd0 = (rs == R_SSP) ? ld_data : w_res;
-  assign wm0 = (rs == R_SSP || w_u.crw) ? 4'hF : lanes_of(w_u.wr_sz);
+  // The frame each vector has (doc/checkpoint.md).
+  function automatic logic [3:0] fmt_of(input logic [7:0] v);
+    fmt_of = (v == 8'd2) ? 4'h7 :
+             (v == 8'd3 || v == 8'd5 || v == 8'd6 || v == 8'd7 || v == 8'd9) ? 4'h2 : 4'h0;
+  endfunction
+  wire  [7:0] w_xv  = w_x ? w_u.xvec : w_trace ? 8'd9 : 8'd0;
+  // The PC the frame holds: the instruction, or the next (UM 8.2).
+  wire [31:0] w_xpc = w_pre ? w_u.pc : w_npc;
+  // $7's FA and an address error's ADDR ride in imm; the rest's ADDR is the
+  // instruction's address.
+  wire [31:0] w_xad = (w_xv == 8'd2 || w_xv == 8'd3) ? w_u.imm : w_u.pc;
+  wire [15:0] w_xsr = {sr_sys, 3'b000, w_go ? w_ccr : ccr_w};
+  // RTE of a throwaway frame runs again: it is not done, nor traced, yet.
+  wire        w_rerun = (w_u.op == rd68041_pkg::OP_RTE) && (w_npc == w_u.pc);
+
+  // XS_SR: the clock the SR changes, once every write has gone (UM 8.1). An
+  // exception sets S, clears T1 and T0, and for an interrupt makes the level
+  // the mask; its frame goes on the supervisor stack M names, and an
+  // interrupt taken with M set clears it and puts the throwaway frame on the
+  // interrupt stack (UM 8.2.9). A serialising write of the SR swaps the stack
+  // pointers if the active one changes.
+  wire        x_apply = running && (xs == XS_SR) && st_empty;
+  wire        s0      = sr_sys[5];
+  wire        m0      = sr_sys[4];
+  wire [31:0] sup_sp  = s0 ? q15 : (m0 ? msp : isp);
+  wire [31:0] x_fsz   = (x_fmt == 4'h7) ? 32'd60 : (x_fmt == 4'h2) ? 32'd12 : 32'd8;
+  wire [31:0] x_base  = sup_sp - x_fsz;
+  wire        x_two   = x_int && m0;
+  wire [31:0] x_base2 = ((s0 && !m0) ? q15 : isp) - 32'd8;
+  wire  [7:0] x_sys   = {2'b00, 1'b1, m0 && !x_two, 1'b0, x_int ? x_lvl : sr_sys[2:0]};
+  wire  [7:0] n_sys   = x_srn;
+  function automatic logic [1:0] act_sp(input logic s, input logic m);
+    act_sp = s ? (m ? 2'd2 : 2'd1) : 2'd0;     // USP, ISP, MSP
+  endfunction
+  wire  [1:0] a_old   = act_sp(s0, m0);
+  wire  [1:0] a_new   = act_sp(n_sys[5], n_sys[4]);
+  wire [31:0] sh_new  = (a_new == 2'd0) ? usp : (a_new == 2'd1) ? isp : msp;
+  logic        xr_we;                         // ... and A7 then
+  logic [31:0] xr_v;
+  always_comb begin
+    xr_we = 1'b0;
+    xr_v  = x_two ? x_base2 : x_base;
+    if (x_apply && x_exc) begin
+      xr_we = 1'b1;
+    end else if (x_apply && x_srw && a_old != a_new) begin
+      xr_we = 1'b1;
+      xr_v  = sh_new;
+    end
+  end
+  // Fetching starts again behind a serialising instruction, or a RESET.
+  wire x_go = (x_apply && !x_exc && !x_rst && !x_trc && !x_stp) ||
+              (xs == XS_RST && rst_cnt == 9'd511 && !x_trc);
+  assign rsto = (xs == XS_RST);
+
+  assign we0 = (w_wr && w_u.wr) || (rs == R_SSP && ld_done) || xr_we;
+  assign wa0 = (rs == R_SSP || xr_we) ? 5'd15 : w_u.wr_reg;
+  assign wd0 = (rs == R_SSP) ? ld_data : xr_we ? xr_v : w_res;
+  assign wm0 = (rs == R_SSP || xr_we) ? 4'hF : lanes_of(w_u.wr_sz);
   // The address register update; the register file lets a result or a second
   // result to the same register win over it.
   assign we1 = w_go && (w_u.ea_upd != rd68041_pkg::U_NONE);
@@ -916,28 +1219,42 @@ module rd68041_core (
   assign wa2 = w_u.wr2_reg;
   assign wd2 = w_res2;
 
+  rd68041_exc u_exc (
+      .clk(clk), .rst_n(rst_n), .crst(crst),
+      .start(x_apply && x_exc), .vec(x_vec), .intr(x_int), .level(x_lvl), .fmt(x_fmt),
+      .sr_old(x_sr0), .sr_new(x_sr0 | 16'h2000), .pc(x_pc), .addr(x_addr),
+      .ssw(x_ssw), .base(x_base), .two(x_two), .base2(x_base2), .vbr(vbr),
+      .valid(exc_valid), .uop(exc_v), .take(xs_take));
+
   rd68041_dmu u_dmu (
-      .clk(clk), .rst_n(rst_n), .crst(crst), .sup(1'b1), .sfc(sfc), .dfc(dfc),
+      .clk(clk), .rst_n(rst_n), .crst(crst), .sup(sup), .sfc(sfc), .dfc(dfc),
       .ld_valid(ld_valid), .ld_addr(ld_addr), .ld_sz(ld_sz),
       .ld_done(ld_done), .ld_data(ld_data), .ld_err(ld_err), .ld_cancel(ld_cancel),
       .ld_lock(of_u.lk && rs == R_RUN), .ld_alt(of_u.alt && rs == R_RUN),
-      .st_valid(w_st && running && !w_halts), .st_addr(w_ea),
+      .ld_ack(of_u.ack && rs == R_RUN), .ld_tm(of_u.fn[2:0]), .ld_avec(ld_avec),
+      .st_valid(w_st && running && !w_u.halt), .st_addr(w_ea),
       .st_sz(w_u.sz), .st_data(w_std), .st_lock(w_u.lk), .st_locke(w_u.lke),
       .st_alt(w_u.alt), .st_ready(st_ready), .st_empty(st_empty), .lock_open(lock_open),
       .d_valid(d_valid), .d_ready(d_ready), .d_addr(d_addr), .d_write(d_write),
       .d_siz(d_siz), .d_tt(d_tt), .d_tm(d_tm), .d_lock(d_lock), .d_locke(d_locke),
       .d_wdata(d_wdata), .d_rsp(d_rsp),
-      .d_data(rsp_data), .d_done(d_done), .d_err(d_err));
+      .d_data(rsp_data), .d_done(d_done), .d_err(d_err), .d_avec(d_avec));
 
-  // A redirect kills <ea> fetch: its read, if one is on the bus, is cancelled.
-  assign ld_cancel = redirect && of_u.valid && of_u.ld && !of_got;
+  // A redirect, or an exception, kills <ea> fetch: its read, if one is on the
+  // bus, is cancelled.
+  assign ld_cancel = (redirect || x_flush) && of_u.valid && of_u.ld && !of_got;
 
-  assign go    = (rs == R_PC && ld_done) || redirect;
-  assign go_pc = (rs == R_PC) ? ld_data : redirect_pc;
+  assign go    = (rs == R_PC && ld_done) || redirect || x_go;
+  assign go_pc = (rs == R_PC) ? ld_data : redirect ? redirect_pc : x_npc;
 
-  assign retire     = w_go && w_u.last;
-  assign retire_pc  = w_u.pc;
-  assign retire_npc = w_npc;
+  // An instruction is done at its boundary -- unless exception processing
+  // follows, which is then the one done, its next PC the handler's; a
+  // serialising one when XS_SR has changed the SR behind it. That is how a
+  // trace of instructions sees them (core_cosim_tb).
+  wire   ret_w      = w_end && !w_trace && !w_int && !w_u.ser;
+  assign retire     = ret_w || (x_go && !x_rerun);
+  assign retire_pc  = x_go ? x_ipc : w_u.pc;
+  assign retire_npc = x_go ? x_npc : w_npc;
 
   // ===========================================================================
   // The pipeline's registers
@@ -948,10 +1265,20 @@ module rd68041_core (
       halted    <= 1'b0;
       ccr_x     <= 5'h00;
       ccr_w     <= 5'h00;
+      sr_sys    <= 8'h27;
       sfc       <= 3'd0;
       dfc       <= 3'd0;
       cacr      <= '0; tc <= '0; itt0 <= '0; itt1 <= '0; dtt0 <= '0; dtt1 <= '0;
-      usp       <= '0; vbr <= '0; msp <= '0; mmusr <= '0; urp <= '0; srp <= '0;
+      usp       <= '0; isp <= '0; vbr <= '0; msp <= '0; mmusr <= '0; urp <= '0; srp <= '0;
+      ipl_s0    <= '0; ipl_s1 <= '0; ipl_s2 <= '0; ipl_lvl <= '0;
+      nmi       <= 1'b0;
+      xs        <= XS_IDLE;
+      x_exc     <= 1'b0; x_int <= 1'b0; x_lvl <= '0; x_vec <= '0; x_fmt <= '0;
+      x_pc      <= '0; x_addr <= '0; x_ssw <= '0; x_sr0 <= '0;
+      x_srw     <= 1'b0; x_stp <= 1'b0; x_rst <= 1'b0; x_trc <= 1'b0;
+      x_srn     <= '0; x_npc <= '0; x_ipc <= '0; x_rerun <= 1'b0;
+      xs_int    <= 1'b0;
+      rst_cnt   <= '0;
       seq       <= 5'd0;
       de_ind    <= 2'b00;
       de_len    <= 5'd0;
@@ -967,36 +1294,54 @@ module rd68041_core (
       of_ea     <= '0; ex_ea <= '0; w_ea <= '0;
       of_an     <= '0; ex_an <= '0; w_an <= '0;
       of_md     <= '0; of_got <= 1'b0; ex_md <= '0;
+      of_er     <= 1'b0; of_av <= 1'b0; ex_er <= 1'b0; ex_av <= 1'b0;
       w_res     <= '0; w_res2 <= '0; w_std <= '0; w_npc <= '0; w_ccr <= '0;
-      w_nowr    <= 1'b0; w_nost <= 1'b0; w_trap <= 1'b0;
+      w_nowr    <= 1'b0; w_nost <= 1'b0; w_cof <= 1'b0;
       div_go    <= 1'b0; div_done <= 1'b0;
       reset_v   <= '0;
     end else if (crst) begin
-      // UM 8.2.10: the reset clears VBR and CACR, and TC's and the TTRs'
-      // enables (UM 3.6.1).
+      // UM 8.2.10: the reset exception: S set, M and the trace bits cleared,
+      // the mask at 7; VBR and CACR cleared, and TC's and the TTRs' enables
+      // (UM 3.6.1).
       rs        <= R_SSP;
       halted    <= 1'b0;
+      sr_sys    <= 8'h27;
       vbr       <= '0;
       cacr      <= '0;
       tc        <= '0;
       itt0      <= '0; itt1 <= '0; dtt0 <= '0; dtt1 <= '0;
+      nmi       <= 1'b0;
+      xs        <= XS_IDLE;
       seq       <= 5'd0;
       de_halted <= 1'b0;
       ea_u      <= '0;
       of_u      <= '0;
       ex_u      <= '0;
       w_u       <= '0;
-      w_trap    <= 1'b0;
       of_got    <= 1'b0;
       div_go    <= 1'b0;
       div_done  <= 1'b0;
     end else begin
       // --- reset ------------------------------------------------------------
+      // A bus error or an odd PC while the reset vectors are read is a double
+      // bus fault (UM 8.2.10).
       if (rs == R_SSP && ld_done) rs <= R_PC;
       if (rs == R_PC  && ld_done) begin rs <= R_RUN; reset_v <= ld_data; end
+      if ((rs == R_SSP || rs == R_PC) && ld_done && ld_err) halted <= 1'b1;
+      if (rs == R_PC && ld_done && ld_data[0]) halted <= 1'b1;
+
+      // --- interrupts -------------------------------------------------------
+      ipl_s0 <= ~ipl_n;
+      ipl_s1 <= ipl_s0;
+      ipl_s2 <= ipl_s1;
+      if (ipl_s1 == ipl_s2) begin
+        ipl_lvl <= ipl_s2;
+        if (ipl_s2 == 3'd7 && ipl_lvl != 3'd7) nmi <= 1'b1;
+      end
 
       // --- write-back -------------------------------------------------------
-      if (w_u.valid && w_halts && running) halted <= 1'b1;
+      if (w_u.valid && w_u.halt && running) halted <= 1'b1;
+      if (w_dbl) halted <= 1'b1;
       if (w_go) begin
         ccr_w <= w_ccr;
         if (w_u.crw) begin
@@ -1013,6 +1358,7 @@ module rd68041_core (
             rd68041_pkg::CR_USP:   usp   <= w_res;
             rd68041_pkg::CR_VBR:   vbr   <= w_res;
             rd68041_pkg::CR_MSP:   msp   <= w_res;
+            rd68041_pkg::CR_ISP:   isp   <= w_res;
             rd68041_pkg::CR_MMUSR: mmusr <= w_res;
             rd68041_pkg::CR_URP:   urp   <= w_res & 32'hFFFF_FE00;
             rd68041_pkg::CR_SRP:   srp   <= w_res & 32'hFFFF_FE00;
@@ -1022,13 +1368,105 @@ module rd68041_core (
       end
       if (!w_stall) w_u <= '0;
 
+      // --- exception processing ---------------------------------------------
+      if (xs == XS_SEQ && w_end && w_u.xs) xs <= XS_IDLE;
+      if (xs == XS_RST) begin
+        rst_cnt <= rst_cnt + 9'd1;
+        if (rst_cnt == 9'd511) begin
+          // A traced RESET: its trace exception once RSTO is done.
+          xs <= x_trc ? XS_SR : XS_IDLE;
+          if (x_trc) begin
+            x_exc  <= 1'b1;
+            x_int  <= 1'b0;
+            x_vec  <= 8'd9;
+            x_fmt  <= 4'h2;
+            x_pc   <= x_npc;
+            x_addr <= x_ipc;
+            x_sr0  <= {sr_sys, 3'b000, ccr_w};
+          end
+        end
+      end
+      if (xs == XS_STOP && int_pend) begin
+        // UM 8.2.9: STOP ends with an interrupt, its frame's PC the next
+        // instruction's.
+        xs    <= XS_SR;
+        x_exc <= 1'b1;
+        x_int <= 1'b1;
+        x_lvl <= nmi ? 3'd7 : ipl_lvl;
+        x_vec <= 8'd0;
+        x_fmt <= 4'h0;
+        x_pc  <= x_npc;
+        x_sr0 <= {sr_sys, 3'b000, ccr_w};
+      end
+      if (x_apply) begin
+        if (x_exc) begin
+          sr_sys <= x_sys;
+          if (!s0) usp <= q15;
+          if (x_two) msp <= x_base;
+          xs     <= XS_SEQ;
+          xs_int <= x_int;
+          if (x_int && x_lvl == 3'd7) nmi <= 1'b0;
+        end else begin
+          if (x_srw) begin
+            sr_sys <= n_sys;
+            if (a_old != a_new) begin
+              case (a_old)
+                2'd0:    usp <= q15;
+                2'd1:    isp <= q15;
+                default: msp <= q15;
+              endcase
+            end
+          end
+          if (x_rst) begin
+            xs      <= XS_RST;
+            rst_cnt <= 9'd0;
+          end else if (x_trc) begin
+            // A traced serialising instruction: its trace exception now, from
+            // the SR it left (UM 8.2.6; STOP so never stops).
+            x_exc  <= 1'b1;
+            x_int  <= 1'b0;
+            x_vec  <= 8'd9;
+            x_fmt  <= 4'h2;
+            x_pc   <= x_npc;
+            x_addr <= x_ipc;
+            x_sr0  <= {x_srw ? n_sys : sr_sys, 3'b000, ccr_w};
+          end else if (x_stp) begin
+            xs <= XS_STOP;
+          end else begin
+            xs <= XS_IDLE;
+          end
+        end
+      end
+      // An exception, an interrupt or a serialising micro-operation, from
+      // write-back: XS_SR next.
+      if (x_flush) begin
+        xs     <= XS_SR;
+        x_exc  <= w_x || w_trace || w_int;
+        x_int  <= w_int;
+        x_lvl  <= nmi ? 3'd7 : ipl_lvl;
+        x_vec  <= w_xv;
+        x_fmt  <= fmt_of(w_xv);
+        x_pc   <= w_xpc;
+        x_addr <= w_xad;
+        x_ssw  <= w_u.tgt[15:0];
+        x_sr0  <= w_xsr;
+        x_srw  <= w_u.srw && !w_x;
+        x_stp  <= w_u.stp && !w_x;
+        x_rst  <= w_u.rsto && !w_x;
+        x_srn  <= {w_res[15:12], 1'b0, w_res[10:8]};
+        x_npc  <= w_npc;
+        x_ipc  <= w_u.pc;
+        x_trc  <= (tr[1] || (tr[0] && w_cof)) && !w_rerun;
+        x_rerun <= w_rerun;
+      end
+
       // --- the divider ------------------------------------------------------
       if (div_start) div_go <= 1'b1;
       if (div_go && !div_busy) div_done <= 1'b1;
 
       // --- execute -> write-back --------------------------------------------
       if (!ex_stall) begin
-        w_u    <= ex_u;
+        w_u    <= ex_out;
         w_ea   <= ex_ea;
         w_an   <= ex_an;
         w_res  <= res;
@@ -1038,7 +1476,7 @@ module rd68041_core (
         w_ccr  <= ccr_n;
         w_nowr <= ex_nowr;
         w_nost <= ex_nost;
-        w_trap <= ex_u.valid && ex_trap;
+        w_cof  <= ex_taken || ex_u.cof;
         if (ex_u.valid) ccr_x <= ccr_n;
         ex_u   <= '0;
         div_go   <= 1'b0;
@@ -1048,13 +1486,17 @@ module rd68041_core (
       // --- <ea> fetch -> execute --------------------------------------------
       if (of_u.valid && of_u.ld && !of_got && ld_done) begin
         of_md  <= ld_data;
+        of_er  <= ld_err;
+        of_av  <= ld_avec;
         of_got <= 1'b1;
       end
       if (!of_stall) begin
-        ex_u   <= of_u;
+        ex_u   <= of_out;
         ex_ea  <= of_ea;
         ex_an  <= of_an;
         ex_md  <= (of_got) ? of_md : ld_data;
+        ex_er  <= (of_got) ? of_er : ld_err;
+        ex_av  <= (of_got) ? of_av : ld_avec;
         of_u   <= '0;
         of_got <= 1'b0;
       end
@@ -1067,10 +1509,13 @@ module rd68041_core (
         ea_u  <= '0;
       end
 
+      // --- exception processing -> <ea> calculate ---------------------------
+      if (xs_take) ea_u <= exc_u;
+
       // --- decode -> <ea> calculate ----------------------------------------
       if (de_issue) begin
-        ea_u <= dec_u;
-        if (dec_more) begin
+        ea_u <= de_u;
+        if (de_more) begin
           seq <= seq + 5'd1;
           if (!step) begin
             de_op  <= q_win[191:176];
@@ -1089,7 +1534,10 @@ module rd68041_core (
           mv_mask <= mv_mask & ~mv_bit;
           mv_k    <= mv_k + 5'd1;
         end
-        if (dec_u.halt) de_halted <= 1'b1;
+        // Nothing more is decoded after an instruction that is not built or
+        // that takes an exception before it executes, until the pipeline is
+        // emptied behind it.
+        if (de_u.halt || de_u.xvec != 8'd0) de_halted <= 1'b1;
       end
 
       // --- a taken branch: everything younger goes ----------------------------
@@ -1101,10 +1549,24 @@ module rd68041_core (
         seq       <= 5'd0;
         de_halted <= 1'b0;
       end
+
+      // --- an exception or a serialising instruction: everything behind it --
+      if (x_flush) begin
+        w_u       <= '0;
+        ex_u      <= '0;
+        of_u      <= '0;
+        ea_u      <= '0;
+        of_got    <= 1'b0;
+        seq       <= 5'd0;
+        de_halted <= 1'b0;
+        div_go    <= 1'b0;
+        div_done  <= 1'b0;
+        ccr_x     <= w_go ? w_ccr : ccr_w;
+      end
     end
   end
 
   logic unused_ok;
-  assign unused_ok = &{1'b0, ld_err, st_empty, reset_v};
+  assign unused_ok = &{1'b0, reset_v};
 
 endmodule
