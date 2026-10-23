@@ -16,8 +16,8 @@ corpus has no bus or address errors (no format $7), and the FP ones -- format
 $2 for an unimplemented instruction (vector 11) or data type (55), $3 for a
 post-instruction exception, $0 -- were already decoded, with the generator's
 "EA valid" flag (fpeaset). `bench` writes RD68031's integer stream, which
-RD68041's sim/tb/core_cputest_tb.sv reads (M7); an FPU set, or an FPU test in
-an integer set, is skipped and counted until M11 defines the FPU's stream.
+RD68041's sim/tb/core_cputest_tb.sv reads (M7), with the FPU's registers in
+every test since M11.
 
 `dump` prints decoded tests. `bench` writes OUTDIR/cputest.vec, the stream
 sim/tb/core_cputest_tb.sv runs (its format is BENCH_FORMAT below), with
@@ -694,14 +694,24 @@ until kind 3:
                             the starting state: a7 is the user stack pointer,
                             ssp the interrupt stack pointer before the runner's
                             RTE frame is pushed below it
+  fpu  fpcr fpsr fpiar  (exp hi lo)*8
+                            fpu 1 for a test of the FPU's (main.c: fpumode),
+                            whose FP0-FP7, FPCR, FPSR and FPIAR follow, 3 when
+                            the generator put an FNOP after the instruction
+                            (it does, so that what an instruction posts is
+                            taken in the test), to be run with it; with fpu 0
+                            the values are zeros, and not deposited
   vec  epc  efmt  naddr  eaddr
                             the exception that ends it -- vec 0 is the ILLEGAL
                             sentinel, taken at epc; otherwise the frame's PC,
                             format word, and, when naddr is 1, the address
-                            word of a format $2 frame
+                            long word of a format $2 or $3 frame (0 when the
+                            corpus says the FPU's EA is not valid: fpeaset)
   skipregs  ed0..ed7  ea0..ea7  esr  esrmask
                             the registers at that exception (ea7 = USP), and
                             the stacked SR under the generator's mask
+  fpu  fpcr fpsr fpiar  (exp hi lo)*8
+                            the FPU's registers at that exception, as above
   nwr  (addr size new old)*nwr
                             the memory writes the test must have made
   -- every kind:
@@ -712,7 +722,7 @@ until kind 3:
 
 def bench(setdir, mnemonics, out, idx, max_run=0, setno=0, tid0=0):
     """Convert the named instructions of one set into a bench stream."""
-    nrun = nskip = nsampled = ntrace = nundef = nfpu = 0
+    nrun = nskip = nsampled = ntrace = nundef = nfpu = n55 = ndnw = 0
     tid = tid0
 
     def bcd_ok(b):
@@ -770,6 +780,41 @@ def bench(setdir, mnemonics, out, idx, max_run=0, setno=0, tid0=0):
                     return False
         return False
 
+    def fp_dn_wide(t):
+        """An FP operation or FMOVE out with An, or with Dn and a format of
+        extended, packed or double, or an FMOVEM of FP0-FP7 whose mode field
+        does not match its <ea>: PRM 5 allows none of them (Dn for byte, word,
+        long and single only), and UM 9.6.1 makes any other F-line pattern an
+        F-line illegal instruction (vector 11, format $0), which the core takes.
+        UAE040 runs it as an instruction, or as an unimplemented one (format
+        $2), so these are not compared (doc/oracles.md)."""
+        if not t.get("fpu"):
+            return False
+        op = bytes.fromhex(t["opcode"])
+        if len(op) < 4:
+            return False
+        w0, w1 = int.from_bytes(op[0:2], "big"), int.from_bytes(op[2:4], "big")
+        if (w0 & 0xFFC0) != 0xF200:
+            return False
+        mode = (w0 >> 3) & 7
+        if w1 >> 14 == 3:
+            # FMOVEM of FP0-FP7 whose mode field (12: postincrement or
+            # control, else predecrement) does not say what the <ea> is:
+            # PRM 5 has -(An) for predecrement, to memory only.
+            return ((w1 >> 12) & 1) == (mode == 4) or (w1 >> 13 == 6 and mode == 4)
+        if (w1 >> 13) not in (2, 3):
+            return False
+        return mode == 1 or (mode == 0 and (w1 >> 10) & 7 in (2, 3, 5, 7))
+
+    def emit_fp(f, t, st):
+        if not t.get("fpu"):
+            f.write("0 0 0 0" + " 0 0 0" * 8 + "\n")
+            return
+        fnop = t["opcode"].lower().endswith("f2800000")
+        # FPCR's bits 3-0, which UAE040 keeps: zeros (UM Figure 9-2).
+        f.write("%x %x %x %x %s\n" % (3 if fnop else 1, st["FPCR"] & 0xFFF0, st["FPSR"], st["FPIAR"],
+                                     " ".join("%x %x %x" % tuple(v) for v in st["FP"])))
+
     def emit_mem(f, writes):
         bs = [(a + i, b) for a, data in writes for i, b in enumerate(data)]
         f.write("%x" % len(bs))
@@ -800,15 +845,15 @@ def bench(setdir, mnemonics, out, idx, max_run=0, setno=0, tid0=0):
 
         for t in decode(setdir, mn):
             run = t["run"]
-            if run and t.get("fpu"):
-                run = False     # M11: the FPU's stream is not defined yet
-                nfpu += 1
             if run and t["exception"] and "trace_sr" in t["exception"]:
                 run = False     # an exception followed by a trace: two frames
                 ntrace += 1
             if run and undefined(t):
                 run = False
                 nundef += 1
+            if run and fp_dn_wide(t):
+                run = False
+                ndnw += 1
             if run:
                 if seen % step:
                     run = False
@@ -829,6 +874,8 @@ def bench(setdir, mnemonics, out, idx, max_run=0, setno=0, tid0=0):
                 out.write("0\n0\n")
                 fold = {}
                 continue
+            if t.get("fpu"):
+                nfpu += 1
             out.write("0\n")
             emit_mem(out, [(a, bytes([v])) for a, v in sorted(fold.items())] + t["pre"])
             fold = {}
@@ -843,14 +890,24 @@ def bench(setdir, mnemonics, out, idx, max_run=0, setno=0, tid0=0):
             out.write("%x %x %s %s %x %x\n" % (t["start_pc"], i["SR"],
                       " ".join("%x" % v for v in i["D"]),
                       " ".join("%x" % v for v in i["A"]), i["SSP"], i["MSP"]))
+            emit_fp(out, t, i)
             fr = (x or {}).get("frame", {})
-            out.write("%x %x %x %x %x\n" % (x["vector"] if x else 0, t["exp_pc"],
-                      fr.get("format_vector", 0), 1 if "addr" in fr else 0,
-                      fr.get("addr", 0)))
+            fmtv = fr.get("format_vector", 0)
+            if x and x["vector"] == 55 and fmtv >> 12 == 3 and \
+               (int.from_bytes(op[2:4], "big") >> 13) in (0, 2):
+                # An unsupported data type of an FP operation, which UAE040
+                # stacks as format $3: UM 9.6.2 and the FPSP (x_unsupp) have
+                # format $0, which is what is compared (doc/oracles.md)
+                fmtv = 0x0000 | 55 * 4
+                fr = {k: v for k, v in fr.items() if k != "addr"}
+                n55 += 1
+            out.write("%x %x %x %x %x\n" % (x["vector"] if x else 0, t["exp_pc"], fmtv,
+                      1 if "addr" in fr and fr.get("fpeaset", 1) else 0, fr.get("addr", 0)))
             out.write("%x %s %s %x %x\n" % (1 if e["skip_regs"] else 0,
                       " ".join("%x" % v for v in e["D"]),
                       " ".join("%x" % v for v in e["A"]), e["SR"],
                       (~e["SR_ignore"]) & 0xFFFF))
+            emit_fp(out, t, e)
             out.write("%x" % len(t["mem_writes"]))
             for a, sz, old, new in t["mem_writes"]:
                 out.write(" %x %x %x %x" % (a, sz, new, old))
@@ -861,7 +918,7 @@ def bench(setdir, mnemonics, out, idx, max_run=0, setno=0, tid0=0):
             tid += 1
             nrun += 1
             emit_mem(out, t["post"])
-    return nrun, nskip, nsampled, ntrace, nundef, nfpu
+    return nrun, nskip, nsampled, ntrace, nundef, nfpu, n55, ndnw
 
 
 def summary(sets, sel):
@@ -949,8 +1006,8 @@ def main():
                    "prefixes (ADD matches ADD.B ADD.W ADD.L); empty = all")
     b.add_argument("--max", type=int, default=0, help="at most this many tests run "
                    "per instruction, evenly sampled (0 = all)")
-    b.add_argument("--with-fpu", action="store_true", help="decode FPU sets too (their "
-                   "tests are still skipped and counted until M11)")
+    b.add_argument("--no-fpu", action="store_true", help="leave the FPU sets out "
+                   "(an MC68LC040 build), counting their tests")
     b.add_argument("--summary", default="", help="summary.txt, for the FPU sets' test counts")
     sm = sp.add_parser("summary", help="decode every test and count them")
     sm.add_argument("sets", nargs="+", help="data/<lvl>_<name> directories")
@@ -972,7 +1029,7 @@ def main():
         return
     sel = [x.strip().upper() for x in a.select.split(",") if x.strip()]
     os.makedirs(a.out, exist_ok=True)
-    tot = [0, 0, 0, 0, 0, 0]
+    tot = [0, 0, 0, 0, 0, 0, 0, 0]
     fpu_files = fpu_tests = 0
     counts = {}
     if a.summary and os.path.exists(a.summary):
@@ -995,9 +1052,9 @@ def main():
                 sub = [m for m in sub if any(m.upper() == x or m.upper().split(".")[0] == x
                                              for x in sel)]
             hd = parse_header(next(chunks(os.path.join(sdir, sub[0] if sub else os.listdir(sdir)[0], "0000.dat"))))
-            if hd["fpu_model"] and not a.with_fpu:
-                # M11: an FPU set is counted, not decoded (the FPU corpus is
-                # millions of tests); the counts are summary.txt's
+            if hd["fpu_model"] and a.no_fpu:
+                # an FPU set left out is counted, not decoded (the FPU corpus
+                # is millions of tests); the counts are summary.txt's
                 fpu_files += len(sub)
                 fpu_tests += sum(counts.get((os.path.normpath(sdir), m), 0) for m in sub)
                 continue
@@ -1011,9 +1068,10 @@ def main():
         out.write("3\n")
     print("cputest: %d tests to run; %d skipped by the generator, %d sampled out, "
           "%d with a trace after an exception, %d whose result the manual leaves "
-          "undefined, %d FPU tests skipped (M11)" % tuple(tot))
+          "undefined; %d of the FPU's, %d of them an unsupported data type compared "
+          "with format $0; %d F-line illegal (An, Dn as .X, .P or .D, FMOVEM's mode and <ea>) not compared" % tuple(tot))
     if fpu_files:
-        print("cputest: the FPU sets skipped (M11): %d instruction files, %d tests%s" % (
+        print("cputest: the FPU sets left out: %d instruction files, %d tests%s" % (
             fpu_files, fpu_tests, "" if counts else " (no summary.txt to count them)"))
 
 

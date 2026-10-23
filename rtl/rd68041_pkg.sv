@@ -162,7 +162,7 @@ package rd68041_pkg;
     logic  [1:0] ea_scale;
     logic [31:0] ea_disp;
     logic  [1:0] ea_upd;
-    logic  [2:0] ea_step;
+    logic  [3:0] ea_step;    // (An)+, -(An): 1 2 4, or 12 (FMOVE.P out, at once)
     // <ea> fetch and write-back
     logic        ld;
     logic        st;
@@ -209,6 +209,12 @@ package rd68041_pkg;
                              // the result the line's or page's address (M9)
     logic        m16;        // MOVE16: the read or write of a line, through the data
                              // memory unit's own buffer (M9)
+    // the FPU (M11; rd68041_fpu, doc/fpu.md)
+    logic  [3:0] fpk;        // the FP micro-operation (rd68041_fpu_pkg::FK_*), 0 none
+    logic        fchk;       // the FP instruction's first: a pending exception is taken
+    logic  [4:0] fidx;       // the long word it moves
+    logic  [2:0] freg;       // FMOVEM's FP register
+    logic [15:0] fcmd;       // the command word, or the predicate (FBcc...) in 5-0
     // the register result
     logic        wr;
     logic  [4:0] wr_reg;
@@ -234,10 +240,10 @@ package rd68041_pkg;
   } ea_t;
 
   // Its width, written out: yosys has no $bits of a type. 40 (valid, last, halt,
-  // pc, len) + 56 (the <ea>) + 4 (ld, st, sz) + 112 (execute) + 16 (exceptions)
-  // + 2 (cache maintenance, MOVE16) + 14 (the results). sim/tb/core_*_tb check
-  // it against $bits.
-  localparam int UOP_W = 244;
+  // pc, len) + 57 (the <ea>) + 4 (ld, st, sz) + 112 (execute) + 16 (exceptions)
+  // + 2 (cache maintenance, MOVE16) + 29 (the FPU) + 14 (the results).
+  // sim/tb/core_*_tb check it against $bits.
+  localparam int UOP_W = 274;
 
   // The status register's implemented bits (UM 2.2.1): T1 T0 S M, I2-I0, the CCR.
   localparam logic [15:0] SR_MASK = 16'hF71F;

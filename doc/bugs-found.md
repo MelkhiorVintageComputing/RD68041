@@ -10,6 +10,38 @@ synchroniser) are in RD68031's `doc/bugs-found.md`.*
 
 ---
 
+## M11: found while building the FPU
+
+1. **An FP instruction's last micro-operation applied the next instruction's commit
+   record.** The FPU's results commit at write-back from a record EX fills; an FMOVEM's
+   last micro-operation reaching W committed the record the next FP instruction had
+   just made in EX. The record now says whether its own micro-operation has gone on to
+   W (`rec_w`). Caught by `m11_fpu_a`, the first cosim run.
+2. **Decode issued an FP instruction before its command word was in the queue**, and
+   opclass 001's garbage made it an F-line exception. Every FP encoding now needs at
+   least its command word. Caught by `m11_fpu_a`.
+3. **A post-instruction exception on a micro-operation with a store hung the core.**
+   An exception waits in W for the queued writes, but its own store was offered to the
+   store queue the whole time, taken every clock, so the queue was never empty: FMOVE.D
+   to memory with an overflow, its last long word carrying the format $3 exception. The
+   store is offered only once the queue is empty (`w_drain`). Caught by the cputest FPU
+   corpus.
+4. **FMOVE out's unsupported data type stacked 0 for its EA.** The exception is taken
+   by the first micro-operation, which computed no address; it now computes the
+   destination's, without an access, and steps (An)+ and -(An) over a packed
+   destination's twelve bytes, which always takes the exception. Caught by cputest.
+5. **FMOVE and FMOVEM of the control registers refused (An)+ to memory and -(An) from
+   it** (PRM 5's text against its tables, `doc/manual-contradictions.md` 8). Caught by
+   cputest: FMOVE.L FPSR,(A7)+.
+6. **FSGLDIV truncated its operands to 24 bits**, as one paragraph of PRM 5 says and
+   UAE040 does not (`doc/manual-contradictions.md` 7). Caught by cputest.
+7. **The condition codes of a trapped underflow were Table 9-13's zero** where the
+   denormalised result the FPSP stores is not zero -- FSGLDIV's extended exponent range
+   leaves extended denormals. Caught by cputest.
+8. **An overflowing FMOVE to a single or a double stored the rounded value with its
+   exponent wrapped**; it stores Table 9-12's infinity or largest number now, as UAE040
+   does ("an undefined result is stored", UM 9.7.4.2). Caught by cputest.
+
 ## M10: found while building the MMU
 
 1. **An instruction that faulted after some of its micro-operations had written

@@ -296,6 +296,25 @@ second page of an access that spans two (UM 8.4.6.2), FA the access's first byte
 8.4.6.4); an instruction fetch's ATC fault marks its words in the queue as a bus error
 does, and decode turns the instruction that needs one into the fault.
 
+## The FPU (M11)
+
+`doc/fpu.md` has it whole; in the pipeline's terms:
+
+- **A unit beside EX**, as the divider is: an FP micro-operation starts it in execute and
+  waits there (`fp_wait`) until it answers. FP instructions do not overlap each other or
+  the integer instructions behind them.
+- **Commit at write-back** through a commit record EX fills and W applies, so that a
+  flushed micro-operation leaves the FPU as it was; the record knows whether its own
+  micro-operation has reached W (`rec_w`), and the next FP micro-operation waits in EX
+  until it has committed.
+- **Decode** turns an FP instruction into its operand's long words (loads, Dn, an
+  immediate's words into the input staging), the operation, then an FMOVE out's long
+  words (stores or a Dn write); FMOVEM a long word a micro-operation; FSAVE and FRESTORE
+  wait for the pipeline behind to empty (`qwait`) and move the frame a long word at a time.
+- **Exceptions** leave EX with the micro-operation like the integer unit's: the vector,
+  pre- or post-instruction (`xnext`), the frame format in `tgt[19:16]` and the address in
+  `imm`, so that W stacks format $0, $2 or $3 the same way.
+
 ## Status
 
 **M4: measured.** The storage above (`rtl/rd68041_bram.sv`, `rd68041_atc.sv`,
@@ -364,3 +383,13 @@ two behind it in the frame's write-back slots, MOVE16's line in its push data;
 writes queued behind it, MOVE16, and a traced write -- against UM 8.4.6. The
 continuation bits are never set, and a push's bus error is not reported
 (`doc/divergences.md`).
+
+**M11: the FPU.** Every instruction the MC68040 implements, the unimplemented ones and
+the unsupported data types trapping as the FPSP expects, the posted and immediate
+exceptions, FSAVE and FRESTORE of the null, idle, unimplemented and busy frames, and
+FRESTORE that resumes an operation. `make testfloat` checks the data path against
+Berkeley TestFloat (1,911,266 vectors compared, 87,982 traps checked); `make cputest`
+passes 11,136 tests of the FPU corpus with its 6,688 integer ones, none failing; `make
+cosim` adds `m11_fpu_a` and `m11_fpu_b`; `core_fpu_tb` checks against the manual and the
+FPSP what UAE040 does otherwise -- the frames, the unimplemented and unsupported traps'
+formats, FRESTORE (`m11_fpu_c`).

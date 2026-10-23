@@ -105,3 +105,49 @@ or may not be set in the copy saved on the master stack.)" -- "it" is the S bit.
 throwaway frame's SR is the master frame's with S set, as on the MC68030, and RTE of it
 returns through the master stack (`rd68041_core.sv`, the sequencer's `sr_new`;
 `core_exc_tb` (g)).
+
+## 6. FSGLMUL and FSGLDIV: hardware or software; FLOG2: missing from Table 9-10
+
+**Followed: UM Table 9-10 for FSGLMUL and FSGLDIV, which are hardware; the FPSP for
+FLOG2, which is unimplemented.**
+
+PRM `instructions-by-cpu.csv` marks FSGLMUL, FSGLDIV and FLOG2 "68040: software (FPSP)".
+UM Table 9-10, the list of what the MC68040 does not implement, has neither FSGLMUL nor
+FSGLDIV, and has no FLOG2 either, though it lists every other transcendental. The FPSP,
+which emulates exactly what the hardware does not, settles both: its dispatch table
+(`tbldo.S`) has FSGLDIV ($24) and FSGLMUL ($27) as "illegal extension" -- never sent to
+it -- and an FLOG2 entry ($16). So FSGLMUL and FSGLDIV are in hardware, and FLOG2 is
+vector 11 with the rest of Table 9-10, which leaving it out was a slip (`doc/fpu.md`).
+UAE040 and the cputest corpus agree on both.
+
+## 7. FSGLDIV's operands: truncated to 24 bits, or not
+
+**Followed: neither paragraph alone -- FSGLMUL truncates its operands, FSGLDIV does
+not, as UAE040 has them.**
+
+PRM 5, FSGLDIV (and FSGLMUL in the same words): "If either operand requires more than 24
+bits of mantissa to be accurately represented, the extraneous mantissa bits are trancated
+prior to the division, hence the accuracy of the result is not guaranteed." The next
+paragraph: "The accuracy of the result is not affected by the number of mantissa bits
+required to represent each input operand since the input operands just change to
+extended precision." The corpus (UAE040) truncates FSGLMUL's operands -- all 198 sampled
+tests agree with truncation -- and divides FSGLDIV's whole: with them truncated, 59 of
+176 FSGLDIV tests came out one unit low in the 24th bit or exact where the corpus has
+INEX2. The FPSP cannot settle it (it never sees either). `rd68041_fpu_dp.sv`, the
+multiply and divide set-up.
+
+## 8. FMOVEM of the control registers: which modes, which way
+
+**Followed: the addressing-mode tables -- (An)+ and -(An) both ways.**
+
+PRM 5, FMOVEM (control registers): "Memory-to-Register -- Only control addressing modes
+or the postincrement addressing mode can be used", and "Register-to-Memory -- Only
+control alterable addressing modes or the predecrement addressing mode". The tables
+under each sentence list (An)+ *and* -(An), and the description says how each moves
+"to or from" memory: "If the addressing mode is predecrement, the address register is
+first decremented by the total size of the register images to be moved ... For the
+postincrement addressing mode, the selected registers are transferred to or from the
+specified address". The single-register FMOVE's tables, whose opcode "is the same", list
+both modes both ways too ("all addressing modes" from memory, "alterable" to it). The
+decoder followed the sentences until the cputest corpus ran FMOVE FPSR,(A7)+; it follows
+the tables now (`rd68041_decode.sv`, opclasses 100 and 101).

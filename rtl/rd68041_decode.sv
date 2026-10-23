@@ -58,7 +58,9 @@
 // them issue until they are past write-back, and fetches again from the next
 // instruction (doc/microarch.md, "Exceptions").
 
-module rd68041_decode (
+module rd68041_decode #(
+    parameter int FPU = 1                // 0: the MC68LC040
+) (
     input  logic [15:0]  op,           // the operation word
     input  logic [175:0] w,            // extension words: w[0] in 175:160, then w[1]...
     input  logic  [4:0]  seq,          // micro-operations of this instruction issued already
@@ -70,6 +72,10 @@ module rd68041_decode (
     input  logic  [4:0]  mv_k,         // MOVEM, MOVEP: transfers already issued
     input  logic         sup,          // SR's S: supervisor (the privileged instructions)
     input  logic         msp_on,       // SR's M: A7 is the master stack pointer, not the ISP
+    input  logic         mv_none,      // FMOVEM: the list is empty
+    input  logic  [4:0]  fp_svn,       // FSAVE: the frame's long words (the FPU's state)
+    input  logic  [4:0]  fp_rsn,       // FRESTORE: those of the frame its first long named
+    output logic         qwait,        // this one waits for the pipeline behind decode to empty
     output logic [rd68041_pkg::UOP_W-1:0] uop,
     output logic  [3:0]  need,         // extension words the instruction has (seq 0)
     output logic  [3:0]  pop,          // extension words this micro-operation takes
@@ -280,12 +286,13 @@ module rd68041_decode (
   endfunction
 
   // An (An)+ or -(An)'s step for an operand of sz: 2 for a byte on A7.
-  function automatic logic [2:0] ea_step_of(input logic [1:0] sz, input logic [2:0] r);
-    ea_step_of = (sz == rd68041_pkg::SZ_L) ? 3'd4 :
-                 ((sz == rd68041_pkg::SZ_W) || (r == 3'd7)) ? 3'd2 : 3'd1;
+  function automatic logic [3:0] ea_step_of(input logic [1:0] sz, input logic [2:0] r);
+    ea_step_of = (sz == rd68041_pkg::SZ_L) ? 4'd4 :
+                 ((sz == rd68041_pkg::SZ_W) || (r == 3'd7)) ? 4'd2 : 4'd1;
   endfunction
 
   logic bad;
+  logic fline;                    // an F-line encoding no instruction has: vector 11
 
   // Shorthands for the fields the operation words share.
   logic [2:0] sm, sr, dm, dr;     // <ea> mode and register; bits 8-6 and 11-9
@@ -333,6 +340,8 @@ module rd68041_decode (
       4'b0100: if (op[11:7] == 5'b11000 || op[11:7] == 5'b10001 || op[11:7] == 5'b11001)
                  eak = 4'd1;                                          // MUL.L, DIV.L, MOVEM
       4'b1110: if (op[7:6] == 2'b11 && op[11]) eak = 4'd1;            // the bit fields
+      // The FP general instructions and FScc: after the command word.
+      4'b1111: if (op[11:9] == 3'b001 && op[8:7] == 2'b00) eak = 4'd1;
       default: ;
     endcase
   end
@@ -457,6 +466,8 @@ module rd68041_decode (
     u.wr_sz  = rd68041_pkg::SZ_L;
     u.sz     = rd68041_pkg::SZ_L;   // SWAP, MOVEQ, EXG...: long unless the case says
     bad      = 1'b0;
+    fline    = 1'b0;
+    qwait    = 1'b0;
     priv     = 1'b0;
     need     =  4'd0;
     pop      =  4'd0;
@@ -483,7 +494,14 @@ module rd68041_decode (
       4'b0100: if (op[11:4] == 8'hE7)   uses_ea = 1'b0;               // RTE, RTS, MOVEC...
       4'b0101: if (op[7:6] == 2'b11 && (sm == 3'd1 || sm == 3'd7 && sr >= 3'd2))
                  uses_ea = 1'b0;                                      // DBcc, TRAPcc
-      4'b0110, 4'b0111, 4'b1010, 4'b1111: uses_ea = 1'b0;
+      4'b0110, 4'b0111, 4'b1010: uses_ea = 1'b0;
+      // The FP instructions with an <ea> in op[5:0] (not FBcc, FDBcc, FTRAPcc,
+      // nor a register-to-register operation or FMOVECR).
+      4'b1111: uses_ea = (FPU != 0) && (op[11:9] == 3'b001) &&
+                         ((op[8:6] == 3'b000 && w0[15:13] != 3'b000 &&
+                           !(w0[15:13] == 3'b010 && w0[12:10] == 3'b111)) ||
+                          (op[8:6] == 3'b001 && !(sm == 3'd1 || (sm == 3'd7 && sr >= 3'd2))) ||
+                          op[8:6] == 3'b100 || op[8:6] == 3'b101);
       4'b1110: if (op[7:6] != 2'b11) uses_ea = 1'b0;                  // the register shifts
       default: ;
     endcase
@@ -1800,8 +1818,293 @@ module rd68041_decode (
               u.wr = 1'b1; u.wr_reg = areg((sq == 5'd3 || !inc_a) ? rb2 : ra);
             end
           endcase
-        end else if (op[11:9] == 3'b001) begin
-          u.halt = 1'b1;
+        end else if (op[11:9] == 3'b001 && FPU != 0) begin
+          // The floating-point instructions (cpID 1; PRM 5, 8; doc/fpu.md).
+          // c is the command word (types 000 and 001), w[0].
+          logic [15:0] c;
+          logic  [2:0] ocl, fm, nl, kk, fix;
+          logic  [1:0] osz;
+          logic  [3:0] nx;
+          logic        isdn, isimm, pre, post;
+          c    = w0;
+          fix  = 3'd0;
+          nx   = 4'd0;
+          // The command word, at least, before anything is decided from it.
+          need = (op[8:7] == 2'b00) ? 4'd1 : 4'd0;
+          ocl  = c[15:13];
+          fm   = c[12:10];
+          isdn = (sm == 3'd0);
+          isimm = is_imm(sm, sr);
+          pre  = (sm == 3'd4);
+          post = (sm == 3'd3);
+          u.fcmd = c;
+          u.fchk = (sq == 5'd0);
+          // The operand's long words, and its size on the bus (PRM 5: L S X P
+          // W D B, 0-6).
+          nl  = (fm == 3'd5) ? 3'd2 : (fm == 3'd2 || fm == 3'd3 || fm == 3'd7) ? 3'd3 : 3'd1;
+          osz = (fm == 3'd6) ? rd68041_pkg::SZ_B : (fm == 3'd4) ? rd68041_pkg::SZ_W :
+                rd68041_pkg::SZ_L;
+          kk  = sq[2:0];
+          case (op[8:6])
+            3'b000: begin
+              case (ocl)
+                3'b000: begin
+                  // FPm,FPn: the operation alone.
+                  need = 4'd1; pop = 4'd1; u.len = 5'd4;
+                  u.fpk = rd68041_fpu_pkg::FK_OP;
+                end
+                3'b010: begin
+                  if (fm == 3'd7) begin
+                    // FMOVECR: unimplemented (UM Table 9-10); with an <ea>
+                    // field it is an F-line instruction (the FPSP's x_fline).
+                    need = 4'd1; pop = 4'd1; u.len = 5'd4;
+                    if (op[5:0] != 6'h0) fline = 1'b1;
+                    u.fpk = rd68041_fpu_pkg::FK_OP;
+                  end else begin
+                    // <ea>,FPn: the operand's long words, the last with the
+                    // operation; -(An) the last first.
+                    if (sm == 3'd1 || (isdn && nl != 3'd1) || !ok_mode(sm, sr)) fline = 1'b1;
+                    nx = isimm ? ((nl == 3'd1) ? ((fm == 3'd6 || fm == 3'd4) ? 4'd1 : 4'd2)
+                                               : {nl, 1'b0})
+                               : ea_len(sm, sr, osz, ew(w, 1));
+                    need  = 4'd1 + nx;
+                    u.len = 5'(2 + 2*need);
+                    more  = ({2'b00, kk} < 5'(nl - 3'd1));
+                    u.last = !more;
+                    if (!more) pop = need;
+                    fix   = pre ? 3'(nl - 3'd1 - kk) : kk;
+                    u.fidx = {2'b00, fix};
+                    u.fpk = more ? rd68041_fpu_pkg::FK_IN : rd68041_fpu_pkg::FK_OP;
+                    if (isdn) begin
+                      u.b_sel = rd68041_pkg::S_REG; u.b_reg = dy;
+                    end else if (isimm) begin
+                      u.b_sel = rd68041_pkg::S_IMM;
+                      u.imm = (nl != 3'd1) ? ewl(w, 1 + 2*int'(fix)) :
+                              (fm == 3'd6) ? imm_sb : (fm == 3'd4) ? imm_sw : imm_sl;
+                    end else begin
+                      u.ld = 1'b1; u.b_sel = rd68041_pkg::S_MEM;
+                      u.sz = (nl == 3'd1) ? osz : rd68041_pkg::SZ_L;
+                      `DEC_EA(ea_s, u.sz)
+                      if (!(pre || post)) u.ea_disp = u.ea_disp + {27'h0, fix, 2'b00};
+                    end
+                  end
+                end
+                3'b011: begin
+                  // FMOVE FPm,<ea>: the conversion, then its long words.
+                  if (sm == 3'd1 || (isdn && nl != 3'd1) || (!isdn && !dalt(sm, sr)))
+                    fline = 1'b1;
+                  nx    = isdn ? 4'd0 : ea_len(sm, sr, osz, ew(w, 1));
+                  need  = 4'd1 + nx;
+                  u.len = 5'(2 + 2*need);
+                  more  = ({2'b00, kk} < {2'b00, nl});
+                  u.last = !more;
+                  if (!more) pop = need;
+                  if (sq == 5'd0) begin
+                    u.fpk = rd68041_fpu_pkg::FK_OP;
+                    // The destination's address, for the frame of an
+                    // exception taken here (an unsupported data type, UM
+                    // 9.6.2): computed, not accessed, and An left alone --
+                    // but for packed, which always takes it (Table 9-10):
+                    // (An)+ and -(An) step over its twelve bytes first, as
+                    // UAE040 does, and the frame has -(An)'s new An.
+                    if (!isdn) begin
+                      `DEC_EA(ea_s, rd68041_pkg::SZ_L)
+                      if (fm == 3'd3 || fm == 3'd7) u.ea_step = 4'd12;
+                      else u.ea_upd = rd68041_pkg::U_NONE;
+                    end
+                  end else begin
+                    fix = pre ? 3'(nl - kk) : 3'(kk - 3'd1);
+                    u.fidx = {2'b00, fix};
+                    u.fpk = rd68041_fpu_pkg::FK_OUT;
+                    if (isdn) begin
+                      u.wr = 1'b1; u.wr_reg = dy; u.wr_sz = osz;
+                    end else begin
+                      u.st = 1'b1;
+                      u.sz = (nl == 3'd1) ? osz : rd68041_pkg::SZ_L;
+                      `DEC_EA(ea_s, u.sz)
+                      if (!(pre || post)) u.ea_disp = u.ea_disp + {27'h0, fix, 2'b00};
+                    end
+                  end
+                end
+                3'b100, 3'b101: begin
+                  // FMOVE(M) of FPCR, FPSR, FPIAR (PRM 5): in that order in
+                  // memory, one a micro-operation; an empty list is FPIAR.
+                  // (An)+ and -(An) both ways, as PRM 5's tables have them
+                  // (its text has neither to memory nor from memory,
+                  // doc/manual-contradictions.md).
+                  logic [2:0] lst, nr, r0, r1, r2, rk;
+                  logic       tom;
+                  rk  = 3'd0;
+                  tom = ocl[0];
+                  lst = (fm == 3'd0) ? 3'b001 : fm;
+                  nr  = {2'b00, lst[2]} + {2'b00, lst[1]} + {2'b00, lst[0]};
+                  // The k-th selected register, in memory order: FPCR 2,
+                  // FPSR 1, FPIAR 0.
+                  r0 = lst[2] ? 3'd2 : lst[1] ? 3'd1 : 3'd0;
+                  r1 = (lst[2] && lst[1]) ? 3'd1 : 3'd0;
+                  r2 = 3'd0;
+                  if ((isdn && nr != 3'd1) || (sm == 3'd1 && lst != 3'b001) ||
+                      (isimm && tom) || (tom && !(isdn || sm == 3'd1) && !malt(sm, sr)) ||
+                      (!tom && !ok_mode(sm, sr)))
+                    fline = 1'b1;
+                  nx    = isimm ? {nr, 1'b0} : ea_len(sm, sr, rd68041_pkg::SZ_L, ew(w, 1));
+                  need  = 4'd1 + nx;
+                  u.len = 5'(2 + 2*need);
+                  more  = ({2'b00, kk} < 5'(nr - 3'd1));
+                  u.last = !more;
+                  if (!more) pop = need;
+                  fix = pre ? 3'(nr - 3'd1 - kk) : kk;
+                  rk  = (fix == 3'd0) ? r0 : (fix == 3'd1) ? r1 : r2;
+                  u.fidx = {2'b00, rk};
+                  u.fpk = tom ? rd68041_fpu_pkg::FK_CRR : rd68041_fpu_pkg::FK_CRW;
+                  if (isdn || sm == 3'd1) begin
+                    if (tom) begin u.wr = 1'b1; u.wr_reg = {1'b0, sm[0], sr}; end
+                    else begin u.b_sel = rd68041_pkg::S_REG; u.b_reg = {1'b0, sm[0], sr}; end
+                  end else if (isimm) begin
+                    u.b_sel = rd68041_pkg::S_IMM; u.imm = ewl(w, 1 + 2*int'(fix));
+                  end else begin
+                    if (tom) u.st = 1'b1;
+                    else begin u.ld = 1'b1; u.b_sel = rd68041_pkg::S_MEM; end
+                    `DEC_EA(ea_s, rd68041_pkg::SZ_L)
+                    if (!(pre || post)) u.ea_disp = u.ea_disp + {27'h0, fix, 2'b00};
+                  end
+                end
+                3'b001: fline = 1'b1;                    // no such opclass
+                default: begin
+                  // FMOVEM of FP0-FP7 (PRM 5): three long words a register,
+                  // the decode stage counting the list (mv_*); a dynamic list
+                  // is read from Dn once the pipeline behind has emptied.
+                  logic tom, pm, dyn;
+                  logic [4:0] sub;
+                  tom = ocl[0];
+                  pm  = !c[12];                          // predecrement
+                  dyn = c[11];
+                  if (tom ? !(pm ? pre : (ctrl(sm, sr) && malt(sm, sr)))
+                          : (pm || !(ctrl(sm, sr) || post)))
+                    fline = 1'b1;
+                  need  = 4'd1 + ea_len(sm, sr, rd68041_pkg::SZ_L, ew(w, 1));
+                  u.len = 5'(2 + 2*need);
+                  if (dyn && sq == 5'd0) qwait = 1'b1;
+                  sub = sq - {k[2:0], 1'b0} - {2'b00, k[2:0]};
+                  if (sq == 5'd0 && mv_none) begin
+                    // No registers: a pending exception is still taken.
+                    u.fpk = rd68041_fpu_pkg::FK_COND;
+                    u.fcmd = 16'h0;
+                    pop = need;
+                  end else begin
+                    mv_used = (sub == 5'd2);
+                    more    = !(mv_last && sub == 5'd2);
+                    u.last  = !more;
+                    if (!more) pop = need;
+                    fix = pm ? 3'(3'd2 - sub[2:0]) : sub[2:0];
+                    u.fidx = {2'b00, fix};
+                    u.freg = mv_reg[2:0];
+                    u.fpk = tom ? rd68041_fpu_pkg::FK_RGR : rd68041_fpu_pkg::FK_RGW;
+                    if (tom) u.st = 1'b1;
+                    else begin u.ld = 1'b1; u.b_sel = rd68041_pkg::S_MEM; end
+                    `DEC_EA(ea_s, rd68041_pkg::SZ_L)
+                    if (!(pre || post))
+                      u.ea_disp = u.ea_disp + {25'h0, k[2:0], 3'b000} + {26'h0, k[2:0], 2'b00} +
+                                  {27'h0, fix, 2'b00};
+                  end
+                end
+              endcase
+            end
+            3'b001: begin
+              // FScc, FDBcc, FTRAPcc (PRM 5): the predicate in c[5:0].
+              u.fpk = rd68041_fpu_pkg::FK_COND;
+              u.fcmd = {10'h0, c[5:0]};
+              if (sm == 3'd1) begin
+                need = 4'd2; pop = 4'd2; u.len = 5'd6;
+                u.b_reg = dy;
+                u.op = rd68041_pkg::OP_DBCC;
+                u.wr = 1'b1; u.wr_reg = dy; u.wr_sz = rd68041_pkg::SZ_W;
+                u.br = rd68041_pkg::BR_DISP;
+                // PRM 5, FDBcc: from the displacement word's address.
+                u.tgt = pc + 32'd4 + ews(w, 1);
+              end else if (sm == 3'd7 && sr >= 3'd2) begin
+                if (sr > 3'd4) fline = 1'b1;
+                need = 4'd1 + ((sr == 3'd2) ? 4'd1 : (sr == 3'd3) ? 4'd2 : 4'd0);
+                pop  = need;
+                u.len = 5'(2 + 2*need);
+                u.trap = 1'b1;
+              end else begin
+                if (!dalt(sm, sr)) fline = 1'b1;
+                need = 4'd1 + ea_len(sm, sr, rd68041_pkg::SZ_B, ew(w, 1)); pop = need;
+                u.len = 5'(2 + 2*need);
+                u.sz = rd68041_pkg::SZ_B;
+                u.op = rd68041_pkg::OP_SCC;
+                if (isdn) begin u.wr = 1'b1; u.wr_reg = dy; u.wr_sz = rd68041_pkg::SZ_B; end
+                else begin `DEC_EA(ea_s, rd68041_pkg::SZ_B) u.st = 1'b1; end
+              end
+            end
+            3'b010, 3'b011: begin
+              // FBcc (PRM 5), FNOP among them: the predicate in op[5:0].
+              logic [31:0] d;
+              need = op[6] ? 4'd2 : 4'd1;
+              d    = op[6] ? {ew(w, 0), ew(w, 1)} : ews(w, 0);
+              pop  = need;
+              u.len = 5'(2 + 2*need);
+              u.fpk = rd68041_fpu_pkg::FK_COND;
+              u.fcmd = {10'h0, op[5:0]};
+              u.tgt = pc + 32'd2 + d;
+              u.br  = rd68041_pkg::BR_DISP;
+            end
+            3'b100: begin
+              // FSAVE <ea> (UM 9.8), privileged: the frame's long words, once
+              // the FPU's state is settled.
+              priv = 1'b1;
+              u.fchk = 1'b0;
+              if (!((ctrl(sm, sr) && malt(sm, sr)) || pre)) fline = 1'b1;
+              if (sq == 5'd0) qwait = 1'b1;
+              need  = ea_len(sm, sr, rd68041_pkg::SZ_L, w0);
+              u.len = 5'(2 + 2*need);
+              more  = (sq < (fp_svn - 5'd1));
+              u.last = !more;
+              if (!more) pop = need;
+              fix = 3'd0;
+              u.fidx = pre ? 5'(fp_svn - 5'd1 - sq) : sq;
+              u.fpk = rd68041_fpu_pkg::FK_SAVE;
+              u.st = 1'b1;
+              `DEC_EA(ea_s, rd68041_pkg::SZ_L)
+              if (!pre) u.ea_disp = u.ea_disp + {25'h0, u.fidx, 2'b00};
+            end
+            3'b101: begin
+              // FRESTORE <ea> (UM 9.8), privileged: its first long word,
+              // then, once that is in, the rest the frame has, then its
+              // state taken; (An)+ moves An past it last.
+              priv = 1'b1;
+              u.fchk = 1'b0;
+              if (!(ctrl(sm, sr) || post)) fline = 1'b1;
+              if (sq == 5'd1) qwait = 1'b1;
+              need  = ea_len(sm, sr, rd68041_pkg::SZ_L, w0);
+              u.len = 5'(2 + 2*need);
+              more  = (sq == 5'd0) || (sq < fp_rsn);
+              u.last = !more;
+              if (!more) pop = need;
+              fix = 3'd0;
+              if (sq == 5'd0 || sq < fp_rsn) begin
+                u.fidx = sq;
+                u.fpk = rd68041_fpu_pkg::FK_RST;
+                u.ld = 1'b1; u.b_sel = rd68041_pkg::S_MEM;
+                if (post) begin
+                  `DEC_EA(ea_fix(3'd2, sr, w0), rd68041_pkg::SZ_L)
+                end else begin
+                  `DEC_EA(ea_s, rd68041_pkg::SZ_L)
+                end
+                u.ea_disp = u.ea_disp + {25'h0, sq, 2'b00};
+              end else begin
+                u.fpk = rd68041_fpu_pkg::FK_REND;
+                if (post) begin
+                  u.a_sel = rd68041_pkg::S_IMM; u.imm = {25'h0, fp_rsn, 2'b00};
+                  u.b_reg = ay;
+                  u.op = rd68041_pkg::OP_ADDA;
+                  u.wr = 1'b1; u.wr_reg = ay;
+                end
+              end
+            end
+            default: fline = 1'b1;
+          endcase
         end else begin
           u.xvec = 8'd11;
         end
@@ -1830,7 +2133,7 @@ module rd68041_decode (
     // instruction is legal can depend on its extension words (MOVEC's
     // register field, the full format's reserved encodings), so it is decided
     // only once they are all in the queue.
-    if ((priv && !sup) || u.halt || bad) begin
+    if ((priv && !sup) || u.halt || bad || fline) begin
       logic h;
       h = u.halt && !(priv && !sup);
       u = '0;
@@ -1839,7 +2142,8 @@ module rd68041_decode (
       u.pc    = pc;
       u.len   = (seq != 5'd0) ? len_in : 5'd2;
       u.halt  = h;
-      u.xvec  = h ? 8'd0 : (priv && !sup) ? 8'd8 : 8'd4;
+      u.xvec  = h ? 8'd0 : (priv && !sup) ? 8'd8 : fline ? 8'd11 : 8'd4;
+      qwait   = 1'b0;
       pop     =  4'd0;
       more    = 1'b0;
       mv_used = 1'b0;

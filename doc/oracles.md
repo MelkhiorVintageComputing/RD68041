@@ -321,6 +321,48 @@ vector, SSW and FA. Where they differ:
   operand hook does not report a search (above). `core_mmu_tb` checks the descriptors'
   U and M bits in memory against Table 3-1 instead.
 
+### The FPU against UAE040 (M11)
+
+`make cosim` runs `m11_fpu_a` (159 instructions: every format in and out but packed,
+the arithmetic in the four rounding modes and three precisions, the conditionals,
+FMOVEM, FSAVE and FRESTORE of the idle frame) and `m11_fpu_b` (214: an unimplemented
+instruction, DZ, OPERR, INEX2, SNAN, overflow, underflow, BSUN, an FMOVE to an integer
+that does not fit) register for register, FP0-FP7, FPCR, FPSR and FPIAR included.
+`make cputest` runs the FPU corpus with the integer one: 11,136 FPU tests sampled
+(`CPUTEST_MAX=40` an instruction file) from 2,705,164, every one passing, 732 of them an
+unsupported data type compared with format $0. Where the two differ from the manual, or say what it does not:
+
+- **UAE040 runs encodings PRM 5 has no instruction for** -- An as an FP operand, Dn as
+  an extended, packed or double one, an FMOVEM of FP0-FP7 whose mode field does not say
+  what its \<ea\> is -- as instructions, or as unimplemented ones (format $2). UM 9.6.1
+  makes them F-line illegal (vector 11, format $0), which the core takes; `convert.py`
+  leaves them out and counts them (773,840 tests).
+- **An unsupported data type in opclass 000/010** is format $3 in UAE040, $0 on the part
+  (above, the M0 spike); compared as $0.
+- **FPCR's bits 3-0** are kept by UAE040; UM Figure 9-2 has them as zeros, which the core
+  reads -- **UAE040 wrong**; compared as zeros.
+- **A NaN's or an infinity's integer bit** differs at times (UAE040 converts a single NaN
+  to an extended one with it clear); UM Table 9-5 makes it a don't care, and
+  `core_cputest_tb` ignores it.
+- **The unimplemented-instruction frame** has E1 and U clear in UAE040; Table 9-16 has
+  both set, as the FPSP's `x_unimp` expects. UAE040's FSAVE frames are its own
+  throughout: `core_fpu_tb` checks the core's against Table 9-16 and `fpsp.h`
+  (`m11_fpu_c`), and the cosim programs discard theirs.
+- **FP0-FP7 after reset** are zeros in UAE040; UM 9.2.1 says NaNs, which the core has.
+  The cosim allows a reset NaN against UAE040's zero.
+- **Where the manual leaves a choice the core follows UAE040** (`doc/divergences.md`,
+  "Where the manual leaves the FPU a choice"): PREC = 11 as double; overflow and
+  underflow to a register taken at once, format $3; the condition codes and the INEX2
+  of a trapped underflow from the denormalised result; Table 9-12's value stored by an
+  overflowing FMOVE out, an integer saturated; a packed FMOVE out's (An)+ and -(An)
+  stepped before it traps.
+- **PRM 5 contradicts itself** on FSGLDIV's operands and on FMOVEM's control-register
+  modes (`doc/manual-contradictions.md` 7 and 8): the corpus decided both.
+
+**Not authoritative for:** the FSAVE frames' contents (above), FRESTORE (cputest has
+neither), the E1/E3 split, packed decimal (always vector 55 on the part, the FPSP's), or
+the transcendental instructions' results (the FPSP's, `make fpsp`).
+
 ## cputest: WinUAE's instruction tester, for the MC68040 -- M0 spike
 
 **What.** The vector generator that comes with WinUAE (`Inputs/ref/winuae/cputest/`),
@@ -361,7 +403,9 @@ when `core_cputest_tb` is written (M7).
   the FP frames -- $0 (F-line, pre-instruction), $2 (unimplemented instruction, with the
   generator's "EA valid" flag), $3 (post-instruction) -- were already decoded. Format $4
   (an MC68LC040's) does not occur: there is no LC040 corpus.
-- A `summary` command; `bench` refuses an FPU set until RD68041's bench defines its stream.
+- A `summary` command. Since M11 `bench` writes the FPU's registers into every test of
+  an FPU set, and `core_cputest_tb` deposits and compares them (below, "The FPU against
+  UAE040").
 
 ### The M0 spike
 
@@ -392,8 +436,9 @@ What the corpus says, checked against UM §9 on samples:
   FADD.S of a denormal: opclass 010) is recorded as vector 55 with a **format $3**
   (post-instruction) frame -- 118,096 tests, none with format $0. UM 9.6.2: opclass 000
   and 010 "cause a pre-instruction exception ... a format $0 (for the pre-instruction
-  exception)", format $3 only for opclass 011. To settle at M11, against the FPSP's
-  handler (which reads the frame) before following either.
+  exception)", format $3 only for opclass 011. Settled at M11 for the manual: the FPSP's
+  `x_unsupp` returns through either, and the core stacks format $0; `convert.py`
+  compares such a test with a format $0 frame, and counts them.
 - The FPU loops set FPCR's rounding precision to 11 in their all-ones pass, a value UM 9
   leaves undefined: those tests are the oracle's convention, not the manual's.
 

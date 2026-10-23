@@ -34,7 +34,7 @@ CROSS ?= m68k-linux-gnu-
 # The file list. Packages first -- Vivado, Questa and iverilog need one read
 # before its users. The generated files (from M5) are split the same way.
 # ---------------------------------------------------------------------------
-PKGS    := rtl/rd68041_pkg.sv
+PKGS    := rtl/rd68041_pkg.sv rtl/rd68041_fpu_pkg.sv
 GENPKG  := $(wildcard rtl/gen/*_pkg.sv)
 GENSRC  := $(filter-out $(GENPKG),$(wildcard rtl/gen/*.sv))
 SRCS := rtl/rd68041_sync.sv \
@@ -56,6 +56,8 @@ SRCS := rtl/rd68041_sync.sv \
         rtl/rd68041_shifter.sv \
         rtl/rd68041_divider.sv \
         rtl/rd68041_bitfield.sv \
+        rtl/rd68041_fpu_dp.sv \
+        rtl/rd68041_fpu.sv \
         rtl/rd68041_top.sv
 
 RTL  := $(PKGS) $(GENPKG) $(GENSRC) $(SRCS)
@@ -209,7 +211,7 @@ ucode-check: dirs
 # leaves no verdict -- killed, or crashed before writing one -- is a failure.
 # ---------------------------------------------------------------------------
 # The oracle sweeps' benches need a stream and have their own targets.
-TBS := $(filter-out core_cosim_tb core_vec_tb core_cputest_tb,$(patsubst sim/tb/%.sv,%,$(wildcard sim/tb/*_tb.sv)))
+TBS := $(filter-out core_cosim_tb core_vec_tb core_cputest_tb fpu_dp_tb,$(patsubst sim/tb/%.sv,%,$(wildcard sim/tb/*_tb.sv)))
 MODELS := $(wildcard sim/models/*.sv)
 SIMJOBS ?= 4
 # The sweeps (vectors, cputest) with the caches on: 1 write-through, 2 copyback.
@@ -217,7 +219,7 @@ CACHE ?= 0
 
 # The directed benches that run a program (core_exc_tb, core_fault_tb) take it
 # from build/programs/.
-SIMPROGS := m8_int m8_fault m9_cache m9_snoop m10_mmu
+SIMPROGS := m8_int m8_fault m9_cache m9_snoop m10_mmu m11_fpu_c
 
 sim: dirs $(patsubst %,$(BUILD)/programs/%.hex,$(SIMPROGS))
 	@rm -f $(addprefix $(BUILD)/,$(addsuffix .simres,$(TBS))); \
@@ -598,7 +600,8 @@ cputest-gen: dirs $(CTBUILD)/run/stamp $(CTBUILD)/fpu/stamp
 # The integer corpus on the core: convert.py bench samples it into
 # build/cputest/cputest.vec and core_cputest_tb replays it; every test is
 # passed, failed, not built or pending (sim/tb/core_cputest_tb.sv), each run in
-# its own mode. The FPU corpus is counted and skipped (M11). Not in `make check`.
+# its own mode, the FPU corpus with it (M11; left out and counted with FPU=0).
+# Not in `make check`.
 #
 #   CPUTEST_SEL=ADD,MOVE.L   only these instructions (a bare name takes every size)
 #   CPUTEST_MAX=N            at most N tests per instruction, sampled evenly; 0 all
@@ -623,6 +626,36 @@ cosim-mmu:
 	@$(MAKE) --no-print-directory cosim PROGS=m10_mmu
 	@$(MAKE) --no-print-directory vectors OP=pmmu040
 
+# ---------------------------------------------------------------------------
+# The FPU's data path against Berkeley TestFloat (doc/fpu.md, "Checked by")
+#
+# SoftFloat and TestFloat are built out of tree into build/testfloat/ from
+# Inputs/third_party/; tools/fpu/check_testfloat.py runs testfloat_gen, the
+# vectors through sim/tb/fpu_dp_tb.sv, and compares.
+#   TFLIMIT=n   vectors per function and rounding mode (default 3000; 0 all)
+# ---------------------------------------------------------------------------
+TFBUILD := $(BUILD)/testfloat
+TFLIMIT ?= 3000
+SF_DIR  := $(CURDIR)/Inputs/third_party/berkeley-softfloat-3
+TF_DIR  := $(CURDIR)/Inputs/third_party/berkeley-testfloat-3
+
+$(TFBUILD)/testfloat/testfloat_gen:
+	@mkdir -p $(TFBUILD)
+	@rm -rf $(TFBUILD)/softfloat $(TFBUILD)/testfloat
+	@cp -r $(SF_DIR)/build/Linux-x86_64-GCC $(TFBUILD)/softfloat
+	@cp -r $(TF_DIR)/build/Linux-x86_64-GCC $(TFBUILD)/testfloat
+	@$(MAKE) -s -C $(TFBUILD)/softfloat SOURCE_DIR=$(SF_DIR)/source > $(TFBUILD)/softfloat.log 2>&1
+	@$(MAKE) -s -C $(TFBUILD)/testfloat SOURCE_DIR=$(TF_DIR)/source SOFTFLOAT_DIR=$(SF_DIR) \
+	    SOFTFLOAT_LIB=$(CURDIR)/$(TFBUILD)/softfloat/softfloat.a testfloat_gen \
+	    > $(TFBUILD)/testfloat.log 2>&1
+	@echo "  testfloat: SoftFloat and testfloat_gen built"
+
+testfloat: dirs $(TFBUILD)/testfloat/testfloat_gen
+	@iverilog $(IVFLAGS) -o $(BUILD)/fpu_dp_tb.vvp -s fpu_dp_tb \
+	    $(PKGS) rtl/rd68041_fpu_dp.sv sim/tb/fpu_dp_tb.sv > $(BUILD)/fpu_dp_tb.build.log 2>&1 \
+	  || { grep -v $(NOTES) $(BUILD)/fpu_dp_tb.build.log; exit 1; }
+	@python3 tools/fpu/check_testfloat.py --limit $(TFLIMIT)
+
 # core_mmu_tb with the caches on: the tables write-through, then copyback.
 mmu-cache: dirs $(BUILD)/programs/m10_mmu.hex
 	@iverilog $(IVFLAGS) -I sim/tb -o $(BUILD)/core_mmu_tb.vvp -s core_mmu_tb \
@@ -638,7 +671,8 @@ mmu-cache: dirs $(BUILD)/programs/m10_mmu.hex
 cputest: dirs $(CTBUILD)/run/stamp
 	@python3 tools/cputest/convert.py bench $(CTBUILD) $(CTBUILD)/run/data/*/ \
 	    $(wildcard $(CTBUILD)/fpu/data/*/) --summary $(CTBUILD)/summary.txt \
-	    --select "$(CPUTEST_SEL)" --max $(CPUTEST_MAX) | sed 's/^/  /'
+	    --select "$(CPUTEST_SEL)" --max $(CPUTEST_MAX) $(if $(filter 0,$(FPU)),--no-fpu) \
+	  | sed 's/^/  /'
 	@iverilog $(IVFLAGS) -I sim/tb -o $(BUILD)/core_cputest_tb.vvp -s core_cputest_tb \
 	    $(RTL) $(MODELS) sim/tb/core_cputest_tb.sv > $(BUILD)/core_cputest_tb.build.log 2>&1 \
 	  || { grep -v $(NOTES) $(BUILD)/core_cputest_tb.build.log; exit 1; }

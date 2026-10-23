@@ -27,6 +27,7 @@ module core_cosim_tb;
 `include "rd68041_core_harness.svh"
 
   localparam int T_USP = 15, T_SR = 18, T_VBR = 19, T_CACR = 20, T_SFC = 21, T_DFC = 22;
+  localparam int T_FPCR = 31, T_FPSR = 32, T_FPIAR = 33, T_FP0 = 34;
 
   integer      trc;
   int unsigned nstep, nfield, k, nret, nfail;
@@ -76,6 +77,26 @@ module core_cosim_tb;
                nret, tpc, dut.u_core.vbr, dut.u_core.cacr, dut.u_core.sfc, dut.u_core.dfc,
                treg[T_VBR], treg[T_CACR], treg[T_SFC], treg[T_DFC]);
       bad = 1;
+    end
+    // The FPU (M11): FPCR, FPSR, FPIAR, FP0-FP7. A register reset and not yet
+    // written is a NaN here (UM 9.2.1) and zero in UAE040 (doc/oracles.md).
+    if (`TB_FPU != 0 && nfield > T_FP0 + 23) begin
+      if ({16'h0, dut.u_core.u_fpu.fpcr} !== treg[T_FPCR] || dut.u_core.u_fpu.fpsr !== treg[T_FPSR] ||
+          dut.u_core.u_fpu.fpiar !== treg[T_FPIAR]) begin
+        $display("  FAIL: boundary %0d (pc %h): FPCR FPSR FPIAR = %h %h %h, the trace's %h %h %h",
+                 nret, tpc, dut.u_core.u_fpu.fpcr, dut.u_core.u_fpu.fpsr, dut.u_core.u_fpu.fpiar,
+                 treg[T_FPCR], treg[T_FPSR], treg[T_FPIAR]);
+        bad = 1;
+      end
+      for (int i = 0; i < 8; i++) begin
+        logic [79:0] cv, tv;
+        cv = dut.u_core.u_fpu.fpr[i];
+        tv = {treg[T_FP0 + 3*i][15:0], treg[T_FP0 + 3*i + 1], treg[T_FP0 + 3*i + 2]};
+        if (cv !== tv && !(cv == {1'b0, 15'h7FFF, 64'hFFFF_FFFF_FFFF_FFFF} && tv == 80'h0)) begin
+          $display("  FAIL: boundary %0d (pc %h): FP%0d = %h, the trace's %h", nret, tpc, i, cv, tv);
+          bad = 1;
+        end
+      end
     end
     if (dut.u_core.sr !== treg[T_SR][15:0]) begin
       $display("  FAIL: boundary %0d (pc %h): SR = %h, the trace's %h", nret, tpc,

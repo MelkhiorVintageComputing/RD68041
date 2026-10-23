@@ -89,6 +89,7 @@ endtask
 // build yet, or a double bus fault.
 // ---------------------------------------------------------------------------
 bit          run_free = 1'b0;      // run_one: on until an exception, not one instruction
+int          run_more = 0;         // run_one: this many instructions after the first
 logic [31:0] dep_d [0:7];
 logic [31:0] dep_a [0:7];
 logic [15:0] dep_sr = 16'h2700;
@@ -141,19 +142,24 @@ function automatic logic [31:0] sp_of(input int which);
 endfunction
 
 task automatic run_one(input int limit, output bit ok, output bit built);
-  int t;
+  int t, more;
   bit stopped, done;
-  t = 0; stopped = 0; done = 0; ok = 0; built = 1;
+  t = 0; stopped = 0; done = 0; ok = 0; built = 1; more = run_more;
   while (!done && t < limit) begin
     @(negedge clk);
     t++;
     // Decode stops after the instruction's last micro-operation, or when it
     // takes an exception before issuing it: the handler is not run. With
     // run_free, the instructions after it run too, until one takes an
-    // exception (a trace the instruction turned on, say).
-    if (!stopped && ((!run_free && dut.u_core.ea_u.valid && dut.u_core.ea_u.last) ||
+    // exception (a trace the instruction turned on, say). With run_more, that
+    // many instructions after the first run too, each counted as its last
+    // micro-operation leaves EA.
+    if (!stopped && !run_free && more > 0 && dut.u_core.ea_u.valid && dut.u_core.ea_u.last &&
+        !(dut.u_core.x_flush && (dut.u_core.w_xv != 0 || dut.u_core.w_int))) begin
+      if (!dut.u_core.ea_stall) more--;
+    end else if (!stopped && ((!run_free && dut.u_core.ea_u.valid && dut.u_core.ea_u.last) ||
                      (dut.u_core.x_flush && (dut.u_core.w_xv != 0 || dut.u_core.w_int)) ||
-                     (!run_free && dut.u_core.x_flush))) begin
+                     (!run_free && more == 0 && dut.u_core.x_flush))) begin
       force dut.u_core.de_halted = 1'b1;
       stopped = 1;
     end

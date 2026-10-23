@@ -207,3 +207,21 @@ the cache for memory that took it before, so a bus error there is a failure of t
 memory system, which software does not recover from; the frame for it, its write-backs
 and the order against the queued writes are not built. A copyback write whose allocating
 line read faults is reported (above, "A write's bus error").
+
+## Where the manual leaves the FPU a choice
+
+The MC68040's FPU (UM 9) leaves several behaviours open. In each the core does what
+UAE040 does (it is the only oracle that runs FP code), so that a program behaves the same
+under both. A real part may do otherwise in any of them; none is a case the FPSP or
+IEEE-conforming code depends on.
+
+| UM | Left open | The core |
+|---|---|---|
+| Table 9-1 | PREC = 11, "Undefined" | rounds to double |
+| 9.7.4.2, 9.7.5.2 | overflow and underflow to a register: "either a pre-instruction or a post-instruction exception" | post-instruction, at once, format $3, T clear (E3, or E1 for FMOVE, FABS, FNEG) |
+| 9.7.4.2, 9.7.5.2 | the condition codes after a trapped overflow or underflow | those of the result the FPSP stores: Table 9-12's; the denormalised result |
+| 9.7.5 | INEX2 with an underflow | the denormalised result's inexactness |
+| 9.7.3.2, 9.7.4.2 | "an undefined result is stored" by FMOVE out on an operand error or an overflow | an integer saturated; a single or double gets Table 9-12's value |
+| 9.6.2 | (An)+ and -(An) of an FMOVE.P out, which always traps | stepped over the twelve bytes, the frame's EA the destination |
+
+**Checked by:** the cputest FPU corpus and `m11_fpu_b` (`make cputest`, `make cosim`).

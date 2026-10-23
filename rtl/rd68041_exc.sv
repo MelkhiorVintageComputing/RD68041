@@ -32,7 +32,7 @@ module rd68041_exc (
     input  logic   [7:0]  vec,         // the vector (an interrupt's comes from its acknowledge)
     input  logic          intr,        // an interrupt: acknowledge it first
     input  logic   [2:0]  level,       // ... at this level
-    input  logic   [3:0]  fmt,         // the frame's format: $0, $2 or $7
+    input  logic   [3:0]  fmt,         // the frame's format: $0, $2, $3 or $7
     input  logic  [15:0]  sr_old,      // the SR the frame holds
     input  logic  [15:0]  sr_new,      // the SR the throwaway frame holds
     input  logic  [31:0]  pc,          // the frame's PC
@@ -69,7 +69,7 @@ module rd68041_exc (
 
   // The frame's length in long words.
   function automatic logic [4:0] longs(input logic [3:0] f);
-    longs = (f == 4'h7) ? 5'd15 : (f == 4'h2) ? 5'd3 : 5'd2;
+    longs = (f == 4'h7) ? 5'd15 : (f == 4'h2 || f == 4'h3) ? 5'd3 : 5'd2;
   endfunction
 
   function automatic logic used(input logic [4:0] s, input logic i, input logic t,
@@ -100,7 +100,7 @@ module rd68041_exc (
     case (n)
       4'd0:    frame_lw = {srv, p[31:16]};
       4'd1:    frame_lw = {p[15:0], f, 2'b00, v, 2'b00};
-      4'd2:    frame_lw = (f == 4'h2) ? a : 32'h0;
+      4'd2:    frame_lw = (f == 4'h2 || f == 4'h3) ? a : 32'h0;
       4'd3:    frame_lw = {w, 16'h0};
       4'd5:    frame_lw = a;
       default: frame_lw = 32'h0;
