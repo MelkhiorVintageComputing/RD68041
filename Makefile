@@ -63,7 +63,8 @@ SRCS := rtl/rd68041_sync.sv \
 RTL  := $(PKGS) $(GENPKG) $(GENSRC) $(SRCS)
 VLT  := rtl/rd68041.vlt
 
-IVFLAGS := -g2012 -Wall -Wno-timescale -DTB_FPU=$(FPU)
+# TB_NOFPU: the benches leave out what reaches into the FPU, which FPU=0 does not build.
+IVFLAGS := -g2012 -Wall -Wno-timescale -DTB_FPU=$(FPU) $(if $(filter 0,$(FPU)),-DTB_NOFPU)
 
 .PHONY: all help dirs lint lint-source lint-iverilog lint-verilator lint-yosys \
         lint-quartus lint-questa quartus synth impl audit sim sim-bus check \
@@ -109,6 +110,8 @@ help:
 	@echo "                    cputest with the caches on (CACHE=1 write-through, 2 copyback),"
 	@echo "                    and core_mmu_tb with them on"
 	@echo "  make cosim-mmu    the MMU against UAE040: m10_mmu, and the pmmu040 vectors"
+	@echo "  make cosim-lc     the MC68LC040 (FPU=0) against UAE040 -L: the integer programs and"
+	@echo "                    m12_lc040; make vectors OP=lc040 FPU=0 its format \$$4 vectors"
 	@echo "  make cputest      the integer cputest corpus on the core (CPUTEST_SEL=ADD,MOVE.L"
 	@echo "                    CPUTEST_MAX=$(CPUTEST_MAX))"
 	@echo "  make qemu040      build QEMU (m68k-softmmu, build/qemu/) and the qemu040 trace plugin"
@@ -212,6 +215,10 @@ ucode-check: dirs
 # ---------------------------------------------------------------------------
 # The oracle sweeps' benches need a stream and have their own targets.
 TBS := $(filter-out core_cosim_tb core_vec_tb core_cputest_tb fpu_dp_tb,$(patsubst sim/tb/%.sv,%,$(wildcard sim/tb/*_tb.sv)))
+# core_fpu_tb is the FPU's state frames: not the MC68LC040's, which has none.
+ifeq ($(FPU),0)
+TBS := $(filter-out core_fpu_tb,$(TBS))
+endif
 MODELS := $(wildcard sim/models/*.sv)
 SIMJOBS ?= 4
 # The sweeps (vectors, cputest) with the caches on: 1 write-through, 2 copyback.
@@ -219,9 +226,9 @@ CACHE ?= 0
 
 # The directed benches that run a program (core_exc_tb, core_fault_tb) take it
 # from build/programs/.
-SIMPROGS := m8_int m8_fault m9_cache m9_snoop m10_mmu m11_fpu_c
+SIMPROGS := m8_int m8_fault m9_cache m9_snoop m10_mmu m11_fpu_c m12_lc040_b
 
-sim: dirs $(patsubst %,$(BUILD)/programs/%.hex,$(SIMPROGS))
+sim: dirs $(patsubst %,build/programs/%.hex,$(SIMPROGS))
 	@rm -f $(addprefix $(BUILD)/,$(addsuffix .simres,$(TBS))); \
 	run_tb() { \
 	  tb=$$1; r=$(BUILD)/$$tb.simres; \
@@ -256,7 +263,8 @@ sim: dirs $(patsubst %,$(BUILD)/programs/%.hex,$(SIMPROGS))
 # boundary (UAE040: doc/oracles.md). PROGS defaults to every program but the
 # directed benches' (SIMPROGS), which no oracle runs.
 # ---------------------------------------------------------------------------
-PROGS   ?= m6_basic m7_a m7_b m7_c m8_exc m9_icache m9_dcache m9_move16
+PROGS   ?= m6_basic m7_a m7_b m7_c m8_exc m9_icache m9_dcache m9_move16 \
+           m11_fpu_a m11_fpu_b m12_fpu_ind
 
 # Keep the intermediate files: the ELF is what objdump reads when a run fails.
 .SECONDARY:
@@ -277,16 +285,24 @@ $(PBUILD)/%.bin: $(PBUILD)/%.elf
 	@$(CROSS)objcopy -O binary $< $@
 
 # (O40BUILD is defined with the UAE040 targets below, after this rule is read.)
-$(PBUILD)/%.trc: $(PBUILD)/%.bin $(BUILD)/uae040/uae040_trace
-	@$(BUILD)/uae040/uae040_trace -m 64 $< $(PSTEPS) > $@ 2> $(PBUILD)/$*.trace.log \
+# With FPU=0 the oracle is an MC68LC040 (-L), and its traces are kept apart.
+# The oracle is always build/uae040's, whatever BUILD is.
+O40TRACE := build/uae040/uae040_trace
+PTRC     := $(PBUILD)$(if $(filter 0,$(FPU)),/lc040)
+$(PBUILD)/%.trc: $(PBUILD)/%.bin $(O40TRACE)
+	@$(O40TRACE) -m 64 $< $(PSTEPS) > $@ 2> $(PBUILD)/$*.trace.log \
 	  || { cat $(PBUILD)/$*.trace.log; exit 1; }
+$(PBUILD)/lc040/%.trc: $(PBUILD)/%.bin $(O40TRACE)
+	@mkdir -p $(PBUILD)/lc040
+	@$(O40TRACE) -L -m 64 $< $(PSTEPS) > $@ 2> $(PBUILD)/lc040/$*.trace.log \
+	  || { cat $(PBUILD)/lc040/$*.trace.log; exit 1; }
 
-cosim: dirs $(patsubst %,$(PBUILD)/%.hex,$(PROGS)) $(patsubst %,$(PBUILD)/%.trc,$(PROGS))
+cosim: dirs $(patsubst %,$(PBUILD)/%.hex,$(PROGS)) $(patsubst %,$(PTRC)/%.trc,$(PROGS))
 	@iverilog $(IVFLAGS) -I sim/tb -o $(BUILD)/core_cosim_tb.vvp -s core_cosim_tb \
 	    $(RTL) $(MODELS) sim/tb/core_cosim_tb.sv > $(BUILD)/core_cosim_tb.build.log 2>&1 \
 	  || { grep -v $(NOTES) $(BUILD)/core_cosim_tb.build.log; exit 1; }
 	@ok=1; for p in $(PROGS); do \
-	  vvp $(BUILD)/core_cosim_tb.vvp +image=$(PBUILD)/$$p.hex +trace=$(PBUILD)/$$p.trc \
+	  vvp $(BUILD)/core_cosim_tb.vvp +image=$(PBUILD)/$$p.hex +trace=$(PTRC)/$$p.trc \
 	      > $(BUILD)/cosim-$$p.log 2>&1; \
 	  grep -E '^  FAIL' $(BUILD)/cosim-$$p.log | head -8; \
 	  if grep -q '^PASS' $(BUILD)/cosim-$$p.log; then \
@@ -513,6 +529,9 @@ uae040-smoke: $(O40BUILD)/uae040_trace $(O40SMOKE)/smoke040.bin
 #   make vectors               OP=$(VECGROUPS)
 #   make vectors-all           every group
 #   make ea                    every addressing mode, through LEA and MOVE.L
+#   make vectors OP=lc040 FPU=0   the MC68LC040's format $4 frames (M12): the
+#                              oracle run as one (-L), the core built as one;
+#                              FPU=0 vectors-all is every group that way
 #
 # Not in `make check`.
 # ---------------------------------------------------------------------------
@@ -525,7 +544,7 @@ $(O40BUILD)/vectors_gen: tools/vectors/gen.c $(O40SRC)/uae040.h $(O40BUILD)/libu
 
 .PHONY: vectors vectors-all ea
 vectors: dirs $(O40BUILD)/vectors_gen
-	@$(O40BUILD)/vectors_gen $(OP) > $(BUILD)/vectors.hex 2> $(BUILD)/vectors-gen.log \
+	@$(O40BUILD)/vectors_gen $(if $(filter 0,$(FPU)),-L) $(OP) > $(BUILD)/vectors.hex 2> $(BUILD)/vectors-gen.log \
 	  || { cat $(BUILD)/vectors-gen.log; exit 1; }
 	@sed 's/^/  /' $(BUILD)/vectors-gen.log
 	@iverilog $(IVFLAGS) -I sim/tb -o $(BUILD)/core_vec_tb.vvp -s core_vec_tb \
@@ -619,6 +638,13 @@ cache:
 	  $(MAKE) --no-print-directory vectors-all CACHE=$$c || exit 1; done
 	@for c in 1 2; do echo "== cputest CACHE=$$c"; \
 	  $(MAKE) --no-print-directory cputest CACHE=$$c || exit 1; done
+
+# The MC68LC040 against UAE040 -L (M12): the core built with FPU=0, the
+# integer programs and m12_lc040, every FP instruction a format $4 frame.
+LCPROGS ?= m6_basic m7_a m7_b m7_c m8_exc m9_icache m9_dcache m9_move16 m10_mmu m12_lc040
+.PHONY: cosim-lc
+cosim-lc:
+	@$(MAKE) --no-print-directory cosim FPU=0 BUILD=$(BUILD)/lc040 PROGS="$(LCPROGS)"
 
 # The MMU against UAE040: m10_mmu register for register (the program core_mmu_tb
 # runs), and the pmmu040 vector group.

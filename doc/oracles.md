@@ -363,6 +363,54 @@ unsupported data type compared with format $0. Where the two differ from the man
 neither), the E1/E3 split, packed decimal (always vector 55 on the part, the FPSP's), or
 the transcendental instructions' results (the FPSP's, `make fpsp`).
 
+### The MC68LC040 against UAE040 -L (M12)
+
+`make cosim-lc` builds the core with `FPU = 0` and runs the integer programs and
+`m12_lc040` (535 instructions: every FP class through every addressing mode that reaches
+the address calculation, from user mode onto the supervisor stack, a privileged FSAVE in
+user mode, a traced FP instruction) against UAE040 `-L`, register for register, the
+handlers keeping the format $4 frame in registers. `make vectors OP=lc040 FPU=0` sweeps
+the same with random states: 1,610 vectors, the frame's writes compared, all passing;
+`make vectors-all FPU=0` runs every group that way, with an RTE of a format $4 frame in
+`traps`. The two agree that every FP instruction takes vector 11 with the eight-word frame
+(UM A.5.2), the PC the next instruction's, changing no register -- An of (An)+ and -(An)
+included -- and that a privilege violation comes first. The address field, which UM
+A.5.1 says only is "the calculated effective address of the operand ... using the
+addressing mode in which the effective address is calculated", is in UAE040:
+
+- **0** for a register or an immediate (as UM A.5.1 says), and for FBcc, FTRAPcc,
+  FMOVECR and a register-to-register operation, which have no \<ea\>;
+- **the operand's address** for the general operations, FMOVE out and FScc: An for
+  (An)+, An less the operand's size for -(An) (12 for an extended or packed one; 2 for a
+  byte through A7);
+- **An itself** for -(An) of FMOVEM (FP0-FP7 or the control registers, one of them
+  included), FSAVE and FRESTORE: where the first register would go, not the operand's
+  lowest byte.
+
+The core does as UAE040 there; the last is the manual's silence decided by the oracle
+(`doc/divergences.md`). Where they differ, `core_lc040_tb` (`m12_lc040_b`) checks the
+core against the manual:
+
+- **The encodings PRM 5 has no FP instruction for** -- An as an operand, Dn as an
+  extended one, an FMOVEM whose mode field does not match its \<ea\>, an opmode PRM 5
+  does not have -- are format $4 in UAE040 `-L`. UM A.5.1 gives format $4 to "all legal
+  MC68040 and MC68881/MC68882 floating-point instructions" and distinguishes them "from
+  other unimplemented F-line instructions": the core takes them as the MC68040 does, an
+  F-line illegal instruction, format $0 -- **UAE040 wrong**.
+- **FDBcc**'s address field is a number UAE040 makes up ($0001FFFC for `FDBNE D5`); its
+  mode is a register direct one, 0 by UM A.5.1 -- **UAE040 wrong**.
+- **FMOVE.P FPn,-(An){Dn}**, a dynamic k factor, has An in UAE040, where the static
+  k factor's has An - 12 -- the size of opclass 010's format 7, FMOVECR, which has none;
+  the operand is twelve bytes either way, An - 12 in the core -- **UAE040 wrong**.
+- **RTE of a format $4 frame** is taken by UAE040 as an MC68040 too. UM A.5.2: "The
+  MC68040 cannot accept the eight-word unimplemented stack frame", and UM 8.4's list
+  for the MC68040 has no $4: a format error, vector 14, in the core -- **UAE040 wrong**.
+  The vector group has that RTE only with `-L`.
+
+**Not authoritative for:** anything the MC68040 and the MC68LC040 share (the sections
+above), or where the format $4 exception falls among the access errors of the writes
+before it (UM A.5.1, step 2): UAE040 has no store buffer, and neither program faults.
+
 ## cputest: WinUAE's instruction tester, for the MC68040 -- M0 spike
 
 **What.** The vector generator that comes with WinUAE (`Inputs/ref/winuae/cputest/`),
@@ -455,7 +503,7 @@ a larger map is the first thing to try at M7.
 - the MC68LC040: there is no LC040 corpus, and the integer corpus's ILLEGAL set (a 68040
   with no FPU) gives FP opcodes plain F-line format $0 frames, not UM A.5's format $4 --
   that is cputest's model of an FPU-less part, not an LC040's. UAE040 `-L` is the oracle
-  for format $4.
+  for format $4 (above, "The MC68LC040 against UAE040 -L").
 
 ---
 

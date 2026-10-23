@@ -48,7 +48,10 @@ FRAMES = {
     ], 'UM 8.4.4'),
     0x4: ('eight-word (MC68LC040 only)', COMMON + [
         (0x08, 4, 'EA',  'the calculated <ea> of the FP instruction, $0 for '
-                         'immediate and register direct'),
+                         'immediate and register direct (and for no <ea>); '
+                         "-(An)'s An less the operand's size, but An itself for "
+                         'FMOVEM, FSAVE, FRESTORE (`doc/divergences.md`); An '
+                         'never stepped'),
         (0x0C, 4, 'PCF', 'the PC of the faulted FP instruction'),
     ], 'UM A.5.1, A.5.2'),
     0x7: ('access error', COMMON + [

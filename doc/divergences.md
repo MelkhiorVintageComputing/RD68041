@@ -225,3 +225,20 @@ IEEE-conforming code depends on.
 | 9.6.2 | (An)+ and -(An) of an FMOVE.P out, which always traps | stepped over the twelve bytes, the frame's EA the destination |
 
 **Checked by:** the cputest FPU corpus and `m11_fpu_b` (`make cputest`, `make cosim`).
+
+## Where the manual leaves the MC68LC040 a choice
+
+UM A.5.1 says what the format $4 frame holds, not how every mode's address is formed,
+and it says nothing of when a part ends a "legal" FP instruction's decode. The core does
+what UAE040 `-L` does where the manual is silent, and what the manual says where UAE040
+does otherwise (`doc/oracles.md`, "The MC68LC040 against UAE040 -L"):
+
+| UM A.5.1 | Left open | The core |
+|---|---|---|
+| "the calculated effective address of the operand" | -(An) | the operand's address, An less its size; for FMOVEM, the control registers' FMOVE(M), FSAVE and FRESTORE, An itself |
+| | (An)+ and -(An) | An not stepped |
+| | no \<ea\> (FBcc, FTRAPcc, FMOVECR, register to register, FDBcc) | 0, as for a register or an immediate |
+| "all legal ... floating-point instructions" | the encodings PRM 5 has no instruction for | F-line illegal, format $0, as on the MC68040 (UM 9.6.1) |
+| | a privileged one (FSAVE, FRESTORE) in user mode | a privilege violation, vector 8, first |
+
+**Checked by:** `make cosim-lc`, `make vectors OP=lc040 FPU=0` and `core_lc040_tb`.

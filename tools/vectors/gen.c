@@ -10,7 +10,10 @@
  * several pseudo-random starting states, runs each through the oracle as an
  * MC68040, one instruction per test, and prints what came out.
  *
- *     build/uae040/vectors_gen <group>...      # or `all`, or `list`
+ *     build/uae040/vectors_gen [-L] <group>...      # or `all`, or `list`
+ *
+ * With -L the oracle is an MC68LC040 (no FPU), and `all` takes the lc040
+ * group too, which only it has.
  *
  * It links the oracle, which is GPL code, so this file is GPL too.
  *
@@ -21,8 +24,8 @@
  *
  * The groups are RD68031's integer groups, less the MC68030's own (CALLM/RTM,
  * the MC68030 CACR and CAAR, PMOVE and the 030 MMU) and less the F line, which
- * is the MC68040's FPU, MMU and MOVE16 space; M9-M11 add move16, cinv_cpush,
- * pmmu040 and fpu. MOVEC sweeps the non-MMU control registers. The `ea` group
+ * is the MC68040's FPU, MMU and MOVE16 space; M9-M12 add move16, cinv_cpush,
+ * pmmu040 and lc040 (the FPU's sweep is the cputest corpus, M11). MOVEC sweeps the non-MMU control registers. The `ea` group
  * is RD68031's `make ea` (uae030_ea there) folded in: every addressing mode and
  * every shape of extension word, through LEA <ea>,A0 and MOVE.L <ea>,D0, from
  * fixed registers and a data block of recognisable pointers.
@@ -132,6 +135,7 @@ struct test {
 };
 
 static int cur_group;
+static int lc;              /* -L: the oracle is an MC68LC040 */
 #define MAXTESTS 400000
 static struct test *tests;
 static int          ntests;
@@ -1018,6 +1022,11 @@ static void g_traps(void)
     rte_frame(0x2700, 0x00001010u, 0xA000);   /* and a format error: $A is
                                                  an MC68020/30 frame, not an
                                                  MC68040 one (UM 8.4)        */
+    /* $4, the MC68LC040's (UM A.5.2), its EA and faulted PC zero. On the
+     * MC68040 it is a format error (UM 8.4, A.5.2: "the MC68040 cannot
+     * accept the eight-word unimplemented stack frame"), and UAE040 takes it
+     * there as well (doc/oracles.md): core_lc040_tb checks that one. */
+    if (lc) rte_frame(0x2700, 0x00001010u, 0x402C);
     plain2(0x46FC, 0x2700, 2, 0);                              /* MOVE #imm,SR */
     plain(0x40C0 | 3, 2, 0);                                   /* MOVE SR,D3   */
     plain2(0x027C, 0xF8FF, 2, 0);                              /* ANDI #x,SR   */
@@ -1520,6 +1529,135 @@ static void g_pmmu040(void)
     user_mode(0xF56Fu, 0, 0);
 }
 
+/* The MC68LC040 (UM A.5; run with -L): every FP instruction is vector 11
+ * with an eight-word format $4 frame -- the next instruction's PC, the
+ * calculated <ea>, the FP instruction's own PC -- and changes nothing else,
+ * An of (An)+ and -(An) included. Every class, through the modes that reach
+ * the address calculation: the general operations (built on the MC68040 or
+ * not) from every format, FMOVECR, FMOVE out, the control registers, FMOVEM,
+ * FScc, FTRAPcc, FBcc, FSAVE and FRESTORE, at the supervisor level and in
+ * user mode (onto the supervisor stack; FSAVE and FRESTORE a privilege
+ * violation). Left out, and core_lc040_tb's: the encodings PRM 5 has no
+ * instruction for, FDBcc, and FMOVE.P with a dynamic k factor, where UAE040
+ * stacks what the manual does not (doc/oracles.md). */
+static const struct eamode EA_LC[] = {       /* what the address calculation reaches */
+    { 2, 1, 0, { 0, 0 }, 0 },                /* (An)    */
+    { 3, 2, 0, { 0, 0 }, 0 },                /* (An)+   */
+    { 4, 3, 0, { 0, 0 }, 0 },                /* -(An)   */
+    { 3, 7, 0, { 0, 0 }, 0 },                /* (A7)+   */
+    { 4, 7, 0, { 0, 0 }, 0 },                /* -(A7): a byte steps two */
+    { 5, 6, 1, { D16AN, 0 }, 0 },            /* (d16,An)*/
+    { 7, 0, 1, { ABSW, 0 }, 0 },             /* (xxx).W */
+    { 7, 1, 2, { 0x0000, ABSW }, 0 },        /* (xxx).L */
+    { 6, 6, 2, { FULLBD, D16AN }, 0 },       /* (bd,An), full format */
+    { 6, 6, 2, { FULLBD | 1, D16AN }, 0 },   /* ([bd,An]): the pointer read */
+};
+#define N_EA_LC ((int)(sizeof EA_LC / sizeof EA_LC[0]))
+#define LC_N 3      /* starting states per encoding */
+
+/* The general operation cmd from op[5:0]'s <ea>: memory, (d16,PC), Dn for the
+ * formats that have it, an immediate where it fits in the test's six words. */
+static void lc_gen(unsigned int cmd, int fm, int out)
+{
+    static const int imm_words[8] = { 2, 2, 6, 6, 1, 4, 1, 6 };
+    unsigned int w[6];
+    int j, n;
+    int dn_ok = (fm == 0 || fm == 1 || fm == 4 || fm == 6);
+    sweep(0xF200u, EA_LC, N_EA_LC, 1, &cmd, LC_N, 1);
+    if (dn_ok) sweep(0xF200u, EA_ALL, 2, 1, &cmd, LC_N, 1);            /* Dn */
+    if (out) return;
+    sweep_pc(0xF200u, 1, &cmd, LC_N, 1);
+    if (2 + imm_words[fm] <= 6) {                                       /* #imm */
+        memset(w, 0, sizeof w);
+        n = 0;
+        w[n++] = 0xF23Cu;
+        w[n++] = cmd;
+        for (j = 0; j < imm_words[fm]; j++) w[n++] = rnd() & 0xFFFFu;
+        if (fm == 6) w[2] &= 0x00FFu;
+        emitn(LC_N, n, w, 0, 1);
+    }
+}
+
+static void g_lc040(void)
+{
+    static const unsigned int opm[4] = { 0x22, 0x00, 0x0E, 0x38 };  /* FADD FMOVE FSIN FCMP */
+    unsigned int pre[1], w[6];
+    int fm, i, c, l;
+
+    /* Register to register, an unimplemented one among them, and FMOVECR. */
+    for (i = 0; i < 4; i++) plain2(0xF200u, 0x0080u | (2u << 10) | opm[i], LC_N, 1);
+    plain2(0xF200u, 0x5C00u | 0x32u, LC_N, 1);
+    /* <ea>,FPn in every format; FMOVE FPn,<ea> in every one but packed with
+     * a dynamic k factor. */
+    for (fm = 0; fm < 7; fm++)
+        for (i = 0; i < 4; i += (fm == 3) ? 1 : 2)
+            lc_gen(0x4000u | (unsigned)(fm << 10) | (3u << 7) | opm[i], fm, 0);
+    for (fm = 0; fm < 7; fm++)
+        lc_gen(0x6000u | (unsigned)(fm << 10) | (1u << 7) | ((fm == 3) ? 0x7Eu : 0u), fm, 1);
+    /* The control registers: one (Dn; An for FPIAR alone), or several. */
+    for (l = 1; l < 8; l++)
+        for (i = 0; i < 2; i++) {
+            pre[0] = (i ? 0xA000u : 0x8000u) | (unsigned)(l << 10);
+            sweep(0xF200u, EA_LC, 8, 1, pre, LC_N, 1);
+            if (l == 1 || l == 2 || l == 4) sweep(0xF200u, EA_ALL, 1, 1, pre, LC_N, 1);
+            if (l == 1) sweep(0xF208u, EA_ALL, 1, 1, pre, LC_N, 1);     /* An */
+            if (!i && (l & 1) + ((l >> 1) & 1) + ((l >> 2) & 1) <= 2) {  /* six words */
+                memset(w, 0, sizeof w);
+                w[0] = 0xF23Cu; w[1] = pre[0];
+                for (c = 0; c < 2 * ((l & 1) + ((l >> 1) & 1) + ((l >> 2) & 1)); c++)
+                    w[2 + c] = rnd() & 0xFFFFu;
+                emitn(LC_N, 2 + c, w, 0, 1);
+            }
+        }
+    /* FMOVEM of FP0-FP7, static and dynamic: to -(An) or a control mode,
+     * from (An)+ or one. */
+    for (i = 0; i < 2; i++) {
+        pre[0] = 0xE000u | (unsigned)(i << 11) | (i ? 0x0010u : 0x00F1u);   /* -(An) */
+        sweep(0xF200u, &EA_LC[2], 1, 1, pre, LC_N, 1);
+        sweep(0xF200u, &EA_LC[4], 1, 1, pre, LC_N, 1);
+        pre[0] = 0xF000u | (unsigned)(i << 11) | (i ? 0x0020u : 0x0F0Fu);   /* control */
+        sweep(0xF200u, EA_CTL, N_EA_CTL, 1, pre, LC_N, 1);
+        pre[0] = 0xD000u | (unsigned)(i << 11) | (i ? 0x0030u : 0x8001u);   /* (An)+, control */
+        sweep(0xF200u, &EA_LC[1], 1, 1, pre, LC_N, 1);
+        sweep(0xF200u, EA_CTL, N_EA_CTL, 1, pre, LC_N, 1);
+    }
+    /* FScc, FTRAPcc (no operand, a word, a long word), FBcc (a word, a long
+     * word displacement): the predicate does not matter, nothing evaluates it. */
+    for (c = 0; c < 32; c += 7) {
+        pre[0] = (unsigned)c;
+        sweep(0xF240u, EA_LC, N_EA_LC, 1, pre, LC_N, 1);
+        sweep(0xF240u, EA_ALL, 1, 1, pre, LC_N, 1);
+        plain2(0xF27Cu, (unsigned)c, LC_N, 1);
+        memset(w, 0, sizeof w);
+        w[0] = 0xF27Au; w[1] = (unsigned)c; w[2] = 0x1234u;
+        emitn(LC_N, 3, w, 0, 1);
+        w[0] = 0xF27Bu; w[3] = 0x5678u;
+        emitn(LC_N, 4, w, 0, 1);
+        plain2(0xF280u | (unsigned)c, 0x0010u, LC_N, 1);
+        memset(w, 0, sizeof w);
+        w[0] = 0xF2C0u | (unsigned)c; w[1] = 0x0000u; w[2] = 0x0020u;
+        emitn(LC_N, 3, w, 0, 1);
+    }
+    plain2(0xF280u, 0x0000u, LC_N, 1);                                  /* FNOP */
+    /* FSAVE to -(An) or a control mode, FRESTORE from (An)+ or one;
+     * privileged. */
+    sweep(0xF300u, &EA_LC[2], 1, 0, NULL, LC_N, 1);
+    sweep(0xF300u, &EA_LC[4], 1, 0, NULL, LC_N, 1);
+    sweep(0xF300u, EA_CTL, N_EA_CTL, 0, NULL, LC_N, 1);
+    sweep(0xF340u, &EA_LC[1], 1, 0, NULL, LC_N, 1);
+    sweep(0xF340u, &EA_LC[3], 1, 0, NULL, LC_N, 1);
+    sweep(0xF340u, EA_CTL, N_EA_CTL, 0, NULL, LC_N, 1);
+    /* In user mode: onto the supervisor stack -- and the privilege
+     * violation for FSAVE and FRESTORE, which comes first. */
+    user_mode(0xF200u, 0x0880u | 0x22u, 1);
+    user_mode(0xF210u, 0x4800u | 0x22u, 1);
+    user_mode(0xF21Au, 0x4400u, 1);
+    user_mode(0xF240u, 0x0001u, 1);
+    user_mode(0xF280u, 0x0000u, 1);
+    user_mode(0xF310u, 0, 0);
+    user_mode(0xF358u, 0, 0);
+}
+
 /* ------------------------------------------------------------------ */
 /* The catalogue                                                       */
 /* ------------------------------------------------------------------ */
@@ -1559,6 +1697,7 @@ static const struct group GROUPS[] = {
     { "ea",      g_ea      },
     { "cinv_cpush", g_cinv_cpush },
     { "pmmu040", g_pmmu040 },
+    { "lc040",   g_lc040   },     /* -L only */
 };
 #define NGROUPS ((int)(sizeof GROUPS / sizeof GROUPS[0]))
 
@@ -1835,7 +1974,7 @@ static int run_child(int first)
     if (pid == 0) {
         int done, j;
         /* The data cache off: CACR is zero in every test anyway (UM 4.2). */
-        uae040_init(MEMSIZE, 0, 1);
+        uae040_init(MEMSIZE, 0, !lc);
         uae040_set_alias(ALIAS);
         wr32(0, STACK);
         wr32(4, PROG_BASE);
@@ -1873,13 +2012,25 @@ int main(int argc, char **argv)
         for (i = 0; i < NGROUPS; i++) printf("%s\n", GROUPS[i].name);
         return 0;
     }
+    if (argc >= 2 && !strcmp(argv[1], "-L")) {
+        lc = 1;
+        argv++;
+        argc--;
+    }
     rng_state = 0x13572468u;
     if (argc < 2 || !strcmp(argv[1], "all")) {
-        for (i = 0; i < NGROUPS; i++) { cur_group = i; GROUPS[i].build(); }
+        for (i = 0; i < NGROUPS; i++)
+            if (lc || GROUPS[i].build != g_lc040) { cur_group = i; GROUPS[i].build(); }
     } else {
         for (j = 1; j < argc; j++) {
             for (i = 0; i < NGROUPS; i++)
-                if (!strcmp(argv[j], GROUPS[i].name)) { cur_group = i; GROUPS[i].build(); break; }
+                if (!strcmp(argv[j], GROUPS[i].name)) {
+                    if (GROUPS[i].build == g_lc040 && !lc) {
+                        fprintf(stderr, "vectors: lc040 is an MC68LC040's group: -L\n");
+                        return 1;
+                    }
+                    cur_group = i; GROUPS[i].build(); break;
+                }
             if (i == NGROUPS) {
                 fprintf(stderr, "vectors: no group %s. There is:", argv[j]);
                 for (i = 0; i < NGROUPS; i++) fprintf(stderr, " %s", GROUPS[i].name);

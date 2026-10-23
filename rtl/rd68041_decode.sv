@@ -433,6 +433,10 @@ module rd68041_decode #(
     u.crw    = 1'b0; \
     u.trap   = 1'b0; \
     u.last   = 1'b0; \
+    u.xvec   = 8'd0; \
+    u.xnext  = 1'b0; \
+    u.fpk    = rd68041_fpu_pkg::FK_NONE; \
+    u.fchk   = 1'b0; \
   end
 `define DEC_SRC(SZ, TO_A) begin \
     if (sm <= 3'd1) begin \
@@ -497,7 +501,7 @@ module rd68041_decode #(
       4'b0110, 4'b0111, 4'b1010: uses_ea = 1'b0;
       // The FP instructions with an <ea> in op[5:0] (not FBcc, FDBcc, FTRAPcc,
       // nor a register-to-register operation or FMOVECR).
-      4'b1111: uses_ea = (FPU != 0) && (op[11:9] == 3'b001) &&
+      4'b1111: uses_ea = (op[11:9] == 3'b001) &&
                          ((op[8:6] == 3'b000 && w0[15:13] != 3'b000 &&
                            !(w0[15:13] == 3'b010 && w0[12:10] == 3'b111)) ||
                           (op[8:6] == 3'b001 && !(sm == 3'd1 || (sm == 3'd7 && sr >= 3'd2))) ||
@@ -1749,8 +1753,9 @@ module rd68041_decode #(
 
       // 1111: the F-line. CINV, CPUSH, MOVE16, PFLUSH ($F500-$F51F) and
       // PTEST ($F548, $F568), privileged; the floating-point instructions
-      // (M11) are not built; the rest, a scope of 00 for CINV and CPUSH
-      // among it, is vector 11 (UM 9.4).
+      // (M11; on the MC68LC040 each is vector 11 with a format $4 frame, M12);
+      // the rest, a scope of 00 for CINV and CPUSH among it, is vector 11
+      // (UM 9.4).
       default: begin
         u.len = 5'd2;
         if (op[11:8] == 4'h4 && op[4:3] != 2'b00) begin
@@ -1818,7 +1823,7 @@ module rd68041_decode #(
               u.wr = 1'b1; u.wr_reg = areg((sq == 5'd3 || !inc_a) ? rb2 : ra);
             end
           endcase
-        end else if (op[11:9] == 3'b001 && FPU != 0) begin
+        end else if (op[11:9] == 3'b001) begin
           // The floating-point instructions (cpID 1; PRM 5, 8; doc/fpu.md).
           // c is the command word (types 000 and 001), w[0].
           logic [15:0] c;
@@ -1852,6 +1857,9 @@ module rd68041_decode #(
                   // FPm,FPn: the operation alone.
                   need = 4'd1; pop = 4'd1; u.len = 5'd4;
                   u.fpk = rd68041_fpu_pkg::FK_OP;
+                  // An opmode PRM 5 does not have: the FPU's F-line, here
+                  // the MC68LC040's (below).
+                  if (FPU == 0 && !rd68041_fpu_pkg::legal_op(c[6:0])) fline = 1'b1;
                 end
                 3'b010: begin
                   if (fm == 3'd7) begin
@@ -1864,6 +1872,7 @@ module rd68041_decode #(
                     // <ea>,FPn: the operand's long words, the last with the
                     // operation; -(An) the last first.
                     if (sm == 3'd1 || (isdn && nl != 3'd1) || !ok_mode(sm, sr)) fline = 1'b1;
+                    if (FPU == 0 && !rd68041_fpu_pkg::legal_op(c[6:0])) fline = 1'b1;
                     nx = isimm ? ((nl == 3'd1) ? ((fm == 3'd6 || fm == 3'd4) ? 4'd1 : 4'd2)
                                                : {nl, 1'b0})
                                : ea_len(sm, sr, osz, ew(w, 1));
@@ -2105,6 +2114,54 @@ module rd68041_decode #(
             end
             default: fline = 1'b1;
           endcase
+          // The MC68LC040 (UM A.5.1): a legal FP instruction is decoded for
+          // its length and its <ea> only, which is calculated and neither
+          // accessed nor stepped, and it is vector 11 once it is done (the
+          // PC the next instruction's), with a format $4 frame holding the
+          // address and the instruction's own PC. The address is the
+          // operand's, -(An)'s An less the operand's size; FMOVEM's, the
+          // control registers', FSAVE's and FRESTORE's An itself; 0 for a
+          // register or an immediate (UM A.5.1) and for those with no <ea>.
+          // As UAE040 -L has them (doc/oracles.md): A.5.1 says only that it
+          // is the operand's, "using the addressing mode".
+          if (FPU == 0) begin
+            logic        f4ea;
+            logic  [3:0] f4sz;
+            f4ea = 1'b0;
+            f4sz = 4'd0;
+            case (op[8:6])
+              3'b000: begin
+                f4ea = (ocl != 3'b000) && !(ocl == 3'b010 && fm == 3'd7);
+                if (ocl == 3'b010 || ocl == 3'b011)
+                  f4sz = (fm == 3'd2 || fm == 3'd3 || fm == 3'd7) ? 4'd12 :
+                         (fm == 3'd5) ? 4'd8 : (fm == 3'd4) ? 4'd2 :
+                         (fm == 3'd6) ? ((sr == 3'd7) ? 4'd2 : 4'd1) : 4'd4;
+              end
+              3'b001: begin
+                f4ea = !(sm == 3'd1 || (sm == 3'd7 && sr >= 3'd2));
+                f4sz = (sr == 3'd7) ? 4'd2 : 4'd1;
+              end
+              3'b100, 3'b101: f4ea = 1'b1;
+              default: ;
+            endcase
+            u = '0;
+            u.valid = 1'b1;
+            u.last  = 1'b1;
+            u.pc    = pc;
+            u.len   = 5'(2 + 2*need);
+            u.xvec  = 8'd11;
+            u.xnext = 1'b1;
+            if (f4ea && sm >= 3'd2 && !isimm) begin
+              `DEC_EA(ea_s, rd68041_pkg::SZ_L)
+              u.ea_upd = rd68041_pkg::U_NONE;
+              if (pre) u.ea_disp = -{28'h0, f4sz};
+              else if (post) u.ea_disp = 32'h0;
+            end
+            pop     = need;
+            more    = 1'b0;
+            qwait   = 1'b0;
+            mv_used = 1'b0;
+          end
         end else begin
           u.xvec = 8'd11;
         end
@@ -2114,7 +2171,9 @@ module rd68041_decode #(
     // The indirection prelude of an instruction whose <ea> is op[5:0]: its
     // first micro-operation reads the pointer into T3, and the instruction's
     // own follow (doc/microarch.md). It takes no extension word: the second
-    // address needs them.
+    // address needs them. It is only the read: not the FP operation the
+    // instruction's first would be, nor the MC68LC040's exception, which
+    // the instruction's own micro-operation takes, on the second address.
     if (uses_ea && seq == 5'd0 && sm >= 3'd2 && is_ind(sm, sr, ew(w, int'(eak)))) begin
       `DEC_IND(ea_sp)
       ind_out = 2'b01;

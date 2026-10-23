@@ -114,8 +114,12 @@ module core_cputest_tb;
                dut.u_core.of_u.valid, dut.u_core.of_u.pc, dut.u_core.of_u.fpk, dut.u_core.of_ready,
                dut.u_core.ex_u.valid, dut.u_core.ex_u.pc, dut.u_core.ex_u.fpk, dut.u_core.fp_wait,
                dut.u_core.w_u.valid, dut.u_core.w_u.pc, dut.u_core.w_u.fpk, dut.u_core.w_stall,
-               dut.u_core.ea_stall, dut.u_core.ex_stall, dut.u_core.u_fpu.rec_v, dut.u_core.u_fpu.rec_w,
-               dut.u_core.u_fpu.ph);
+               dut.u_core.ea_stall, dut.u_core.ex_stall,
+`ifndef TB_NOFPU
+               dut.u_core.g_fpu.u_fpu.rec_v, dut.u_core.g_fpu.u_fpu.rec_w, dut.u_core.g_fpu.u_fpu.ph);
+`else
+               1'b0, 1'b0, 2'd0);
+`endif
 
   function automatic logic [31:0] rd8(input logic [31:0] x);
     rd8 = {24'd0, rb(x)};
@@ -194,15 +198,17 @@ module core_cputest_tb;
       dep_msp = msp0;
       dep_sr  = sr0[15:0];
       deposit();
+`ifndef TB_NOFPU
       if (f0[0] != 0) begin
-        dut.u_core.u_fpu.fpcr  = f0[1][15:0];
-        dut.u_core.u_fpu.fpsr  = f0[2];
-        dut.u_core.u_fpu.fpiar = f0[3];
+        dut.u_core.g_fpu.u_fpu.fpcr  = f0[1][15:0];
+        dut.u_core.g_fpu.u_fpu.fpsr  = f0[2];
+        dut.u_core.g_fpu.u_fpu.fpiar = f0[3];
         for (n = 0; n < 8; n++)
-          dut.u_core.u_fpu.fpr[n] = {f0[4 + 3*n][15:0], f0[5 + 3*n], f0[6 + 3*n]};
-        dut.u_core.u_fpu.st   = rd68041_fpu_pkg::ST_IDLE;
-        dut.u_core.u_fpu.pend = 1'b0;
+          dut.u_core.g_fpu.u_fpu.fpr[n] = {f0[4 + 3*n][15:0], f0[5 + 3*n], f0[6 + 3*n]};
+        dut.u_core.g_fpu.u_fpu.st   = rd68041_fpu_pkg::ST_IDLE;
+        dut.u_core.g_fpu.u_fpu.pend = 1'b0;
       end
+`endif
       for (n = 0; n < 8; n++) mb(n, lent[n]);
       cap_clear();
       cap_on = 1'b1;
@@ -260,12 +266,13 @@ module core_cputest_tb;
         for (n = 0; n < 7; n++)
           if (reg_of(8 + n) !== ea[n]) note($sformatf("A%0d", n), reg_of(8 + n), ea[n]);
         if (sp_of(0) !== ea[7]) note("the USP", sp_of(0), ea[7]);
+`ifndef TB_NOFPU
         if (ef[0] != 0) begin
-          if ({16'd0, dut.u_core.u_fpu.fpcr} !== ef[1]) note("FPCR", {16'd0, dut.u_core.u_fpu.fpcr}, ef[1]);
-          if (dut.u_core.u_fpu.fpsr !== ef[2]) note("FPSR", dut.u_core.u_fpu.fpsr, ef[2]);
-          if (dut.u_core.u_fpu.fpiar !== ef[3]) note("FPIAR", dut.u_core.u_fpu.fpiar, ef[3]);
+          if ({16'd0, dut.u_core.g_fpu.u_fpu.fpcr} !== ef[1]) note("FPCR", {16'd0, dut.u_core.g_fpu.u_fpu.fpcr}, ef[1]);
+          if (dut.u_core.g_fpu.u_fpu.fpsr !== ef[2]) note("FPSR", dut.u_core.g_fpu.u_fpu.fpsr, ef[2]);
+          if (dut.u_core.g_fpu.u_fpu.fpiar !== ef[3]) note("FPIAR", dut.u_core.g_fpu.u_fpu.fpiar, ef[3]);
           for (n = 0; n < 8; n++) begin
-            fpv = dut.u_core.u_fpu.fpr[n];
+            fpv = dut.u_core.g_fpu.u_fpu.fpr[n];
             fpe = {ef[4 + 3*n][15:0], ef[5 + 3*n], ef[6 + 3*n]};
             // A NaN's or an infinity's integer bit is a don't care (UM Table 9-5).
             if (fpv[78:64] == 15'h7FFF && fpe[78:64] == 15'h7FFF) begin
@@ -280,6 +287,7 @@ module core_cputest_tb;
               note($sformatf("FP%0d's mantissa, low", n), fpv[31:0], fpe[31:0]);
           end
         end
+`endif
       end
       for (n = 0; n < nwr; n++) begin
         got = (wr_s[n] == 1) ? rd8(wr_a[n]) : (wr_s[n] == 2) ? rd16(wr_a[n]) : rl(wr_a[n]);

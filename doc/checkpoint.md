@@ -167,7 +167,7 @@ must invalidate them; this design clears their valid bits (`doc/microarch.md`, "
 | +$00 | 2 | SR | the status register, as it was before the exception |
 | +$02 | 4 | PC | the program counter (which instruction: UM 8.4, per format) |
 | +$06 | 2 | FV | format (15-12) and vector offset (11-0) |
-| +$08 | 4 | EA | the calculated <ea> of the FP instruction, $0 for immediate and register direct |
+| +$08 | 4 | EA | the calculated <ea> of the FP instruction, $0 for immediate and register direct (and for no <ea>); -(An)'s An less the operand's size, but An itself for FMOVEM, FSAVE, FRESTORE (`doc/divergences.md`); An never stepped |
 | +$0C | 4 | PCF | the PC of the faulted FP instruction |
 
 ### Format $7: access error, 60 bytes (UM 8.4.6)

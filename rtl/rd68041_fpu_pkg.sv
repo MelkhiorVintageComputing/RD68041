@@ -183,4 +183,29 @@ package rd68041_fpu_pkg;
     endcase
   endfunction
 
+  // ---------------------------------------------------------------------------
+  // The general operations' opmodes (opclasses 000 and 010, FMOVECR apart):
+  // Table 9-10's, unimplemented (vector 11, format $2); and every opmode PRM 5
+  // has, those and the ones built (rd68041_fpu). Any other is an F-line
+  // illegal instruction. The decoder of the MC68LC040 asks the second too: a
+  // legal one is format $4 there, an illegal one F-line (UM A.5.1).
+  function automatic logic unimp_op(input logic [6:0] m);
+    case (m)
+      7'h01, 7'h02, 7'h03, 7'h06, 7'h08, 7'h09, 7'h0A, 7'h0C, 7'h0D, 7'h0E, 7'h0F,
+      7'h10, 7'h11, 7'h12, 7'h14, 7'h15, 7'h16, 7'h19, 7'h1C, 7'h1D, 7'h1E, 7'h1F,
+      7'h21, 7'h25, 7'h26, 7'h30, 7'h31, 7'h32, 7'h33, 7'h34, 7'h35, 7'h36, 7'h37:
+        unimp_op = 1'b1;
+      default: unimp_op = 1'b0;
+    endcase
+  endfunction
+  function automatic logic legal_op(input logic [6:0] m);
+    case (m)
+      7'h00, 7'h40, 7'h44, 7'h04, 7'h41, 7'h45, 7'h18, 7'h58, 7'h5C, 7'h1A, 7'h5A, 7'h5E,
+      7'h20, 7'h60, 7'h64, 7'h22, 7'h62, 7'h66, 7'h23, 7'h63, 7'h67, 7'h28, 7'h68, 7'h6C,
+      7'h24, 7'h27, 7'h38, 7'h3A:
+        legal_op = 1'b1;
+      default: legal_op = unimp_op(m);
+    endcase
+  endfunction
+
 endpackage

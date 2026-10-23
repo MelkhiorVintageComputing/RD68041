@@ -80,17 +80,18 @@ module core_cosim_tb;
     end
     // The FPU (M11): FPCR, FPSR, FPIAR, FP0-FP7. A register reset and not yet
     // written is a NaN here (UM 9.2.1) and zero in UAE040 (doc/oracles.md).
+`ifndef TB_NOFPU
     if (`TB_FPU != 0 && nfield > T_FP0 + 23) begin
-      if ({16'h0, dut.u_core.u_fpu.fpcr} !== treg[T_FPCR] || dut.u_core.u_fpu.fpsr !== treg[T_FPSR] ||
-          dut.u_core.u_fpu.fpiar !== treg[T_FPIAR]) begin
+      if ({16'h0, dut.u_core.g_fpu.u_fpu.fpcr} !== treg[T_FPCR] || dut.u_core.g_fpu.u_fpu.fpsr !== treg[T_FPSR] ||
+          dut.u_core.g_fpu.u_fpu.fpiar !== treg[T_FPIAR]) begin
         $display("  FAIL: boundary %0d (pc %h): FPCR FPSR FPIAR = %h %h %h, the trace's %h %h %h",
-                 nret, tpc, dut.u_core.u_fpu.fpcr, dut.u_core.u_fpu.fpsr, dut.u_core.u_fpu.fpiar,
+                 nret, tpc, dut.u_core.g_fpu.u_fpu.fpcr, dut.u_core.g_fpu.u_fpu.fpsr, dut.u_core.g_fpu.u_fpu.fpiar,
                  treg[T_FPCR], treg[T_FPSR], treg[T_FPIAR]);
         bad = 1;
       end
       for (int i = 0; i < 8; i++) begin
         logic [79:0] cv, tv;
-        cv = dut.u_core.u_fpu.fpr[i];
+        cv = dut.u_core.g_fpu.u_fpu.fpr[i];
         tv = {treg[T_FP0 + 3*i][15:0], treg[T_FP0 + 3*i + 1], treg[T_FP0 + 3*i + 2]};
         if (cv !== tv && !(cv == {1'b0, 15'h7FFF, 64'hFFFF_FFFF_FFFF_FFFF} && tv == 80'h0)) begin
           $display("  FAIL: boundary %0d (pc %h): FP%0d = %h, the trace's %h", nret, tpc, i, cv, tv);
@@ -98,6 +99,7 @@ module core_cosim_tb;
         end
       end
     end
+`endif
     if (dut.u_core.sr !== treg[T_SR][15:0]) begin
       $display("  FAIL: boundary %0d (pc %h): SR = %h, the trace's %h", nret, tpc,
                dut.u_core.sr, treg[T_SR][15:0]);

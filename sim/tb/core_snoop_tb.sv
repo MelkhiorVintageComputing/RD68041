@@ -67,7 +67,7 @@ module core_snoop_tb;
   // answers only when MI lets it (the slave model waits for MI itself).
   wire        ta_n  = s_ta_n & (ta_oe ? ta_n_o : 1'b1);
 
-  rd68041_top #(.FPU(1)) dut (
+  rd68041_top #(.FPU(`TB_FPU)) dut (
       .clk(clk), .pclk(1'b0), .rst_n(rst_n), .rsti_n_i(rsti_n), .rsto_n_o(rsto_n_o),
       .a_i(a_w), .a_o(a_o), .a_oe(a_oe), .d_i(dbus), .d_o(d_o), .d_oe(d_oe),
       .tt_i(tt_w), .tt_o(tt_o), .tm_o(tm_o), .tln_o(tln_o), .upa_o(upa_o),

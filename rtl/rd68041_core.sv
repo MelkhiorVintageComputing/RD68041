@@ -235,6 +235,7 @@ module rd68041_core #(
   logic  [7:0] x_vec;
   logic  [3:0] x_fmt;
   logic [31:0] x_pc, x_addr;                  // the frame's PC; ADDR or FA
+  logic [31:0] x_pcf;                         // $4's PC of the faulted instruction
   logic [15:0] x_ssw, x_sr0;                  // the SSW; the SR the frame holds
   logic        x_srw, x_stp, x_rst, x_trc;    // serialising: an SR write, STOP, RESET, traced
   logic        x_cmo;                         // ... CINV or CPUSH: x_cmf {caches, scope}, at x_cma
@@ -827,18 +828,35 @@ module rd68041_core #(
   // The micro-operation's <ea> is a memory one: it accesses it, or it is the
   // operation of an FMOVE out, which computes its destination for a frame.
   wire         fp_eam  = ex_u.ld || ex_u.st || (ex_u.fpk == rd68041_fpu_pkg::FK_OP && ex_u.ea_en);
-  rd68041_fpu u_fpu (
-      .clk(clk), .rst_n(rst_n), .crst(crst),
-      .x_v(ex_fp), .x_adv(ex_u.valid && !ex_stall), .x_k(ex_u.fpk), .x_chk(ex_u.fchk),
-      .x_last(ex_u.last), .x_cmd(ex_u.fcmd), .x_idx(ex_u.fidx), .x_reg(ex_u.freg),
-      .x_b(bv), .x_pc(ex_u.pc),
-      // The frame's address field: the operand's first byte (each micro-op
-      // moves the long word fidx of it).
-      .x_ea(ex_ea - {25'h0, ex_u.fidx, 2'b00}), .x_eam(fp_eam),
-      .x_wait(fp_wait), .x_res(fp_res), .x_ct(fp_ct), .x_xv(fp_xv), .x_xn(fp_xn),
-      .x_xf(fp_xf), .x_xea(fp_xea), .x_xc(fp_xc),
-      .w_commit(fp_commit), .flush(x_flush),
-      .sv_n(fp_svn), .rs_n(fp_rsn));
+  // The MC68LC040 has none (UM A.5): nothing comes from it, and decode makes
+  // every FP instruction an exception (rd68041_decode).
+  if (FPU != 0) begin : g_fpu
+    rd68041_fpu u_fpu (
+        .clk(clk), .rst_n(rst_n), .crst(crst),
+        .x_v(ex_fp), .x_adv(ex_u.valid && !ex_stall), .x_k(ex_u.fpk), .x_chk(ex_u.fchk),
+        .x_last(ex_u.last), .x_cmd(ex_u.fcmd), .x_idx(ex_u.fidx), .x_reg(ex_u.freg),
+        .x_b(bv), .x_pc(ex_u.pc),
+        // The frame's address field: the operand's first byte (each micro-op
+        // moves the long word fidx of it).
+        .x_ea(ex_ea - {25'h0, ex_u.fidx, 2'b00}), .x_eam(fp_eam),
+        .x_wait(fp_wait), .x_res(fp_res), .x_ct(fp_ct), .x_xv(fp_xv), .x_xn(fp_xn),
+        .x_xf(fp_xf), .x_xea(fp_xea), .x_xc(fp_xc),
+        .w_commit(fp_commit), .flush(x_flush),
+        .sv_n(fp_svn), .rs_n(fp_rsn));
+  end else begin : g_nofpu
+    assign fp_wait = 1'b0;
+    assign fp_res  = 32'h0;
+    assign fp_ct   = 1'b0;
+    assign fp_xv   = 8'd0;
+    assign fp_xn   = 1'b0;
+    assign fp_xf   = 4'h0;
+    assign fp_xea  = 32'h0;
+    assign fp_xc   = 1'b0;
+    assign fp_svn  = 5'd0;
+    assign fp_rsn  = 5'd0;
+    logic unused_fp;
+    assign unused_fp = &{1'b0, ex_fp, fp_eam, fp_commit};
+  end
   // A condition: the FP predicate for FBcc, FScc, FDBcc, FTRAPcc.
   wire ex_ct = (ex_u.fpk == rd68041_fpu_pkg::FK_COND) ? fp_ct : cond_true(ex_u.cond, ccr_x[3:0]);
   // The FP result EX returns: FMOVE out's long words, the control registers,
@@ -1280,6 +1298,10 @@ module rd68041_core #(
         ex_out.tgt = {11'h0, fp_xc, fp_xf, 16'h0};
       end
     end
+    // The MC68LC040's FP instruction: the address it calculated, 0 for a
+    // register or an immediate (UM A.5.1), for its format $4 frame.
+    if (FPU == 0 && ex_u.valid && ex_u.xvec == 8'd11 && ex_u.xnext)
+      ex_out.imm = ex_u.ea_en ? ex_ea : 32'h0;
   end
 
   assign ex_stall    = w_stall || div_wait || fp_wait;
@@ -1342,11 +1364,14 @@ module rd68041_core #(
   // the vectors the FPU raises, on an FP micro-operation.
   wire        w_fpx = w_x && (w_u.fpk != rd68041_fpu_pkg::FK_NONE) &&
                       (w_xv == 8'd11 || w_xv == 8'd14 || (w_xv >= 8'd48 && w_xv <= 8'd55));
+  // The MC68LC040's FP instruction (UM A.5.1): vector 11 after it, which
+  // nothing else is there; its EA rides in imm.
+  wire        w_f4  = (FPU == 0) && w_x && (w_xv == 8'd11) && w_u.xnext;
   // The PC the frame holds: the instruction, or the next (UM 8.2).
   wire [31:0] w_xpc = w_pre ? w_u.pc : w_npc;
   // $7's FA and an address error's ADDR ride in imm; the rest's ADDR is the
   // instruction's address.
-  wire [31:0] w_xad = (w_xv == 8'd2 || w_xv == 8'd3 || w_fpx) ? w_u.imm : w_u.pc;
+  wire [31:0] w_xad = (w_xv == 8'd2 || w_xv == 8'd3 || w_fpx || w_f4) ? w_u.imm : w_u.pc;
   // The FPU's record commits as its micro-operation completes -- or, for
   // BSUN, as it takes the exception that comes before it (UM 9.7.1.1).
   wire   fp_wxc    = w_fpx && w_u.tgt[20];
@@ -1371,8 +1396,8 @@ module rd68041_core #(
   wire        s0      = sr_sys[5];
   wire        m0      = sr_sys[4];
   wire [31:0] sup_sp  = s0 ? q15 : (m0 ? msp : isp);
-  wire [31:0] x_fsz   = (x_fmt == 4'h7) ? 32'd60 : (x_fmt == 4'h2 || x_fmt == 4'h3) ? 32'd12 :
-                        32'd8;
+  wire [31:0] x_fsz   = (x_fmt == 4'h7) ? 32'd60 : (x_fmt == 4'h4) ? 32'd16 :
+                        (x_fmt == 4'h2 || x_fmt == 4'h3) ? 32'd12 : 32'd8;
   wire [31:0] x_base  = sup_sp - x_fsz;
   wire        x_two   = x_int && m0;
   wire [31:0] x_base2 = ((s0 && !m0) ? q15 : isp) - 32'd8;
@@ -1439,7 +1464,7 @@ module rd68041_core #(
   rd68041_exc u_exc (
       .clk(clk), .rst_n(rst_n), .crst(crst),
       .start(x_apply && x_exc), .vec(x_vec), .intr(x_int), .level(x_lvl), .fmt(x_fmt),
-      .sr_old(x_sr0), .sr_new(x_sr0 | 16'h2000), .pc(x_pc), .addr(x_addr),
+      .sr_old(x_sr0), .sr_new(x_sr0 | 16'h2000), .pc(x_pc), .addr(x_addr), .pcf(x_pcf),
       .ssw(x_ssw), .tail(wf_tail), .use_tail(x_wft),
       .base(x_base), .two(x_two), .base2(x_base2), .vbr(vbr),
       .valid(exc_valid), .uop(exc_v), .take(xs_take));
@@ -1514,7 +1539,7 @@ module rd68041_core #(
       nmi       <= 1'b0;
       xs        <= XS_IDLE;
       x_exc     <= 1'b0; x_int <= 1'b0; x_lvl <= '0; x_vec <= '0; x_fmt <= '0;
-      x_pc      <= '0; x_addr <= '0; x_ssw <= '0; x_sr0 <= '0;
+      x_pc      <= '0; x_addr <= '0; x_pcf <= '0; x_ssw <= '0; x_sr0 <= '0;
       x_srw     <= 1'b0; x_stp <= 1'b0; x_rst <= 1'b0; x_trc <= 1'b0;
       x_cmo     <= 1'b0; x_cmm <= 1'b0; x_cmf <= '0; x_cmp <= 1'b0; x_cma <= '0;
       x_wft     <= 1'b0;
@@ -1713,9 +1738,10 @@ module rd68041_core #(
         x_int  <= w_int;
         x_lvl  <= nmi ? 3'd7 : ipl_lvl;
         x_vec  <= w_xv;
-        x_fmt  <= w_fpx ? w_u.tgt[19:16] : fmt_of(w_xv);
+        x_fmt  <= w_fpx ? w_u.tgt[19:16] : w_f4 ? 4'h4 : fmt_of(w_xv);
         x_pc   <= w_xpc;
         x_addr <= w_xad;
+        x_pcf  <= (FPU == 0) ? w_u.pc : 32'h0;
         x_ssw  <= w_u.tgt[15:0];
         x_sr0  <= w_xsr;
         x_srw  <= w_u.srw && !w_x;

@@ -131,16 +131,6 @@ module rd68041_fpu
       default:             impl = 1'b0;
     endcase
   end
-  // Table 9-10's opmodes, and FMOVECR: unimplemented (vector 11, format $2).
-  function automatic logic unimp_op(input logic [6:0] m);
-    case (m)
-      7'h01, 7'h02, 7'h03, 7'h06, 7'h08, 7'h09, 7'h0A, 7'h0C, 7'h0D, 7'h0E, 7'h0F,
-      7'h10, 7'h11, 7'h12, 7'h14, 7'h15, 7'h16, 7'h19, 7'h1C, 7'h1D, 7'h1E, 7'h1F,
-      7'h21, 7'h25, 7'h26, 7'h30, 7'h31, 7'h32, 7'h33, 7'h34, 7'h35, 7'h36, 7'h37:
-        unimp_op = 1'b1;
-      default: unimp_op = 1'b0;
-    endcase
-  endfunction
   wire is_mvcr = (opcl == 3'b010) && (srcsp == 3'b111);
 
   // ===========================================================================
@@ -239,8 +229,8 @@ module rd68041_fpu
   // FK_OP's decisions at its start.
   wire  op_gen   = (opcl == 3'b000) || (opcl == 3'b010);   // to a register
   wire  op_out   = (opcl == 3'b011);                       // FMOVE out
-  wire  op_unim  = op_gen && (is_mvcr || (!impl && unimp_op(opm)));
-  wire  op_ill   = op_gen && !is_mvcr && !impl && !unimp_op(opm);
+  wire  op_unim  = op_gen && (is_mvcr || (!impl && rd68041_fpu_pkg::unimp_op(opm)));
+  wire  op_ill   = op_gen && !is_mvcr && !rd68041_fpu_pkg::legal_op(opm);
   // Unsupported data types (UM 9.6.2): a denormal or unnormal source, or a
   // dyadic one's destination; a packed source; FMOVE out of one, or to packed.
   wire  src_dn   = (srcn.cls == rd68041_fpu_pkg::C_DNRMX) || (srcn.cls == rd68041_fpu_pkg::C_DNRMS);

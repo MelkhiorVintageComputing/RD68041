@@ -10,6 +10,23 @@ synchroniser) are in RD68031's `doc/bugs-found.md`.*
 
 ---
 
+## M12: found while building the MC68LC040
+
+1. **A memory indirect mode's prelude carried the instruction's first micro-operation.**
+   The prelude that reads the pointer into T3 was built over whatever the instruction's
+   first micro-operation had been decoded as, and kept its FP kind and its exception:
+   on the MC68040, `FMOVE.L ([bd]),FP1` ran the FPU's operation on the pointer, then
+   again on the operand (an M11 bug no oracle stream had reached: the cputest corpus
+   and the cosim programs use no memory indirect FP operand); on the MC68LC040 the
+   format $4 exception was taken on the prelude, its address the pointer's. The prelude
+   is now only the read. Caught by `m12_lc040` against UAE040 `-L`; `m12_fpu_ind` is the
+   MC68040's case, now in `make cosim`.
+2. **`make cosim` left out `m11_fpu_a` and `m11_fpu_b`**, which M11 reports it as
+   running: they were run by hand. They are in `PROGS` now.
+3. **`make sim` with a `BUILD` other than `build`** asked for its programs under
+   `$(BUILD)/programs`, where nothing builds them -- the first time `make check FPU=0`
+   ran in its own build directory.
+
 ## M11: found while building the FPU
 
 1. **An FP instruction's last micro-operation applied the next instruction's commit

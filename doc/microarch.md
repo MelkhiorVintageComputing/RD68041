@@ -393,3 +393,11 @@ passes 11,136 tests of the FPU corpus with its 6,688 integer ones, none failing;
 cosim` adds `m11_fpu_a` and `m11_fpu_b`; `core_fpu_tb` checks against the manual and the
 FPSP what UAE040 does otherwise -- the frames, the unimplemented and unsupported traps'
 formats, FRESTORE (`m11_fpu_c`).
+
+**M12: the MC68LC040.** `FPU = 0` builds no FPU (10,681 flip-flops before synthesis,
+17,122 with it); every legal FP instruction is vector 11 with the eight-word format $4
+frame, its \<ea\> calculated and not accessed (`doc/fpu.md`, "The MC68LC040"). `make
+check FPU=0` passes; `make cosim-lc` runs the integer programs and `m12_lc040` against
+UAE040 `-L`, `make vectors-all FPU=0` every group with the `lc040` one (1,610 vectors)
+added, and `core_lc040_tb` checks against the manual what UAE040 `-L` stacks otherwise
+(`m12_lc040_b`).

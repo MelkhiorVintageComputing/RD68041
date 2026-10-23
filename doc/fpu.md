@@ -4,7 +4,7 @@ The MC68040's FPU (UM 9) as this design builds it: what is in hardware, where it
 the pipeline, how its state commits, and the contract with the M68040FPSP -- the
 exception model and the FSAVE/FRESTORE frames -- which is what most of its complexity is
 for. `FPU = 0` (the MC68LC040) builds none of it: every FP instruction is vector 11 with
-a format $4 frame (UM A.5, M12).
+a format $4 frame (UM A.5, M12; below, "The MC68LC040").
 
 ## What is in hardware
 
@@ -216,3 +216,23 @@ as the FPSP's own frames do (`gen_except.S`, `do_build`).
   round trip, FRESTORE that resumes an operation;
 - from M13, `make fpsp`: the M68040FPSP on the core, as Linux's own in rd-virt
   (`doc/plan.md`, M11's gate).
+
+## The MC68LC040 (M12)
+
+With `FPU = 0` the core has no `rd68041_fpu` (`g_nofpu` in `rd68041_core.sv`: its outputs
+are constants, and nothing of the register file, the data path or the frames is built).
+The decoder still decodes every FP instruction as far as it does for the MC68040 -- its
+length, its \<ea\>, whether PRM 5 has it at all (`rd68041_fpu_pkg::legal_op`, the same
+opmode set the FPU's F-line uses) -- and then makes it one micro-operation that calculates
+the address without accessing it or stepping An, and is vector 11 once it is done
+(`xnext`): write-back stacks the eight-word format $4 frame (UM A.5.2), its address field
+the calculated one, its last long word the instruction's PC. A memory indirect mode's
+pointer is read by the usual prelude first. An encoding PRM 5 has no instruction for is
+F-line illegal, format $0, as on the MC68040; FSAVE and FRESTORE in user mode are a
+privilege violation; RTE takes the format $4 frame (and the MC68040's RTE refuses it, a
+format error). What the address field is for each mode is in `doc/checkpoint.md` and
+`doc/divergences.md`.
+
+Checked by `make cosim-lc` (`m12_lc040` and the integer programs against UAE040 `-L`),
+`make vectors OP=lc040 FPU=0`, and `core_lc040_tb` (`m12_lc040_b`) where UAE040 `-L`
+stacks what the manual does not (`doc/oracles.md`).
