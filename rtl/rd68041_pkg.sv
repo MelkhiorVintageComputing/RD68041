@@ -196,6 +196,22 @@ package rd68041_pkg;
     logic  [4:0] wr2_reg;
   } uop_t;
 
+  // An <ea>'s fields of a micro-operation, as rd68041_decode works them out
+  // once and copies them (all but ea_step, which goes with the operand's size).
+  typedef struct packed {
+    logic        en;
+    logic  [1:0] base;
+    logic  [2:0] an;
+    logic  [4:0] rg;
+    logic        xen;
+    logic  [3:0] xn;
+    logic        xl;
+    logic  [1:0] scale;
+    logic [31:0] disp;
+    logic  [1:0] upd;
+    logic        bad;        // a reserved encoding (PRM Table 2-2): halt
+  } ea_t;
+
   // Its width, written out: yosys has no $bits of a type. 40 (valid, last, halt,
   // pc, len) + 56 (the <ea>) + 4 (ld, st, sz) + 112 (execute) + 14 (the
   // results). sim/tb/core_*_tb check it against $bits.

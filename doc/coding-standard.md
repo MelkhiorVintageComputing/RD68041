@@ -201,6 +201,7 @@ A function whose result depends only on its arguments is still fine anywhere.
 | Tool | Quirk | Workaround |
 |---|---|---|
 | iverilog | `always_comb` that reads nothing warns "process has no sensitivities" | drive constants with `assign` |
+| iverilog 12 | two `always_comb` blocks calling the same automatic function with different arguments wake each other forever: a zero-time hang, no output, 100 % CPU (`rd68041_decode`, M7; iverilog 13 does not) | call a function whose result depends only on its arguments from a continuous `assign` (the trap above is about functions that read module state) |
 | iverilog | declarations inside an unnamed `begin`/`end` are a syntax error | declare at module scope |
 | iverilog | assigning a ternary of two enum values to an enum variable is "This assignment requires an explicit cast" | use `if`/`else` inside the case item |
 | iverilog | `unique`/`unique0` on a case are parsed but ignored, with a "sorry" note per occurrence | harmless; keep them for the other five |
