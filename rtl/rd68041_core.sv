@@ -61,10 +61,15 @@ module rd68041_core #(
     output logic  [2:0]   req_tm,
     output logic          req_lock,
     output logic          req_locke,
+    output logic  [1:0]   req_tln,
+    output logic  [1:0]   req_upa,
+    output logic          req_ciout,
     output logic          lock_seq,
     output logic [127:0]  req_wdata,
     input  logic          rsp_valid,
     input  logic [31:0]   rsp_data,
+    input  logic  [1:0]   rsp_lw,
+    input  logic          rsp_tci,
     input  logic          rsp_done,
     input  logic          rsp_err,
     input  logic          rsp_avec,
@@ -73,6 +78,18 @@ module rd68041_core #(
     input  logic  [2:0]   ipl_n,        // IPL2-IPL0, as on the pins
     output logic          ipend,        // an interrupt is pending (IPEND, active high)
     output logic          rsto,         // RSTO, active high
+
+    // The snooper's port to the caches (rd68041_snoop).
+    input  logic [31:0]   sn_addr,
+    output logic          sn_dhit,
+    output logic          sn_ddirty,
+    output logic          sn_ihit,
+    output logic [31:0]   sn_rdata,
+    input  logic          sn_wr,
+    input  logic  [3:0]   sn_wbe,
+    input  logic [31:0]   sn_wdata,
+    input  logic          sn_dinv,
+    input  logic          sn_iinv,
 
     // For testbenches and, later, PST.
     output logic          retire,       // an instruction completed this clock
@@ -120,15 +137,19 @@ module rd68041_core #(
   logic  [1:0] d_siz, d_tt;
   logic  [2:0] d_tm;
   logic        d_lock, d_locke, lock_open, d_avec;
-  logic        f_valid, f_ready, f_rsp, f_done, f_err;
+  logic        f_valid, f_ready, f_rsp, f_done, f_err, f_ci;
   logic [31:0] f_addr;
   logic  [2:0] f_tm;
+  logic  [1:0] f_siz, f_upa;
 
   wire pick_d = d_valid;
   assign req_valid = d_valid || f_valid;
   assign req_addr  = pick_d ? d_addr : f_addr;
   assign req_write = pick_d && d_write;
-  assign req_siz   = pick_d ? d_siz : rd68041_pkg::SIZ_LONG;
+  assign req_siz   = pick_d ? d_siz : f_siz;
+  assign req_ciout = pick_d ? 1'b0 : f_ci;
+  assign req_upa   = pick_d ? 2'b00 : f_upa;
+  assign req_tln   = 2'b00;
   assign req_tt    = pick_d ? d_tt : rd68041_pkg::TT_NORMAL;
   assign req_lock  = pick_d && d_lock;
   assign req_locke = pick_d && d_locke;
@@ -196,7 +217,8 @@ module rd68041_core #(
   //   XS_SEQ   rd68041_exc builds the frame and fetches the vector
   //   XS_STOP  STOP: waiting for an interrupt (UM 8.2.9; trace never stops it)
   //   XS_RST   RESET: RSTO for 512 clocks (UM 7.10)
-  typedef enum logic [2:0] { XS_IDLE, XS_SR, XS_SEQ, XS_STOP, XS_RST } xs_e;
+  //   XS_CMO   CINV, CPUSH: until the caches are done (UM 4.2)
+  typedef enum logic [2:0] { XS_IDLE, XS_SR, XS_SEQ, XS_STOP, XS_RST, XS_CMO } xs_e;
   xs_e         xs;
   logic        x_exc;                         // XS_SR: an exception (else serialising only)
   logic        x_int;                         // ... an interrupt, at level x_lvl
@@ -206,12 +228,17 @@ module rd68041_core #(
   logic [31:0] x_pc, x_addr;                  // the frame's PC; ADDR or FA
   logic [15:0] x_ssw, x_sr0;                  // the SSW; the SR the frame holds
   logic        x_srw, x_stp, x_rst, x_trc;    // serialising: an SR write, STOP, RESET, traced
+  logic        x_cmo;                         // ... CINV or CPUSH: x_cmf {caches, scope}, at x_cma
+  logic  [3:0] x_cmf;
+  logic        x_cmp;
+  logic [31:0] x_cma;
   logic  [7:0] x_srn;                         // ... the new SR's system byte
   logic [31:0] x_npc, x_ipc;                  // ... the next instruction, and this one
   logic        x_rerun;                       // ... RTE of a throwaway frame: RTE again
   logic        xs_int;                        // the sequence running is an interrupt's
   logic  [8:0] rst_cnt;
   logic        x_flush;                       // write-back empties the pipeline behind it
+  logic        ic_op, ic_busy;                // CINV, CPUSH of the instruction cache
 
   // ===========================================================================
   // Instruction fetch and decode
@@ -229,11 +256,21 @@ module rd68041_core #(
   rd68041_ifu u_ifu (
       .clk(clk), .rst_n(rst_n), .crst(crst),
       .go(go), .go_pc(go_pc),
-      .stop(halted || lock_open || xs == XS_SR || xs == XS_STOP || xs == XS_RST),
-      .sup(sup),
+      .stop(halted || lock_open || xs == XS_SR || xs == XS_STOP || xs == XS_RST ||
+            xs == XS_CMO),
+      .sup(sup), .ic_en(cacr[15]), .itt0(itt0), .itt1(itt1),
       .q_win(q_win), .q_cnt(q_cnt), .q_pc(q_pc), .q_err(q_err), .q_aerr(q_aerr), .q_pop(q_pop),
-      .f_valid(f_valid), .f_ready(f_ready), .f_addr(f_addr), .f_tm(f_tm),
-      .f_rsp(f_rsp), .f_data(rsp_data), .f_done(f_done), .f_err(f_err));
+      .f_valid(f_valid), .f_ready(f_ready), .f_addr(f_addr), .f_tm(f_tm), .f_siz(f_siz),
+      .f_ci(f_ci), .f_upa(f_upa),
+      .f_rsp(f_rsp), .f_lw(rsp_lw), .f_data(rsp_data), .f_tci(rsp_tci), .f_done(f_done),
+      .f_err(f_err),
+      .ic_op(ic_op), .ic_scope(x_cmf[1:0]), .ic_addr(x_cma), .ic_p8k(tc[14]), .ic_busy(ic_busy),
+      .sn_addr(sn_addr), .sn_ihit(sn_ihit), .sn_iinv(sn_iinv));
+
+  // No data cache yet (M9, part 2).
+  assign sn_dhit   = 1'b0;
+  assign sn_ddirty = 1'b0;
+  assign sn_rdata  = 32'h0;
 
   logic  [4:0] seq;                           // micro-operations issued of this instruction
   logic  [1:0] de_ind, dec_ind;               // the indirection preludes it has
@@ -1201,9 +1238,13 @@ module rd68041_core #(
       xr_v  = sh_new;
     end
   end
-  // Fetching starts again behind a serialising instruction, or a RESET.
-  wire x_go = (x_apply && !x_exc && !x_rst && !x_trc && !x_stp) ||
-              (xs == XS_RST && rst_cnt == 9'd511 && !x_trc);
+  // CINV and CPUSH: the instruction cache's part starts as XS_SR applies.
+  assign ic_op = x_apply && !x_exc && x_cmo && x_cmf[3];
+  wire   cmo_done = (xs == XS_CMO) && !ic_busy;
+  // Fetching starts again behind a serialising instruction, a RESET, or a
+  // CINV or CPUSH.
+  wire x_go = (x_apply && !x_exc && !x_rst && !x_cmo && !x_trc && !x_stp) ||
+              (((xs == XS_RST && rst_cnt == 9'd511) || cmo_done) && !x_trc);
   assign rsto = (xs == XS_RST);
 
   assign we0 = (w_wr && w_u.wr) || (rs == R_SSP && ld_done) || xr_we;
@@ -1276,6 +1317,7 @@ module rd68041_core #(
       x_exc     <= 1'b0; x_int <= 1'b0; x_lvl <= '0; x_vec <= '0; x_fmt <= '0;
       x_pc      <= '0; x_addr <= '0; x_ssw <= '0; x_sr0 <= '0;
       x_srw     <= 1'b0; x_stp <= 1'b0; x_rst <= 1'b0; x_trc <= 1'b0;
+      x_cmo     <= 1'b0; x_cmf <= '0; x_cmp <= 1'b0; x_cma <= '0;
       x_srn     <= '0; x_npc <= '0; x_ipc <= '0; x_rerun <= 1'b0;
       xs_int    <= 1'b0;
       rst_cnt   <= '0;
@@ -1370,10 +1412,10 @@ module rd68041_core #(
 
       // --- exception processing ---------------------------------------------
       if (xs == XS_SEQ && w_end && w_u.xs) xs <= XS_IDLE;
-      if (xs == XS_RST) begin
-        rst_cnt <= rst_cnt + 9'd1;
-        if (rst_cnt == 9'd511) begin
-          // A traced RESET: its trace exception once RSTO is done.
+      if (xs == XS_RST) rst_cnt <= rst_cnt + 9'd1;
+      if ((xs == XS_RST && rst_cnt == 9'd511) || cmo_done) begin
+        begin
+          // A traced RESET, CINV or CPUSH: its trace exception once it is done.
           xs <= x_trc ? XS_SR : XS_IDLE;
           if (x_trc) begin
             x_exc  <= 1'b1;
@@ -1420,6 +1462,8 @@ module rd68041_core #(
           if (x_rst) begin
             xs      <= XS_RST;
             rst_cnt <= 9'd0;
+          end else if (x_cmo) begin
+            xs      <= XS_CMO;
           end else if (x_trc) begin
             // A traced serialising instruction: its trace exception now, from
             // the SR it left (UM 8.2.6; STOP so never stops).
@@ -1453,6 +1497,10 @@ module rd68041_core #(
         x_srw  <= w_u.srw && !w_x;
         x_stp  <= w_u.stp && !w_x;
         x_rst  <= w_u.rsto && !w_x;
+        x_cmo  <= w_u.cmo && !w_x;
+        x_cmf  <= w_u.fn;
+        x_cmp  <= w_u.cond[0];
+        x_cma  <= w_res;
         x_srn  <= {w_res[15:12], 1'b0, w_res[10:8]};
         x_npc  <= w_npc;
         x_ipc  <= w_u.pc;
@@ -1567,6 +1615,6 @@ module rd68041_core #(
   end
 
   logic unused_ok;
-  assign unused_ok = &{1'b0, reset_v};
+  assign unused_ok = &{1'b0, reset_v, x_cmp, x_cmf[2], sn_wr, sn_wbe, sn_wdata, sn_dinv};
 
 endmodule

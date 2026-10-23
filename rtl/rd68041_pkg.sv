@@ -205,6 +205,8 @@ package rd68041_pkg;
     logic        ack;        // the read is an acknowledge cycle (TT 11), TM fn[2:0]; a
                              // transfer error is an answer, not a fault
     logic        cof;        // a change of flow for tracing (UM 8.2.6), taken or not
+    logic        cmo;        // CINV, CPUSH (with ser): fn {caches, scope}, cond[0] push,
+                             // the result the line's or page's address (M9)
     // the register result
     logic        wr;
     logic  [4:0] wr_reg;
@@ -231,8 +233,9 @@ package rd68041_pkg;
 
   // Its width, written out: yosys has no $bits of a type. 40 (valid, last, halt,
   // pc, len) + 56 (the <ea>) + 4 (ld, st, sz) + 112 (execute) + 16 (exceptions)
-  // + 14 (the results). sim/tb/core_*_tb check it against $bits.
-  localparam int UOP_W = 242;
+  // + 1 (cache maintenance) + 14 (the results). sim/tb/core_*_tb check it
+  // against $bits.
+  localparam int UOP_W = 243;
 
   // The status register's implemented bits (UM 2.2.1): T1 T0 S M, I2-I0, the CCR.
   localparam logic [15:0] SR_MASK = 16'hF71F;

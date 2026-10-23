@@ -93,3 +93,12 @@ the address error has the SR S-bit set."
 restored) and the fetch from the odd address is the address error, with the odd address
 as the frame's PC and its address less bit 0 as ADDR (UM 8.4.6.7), whatever the trace
 bits.
+
+## CDIS does not disable the caches
+
+**UM 4.2:** "System hardware can assert the cache disable (CDIS) signal to dynamically
+disable both caches, regardless of the state of the enable bits in the CACR. ... CDIS is
+intended primarily for use by in-circuit emulators."
+
+**What this design does.** CDIS is sampled at reset, for the multiplexed-bus mode select
+(`rd68041_rstctl`), and otherwise ignored: only CACR's IE and DE enable the caches.

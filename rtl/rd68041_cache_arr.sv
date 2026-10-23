@@ -163,4 +163,8 @@ module rd68041_cache_arr #(
   assign p2_valid = v_q[p2_way][p2_set];
   assign p2_dirty = dy2[p2_way];
 
+  // Without dirty bits (the instruction cache), their write port goes unread.
+  logic unused_ok;
+  assign unused_ok = &{1'b0, DIRTY ? 1'b0 : &{d_we, d_set, d_way, d_bits}};
+
 endmodule

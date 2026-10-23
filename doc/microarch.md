@@ -164,6 +164,28 @@ drops it); MOVEM's continuation (CM) and the trace continuation (CT) of a format
 are neither set nor honoured by RTE -- a faulted MOVEM restarts from its first transfer.
 `doc/divergences.md` has these.
 
+## Caches (M9)
+
+**Attributes.** Each memory unit has an `rd68041_attr`: its two transparent
+translation registers, matched on A31-A24 and the mode, give an access its cache mode,
+UPA and write protection; no match, with translation off, is cachable write-through
+(UM 3.1.2, 3.1.3). The ATC's page descriptors join them at M10.
+
+**The instruction cache** (`rtl/rd68041_ifu.sv`). A fetch from a cachable address with
+IE set reads the half-line it is in on one clock and compares the four tags on the next;
+a hit puts the half-line's words from the fetch address on into the queue (up to four, so
+about two words a clock from the cache). A miss reads the line: a burst, the long word
+wanted first (UM 4.6.1), into the first invalid way or the one the replacement counter
+names (UM 4.1), the way made invalid before the first long word is written to it. The
+words in order from the fetch address are queued as they arrive, as far as there is
+room; the line is made valid after its fourth long word unless the slave said TCI with
+the first or a transfer faulted. A bus error on the first long word puts its words in
+the queue marked, as an uncached fetch does (M8); on a later one the fill is abandoned
+and done again when the line is next wanted. CINV and CPUSH of the cache (UM 4.2) run
+in the exception state machine's `XS_CMO`: all at once, a line by its set, a page by
+walking the 256 lines; the snooper invalidates a line a snooped transfer hits
+(Table 4-3).
+
 ## Status
 
 **M4: measured.** The storage above (`rtl/rd68041_bram.sv`, `rd68041_atc.sv`,

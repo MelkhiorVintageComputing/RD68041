@@ -1727,15 +1727,26 @@ module rd68041_decode (
         u.xvec = 8'd10;
       end
 
-      // 1111: the F-line. MOVE16 (M9), CINV and CPUSH ($F4xx, M9), PFLUSH
-      // ($F500-$F51F) and PTEST ($F548, $F568; M10) -- privileged but for
-      // MOVE16 -- and the floating-point instructions (M11) are not built;
-      // the rest is vector 11 (UM 9.4).
+      // 1111: the F-line. CINV and CPUSH; MOVE16 (M9), PFLUSH ($F500-$F51F)
+      // and PTEST ($F548, $F568; M10) -- privileged but for MOVE16 -- and the
+      // floating-point instructions (M11) are not built; the rest, a scope of
+      // 00 for CINV and CPUSH among it, is vector 11 (UM 9.4).
       default: begin
         u.len = 5'd2;
-        if (op[11:8] == 4'h4 || (op[11:8] == 4'h5 && (op[7:5] == 3'b000 ||
-                                                       op[7:3] == 5'b01001 ||
-                                                       op[7:3] == 5'b01101))) begin
+        if (op[11:8] == 4'h4 && op[4:3] != 2'b00) begin
+          // CINV and CPUSH (PRM 6): caches in 7-6 (01 data, 10 instruction,
+          // 11 both), push in 5, scope in 4-3 (01 a line, 10 a page, 11
+          // all), An the line's or page's physical address. Serialising: the
+          // exception state machine runs them, and fetching starts again
+          // behind (UM 4.5: "the pipeline is flushed, and instruction
+          // prefetches are repeated").
+          priv = 1'b1;
+          u.b_reg = ay;
+          u.cmo = 1'b1; u.ser = 1'b1; u.cof = 1'b1;
+          u.fn = {op[7:6], op[4:3]};
+          u.cond = {3'b000, op[5]};
+        end else if (op[11:8] == 4'h5 && (op[7:5] == 3'b000 || op[7:3] == 5'b01001 ||
+                                          op[7:3] == 5'b01101)) begin
           priv = 1'b1;
           u.halt = 1'b1;
         end else if (op[11:6] == 6'b011000 || op[11:9] == 3'b001) begin

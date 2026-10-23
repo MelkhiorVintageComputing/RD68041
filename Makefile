@@ -46,6 +46,7 @@ SRCS := rtl/rd68041_sync.sv \
         rtl/rd68041_atc.sv \
         rtl/rd68041_cache_arr.sv \
         rtl/rd68041_regfile.sv \
+        rtl/rd68041_attr.sv \
         rtl/rd68041_agu.sv \
         rtl/rd68041_decode.sv \
         rtl/rd68041_ifu.sv \
@@ -210,7 +211,7 @@ SIMJOBS ?= 4
 
 # The directed benches that run a program (core_exc_tb, core_fault_tb) take it
 # from build/programs/.
-SIMPROGS := m8_int m8_fault
+SIMPROGS := m8_int m8_fault m9_cache
 
 sim: dirs $(patsubst %,$(BUILD)/programs/%.hex,$(SIMPROGS))
 	@rm -f $(addprefix $(BUILD)/,$(addsuffix .simres,$(TBS))); \
@@ -247,7 +248,7 @@ sim: dirs $(patsubst %,$(BUILD)/programs/%.hex,$(SIMPROGS))
 # boundary (UAE040: doc/oracles.md). PROGS defaults to every program but the
 # directed benches' (SIMPROGS), which no oracle runs.
 # ---------------------------------------------------------------------------
-PROGS   ?= m6_basic m7_a m7_b m7_c m8_exc
+PROGS   ?= m6_basic m7_a m7_b m7_c m8_exc m9_icache
 
 # Keep the intermediate files: the ELF is what objdump reads when a run fails.
 .SECONDARY:

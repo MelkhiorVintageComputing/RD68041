@@ -113,7 +113,8 @@ module rd68041_top #(
   );
 
   // The integer unit, with instruction fetch and the data memory unit (M6).
-  logic         req_valid, req_ready, req_write, req_lock, req_locke, lock_seq;
+  logic         req_valid, req_ready, req_write, req_lock, req_locke, lock_seq, req_ciout;
+  logic  [1:0]  req_tln, req_upa;
   logic [31:0]  req_addr;
   logic  [1:0]  req_siz, req_tt;
   logic  [2:0]  req_tm;
@@ -125,10 +126,10 @@ module rd68041_top #(
   logic  [1:0]  rsp_beat, rsp_lw;
   logic [31:0]  rsp_data;
   logic         owner;
-  // The snooper's port to the caches; no caches until M9, so nothing hits.
-  logic [31:0]  sn_addr, sn_wdata;
+  // The snooper's port to the caches.
+  logic [31:0]  sn_addr, sn_wdata, sn_rdata;
   logic  [3:0]  sn_wbe;
-  logic         sn_wr, sn_dinv, sn_iinv;
+  logic         sn_wr, sn_dinv, sn_iinv, sn_dhit, sn_ddirty, sn_ihit;
 
   logic         ipend, rsto;
 
@@ -137,9 +138,14 @@ module rd68041_top #(
       .req_valid(req_valid), .req_ready(req_ready), .req_addr(req_addr),
       .req_write(req_write), .req_siz(req_siz), .req_tt(req_tt), .req_tm(req_tm),
       .req_wdata(req_wdata), .req_lock(req_lock), .req_locke(req_locke),
+      .req_tln(req_tln), .req_upa(req_upa), .req_ciout(req_ciout),
       .lock_seq(lock_seq), .rsp_valid(rsp_valid), .rsp_data(rsp_data),
+      .rsp_lw(rsp_lw), .rsp_tci(rsp_tci),
       .rsp_done(rsp_done), .rsp_err(rsp_err), .rsp_avec(rsp_avec),
       .ipl_n(ipl_n_i), .ipend(ipend), .rsto(rsto),
+      .sn_addr(sn_addr), .sn_dhit(sn_dhit), .sn_ddirty(sn_ddirty), .sn_ihit(sn_ihit),
+      .sn_rdata(sn_rdata), .sn_wr(sn_wr), .sn_wbe(sn_wbe), .sn_wdata(sn_wdata),
+      .sn_dinv(sn_dinv), .sn_iinv(sn_iinv),
       .retire(retire), .retire_pc(retire_pc), .retire_npc(retire_npc),
       .halted(halted), .sr(sr));
 
@@ -154,9 +160,9 @@ module rd68041_top #(
       .req_siz   (req_siz),
       .req_tt    (req_tt),
       .req_tm    (req_tm),
-      .req_tln   (2'b00),
-      .req_upa   (2'b00),
-      .req_ciout (1'b0),
+      .req_tln   (req_tln),
+      .req_upa   (req_upa),
+      .req_ciout (req_ciout),
       .req_lock  (req_lock),
       .req_locke (req_locke),
       .req_more  (1'b0),
@@ -209,10 +215,10 @@ module rd68041_top #(
       .sc_i      (sc_i),
       .mi_n_o    (mi_n_o),
       .sn_addr   (sn_addr),
-      .sn_dhit   (1'b0),
-      .sn_ddirty (1'b0),
-      .sn_ihit   (1'b0),
-      .sn_rdata  (32'h0000_0000),
+      .sn_dhit   (sn_dhit),
+      .sn_ddirty (sn_ddirty),
+      .sn_ihit   (sn_ihit),
+      .sn_rdata  (sn_rdata),
       .sn_wr     (sn_wr),
       .sn_wbe    (sn_wbe),
       .sn_wdata  (sn_wdata),
@@ -232,10 +238,9 @@ module rd68041_top #(
   // What M2 deliberately does not read. Each goes when the unit that needs it
   // arrives: the caches (M9), the core (M6), the FPU (M11).
   logic unused_ok;
-  assign unused_ok = &{1'b0, pclk, dle_i, sn_addr, sn_wdata, sn_wbe, sn_wr,
-                       sn_dinv, sn_iinv,
+  assign unused_ok = &{1'b0, pclk, dle_i,
                        tck_i, tms_i, tdi_i, trst_n_i, mode_mux,
-                       mode_dle, mode_ipl, rsp_tci, rsp_beat, rsp_lw,
+                       mode_dle, mode_ipl, rsp_beat,
                        owner, retire, retire_pc, retire_npc, halted, sr};
 
 endmodule

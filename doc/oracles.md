@@ -263,6 +263,12 @@ behaviour and counts each case.
   UAE040 that the vectors show. PRM 4 leaves them undefined, and the benches that can
   compare under a mask do; the program comparisons (`make cosim`), which cannot, keep
   out of them (`m8_exc` has no CHK).
+- **CPUSHL and CPUSHP do not invalidate UAE040's instruction cache** (M9), whether
+  the instruction is CPUSH IC or CPUSH BC; CPUSHA does, and so do CINVL, CINVP and
+  CINVA. UM 4.2: CPUSH's second operation is that "all selected cache lines are
+  invalidated", and the instruction cache is selected. Found by `m9_icache`, which now
+  makes changed code coherent with CINV and CPUSHA only; `core_cache_tb` checks CPUSHL
+  and CPUSHP of the instruction cache against the manual.
 - **No oracle runs interrupts** (UAE040's harness and the corpus have no interrupt
   source), and the access error frame is UAE040's to judge only from M10. `core_exc_tb`
   and `core_fault_tb` check interrupts, STOP, RESET, BKPT, the format $7 frames of read
