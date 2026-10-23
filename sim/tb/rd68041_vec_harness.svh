@@ -85,7 +85,8 @@ endtask
 // anything (every register is written with a nonblocking assignment).
 always @(posedge clk) begin
   if (cap_on && rst_n) begin
-    if (dut.u_core.u_dmu.ld_done && dut.u_core.rs == 2'd2) begin
+    // (A write's probe, with a TTR or translation on, is not an operand read.)
+    if (dut.u_core.u_dmu.ld_done && dut.u_core.rs == 2'd2 && !dut.u_core.u_dmu.ld_probe) begin
       if (ncap < MAXCAP) begin
         cap_addr[ncap]  = dut.u_core.u_dmu.ld_addr;
         cap_bytes[ncap] = sz_bytes(dut.u_core.u_dmu.ld_sz);

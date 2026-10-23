@@ -194,10 +194,10 @@ fixes (59 checks and 48, all passing). It found, against the UM:
   writes, which the manual does not fix.
 - **Pushes and fills as the bus sees them** (above): what is pushed, and that a push
   happens, can be trusted; its granularity cannot.
-- **Write-backs in the format $7 frame.** The oracle restarts a faulted instruction rather
-  than leaving pending write-backs for the handler (UM 8.4.6.3); the spike's fault was a
-  read, where the two agree. Faults on writes, on a push, on MOVE16 and on misaligned
-  accesses across a page (MA) are M10's investigation.
+- **Write-backs in the format $7 frame.** The spike's fault was a read, where the two
+  agree. On a write's ATC fault the oracle stacks the write in WB3 (M10, below), where the
+  core takes the fault before the write; faults on a push and on MOVE16 are M10's second
+  part.
 - **FSAVE frames' contents** beyond the format word, and FRESTORE of anything but an idle
   or null frame (above). The FPSP is the reference for those fields (CLAUDE.md).
 - **The effective address field** of the format $4 frame for `-(An)`: for FMOVEM.X and
@@ -289,6 +289,35 @@ behaviour and counts each case.
   source), and the access error frame is UAE040's to judge only from M10. `core_exc_tb`
   and `core_fault_tb` check interrupts, STOP, RESET, BKPT, the format $7 frames of read
   faults and the double bus fault against the manual instead.
+
+### The MMU against UAE040 (M10)
+
+`m10_mmu` (`make cosim PROGS=m10_mmu`, 242 instructions) and the `pmmu040` vector group
+(332 vectors) agree with UAE040 on: translation through three-level tables and an
+indirect descriptor, translated code, the MMUSR of PTEST for a resident page written to
+(M), an invalid one, PTESTW of a write-protected one, a TTR in a data and in a program
+space; PFLUSH's effect on a stale entry; MOVEC to and from every MMU register, with the
+bits that read as zero; and the access fault frames of a write to a write-protected
+page, a read of an invalid page, a long word across into it (MA, FA its first byte), a
+user read of a supervisor page and an instruction fetch from an invalid page -- format,
+vector, SSW and FA. Where they differ:
+
+- **The SIZE of an instruction fetch's fault.** UAE040 stacks a word ($0546 for a
+  supervisor fetch's ATC fault); UM 8.4.6.2 says SIZE is "the original access size", and
+  the MC68040 fetches long words (UM 7.3, 4.4.3), which the core reports ($0506), as it
+  does for a fetch's bus error (`core_fault_tb`). `m10_mmu` keeps SIZE out of the
+  register it compares.
+- **A write's ATC fault.** UAE040 stacks the write in WB3, V set, as the part does
+  (UM 8.4.6.3); the core takes the fault before the write (`doc/divergences.md`), so its
+  write-back status words are clear. `m10_mmu` does not read them.
+- **PTESTW of an address a write-protected TTR matches.** UAE040 answers MMUSR $0800 (B,
+  a bus error); UM 3.1.4: a TTR match is "the R-bit is set, and all other bits are
+  zero" with T -- **UAE040 wrong**. The `pmmu040` group keeps W out of PTESTW's TTRs.
+- **URP and SRP keep bits 8-0** as written in UAE040. UM 3.1.1 says only that they
+  "must be zero"; the core keeps them too, a search using bits 31-9.
+- **The order of a search's accesses and its locking** are not compared: the oracle's
+  operand hook does not report a search (above). `core_mmu_tb` checks the descriptors'
+  U and M bits in memory against Table 3-1 instead.
 
 ## cputest: WinUAE's instruction tester, for the MC68040 -- M0 spike
 

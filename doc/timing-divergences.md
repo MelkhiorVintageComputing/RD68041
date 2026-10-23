@@ -51,3 +51,19 @@ To be measured at M15; what the design does:
   clock -- where the part's gives one a clock.
 - **A miss with a dirty victim pays for the push first** (`doc/divergences.md`).
 - **MOVEC to a control register serialises** the pipeline, and so refetches behind it.
+
+## The MMU (M10)
+
+To be measured at M15; what the design does:
+
+- **A write's micro-operation spends a clock more in \<ea\> fetch** when translation or
+  a data TTR is on: it waits for its probe, which an ATC hit answers on the next clock,
+  as a read's cache hit is answered (`doc/microarch.md`, "The MMU"). With both off a
+  write is not probed and costs what it did.
+- **A table search is a sequence of the data memory unit's own operations**, each a
+  long-word access through its state machine (a clock or two before each bus transfer),
+  with the U and M updates as separate writes or a locked read-modify-write after the
+  read that found them clear. The part pipelines a pointer descriptor's U write behind
+  the next read (UM Figure 3-10's note); this design makes it after that read too, but
+  does not overlap the two.
+- **PTEST and PFLUSH serialise**, and wait for the write queue to empty first.

@@ -50,9 +50,8 @@
 // is one micro-operation that carries the vector (`xvec`) and does nothing
 // else; TRAP #n carries its vector with `xnext`, the frame's PC being the next
 // instruction's. The core takes them at write-back (rd68041_core.sv). What is
-// not built yet -- the F-line's MOVE16, CINV, CPUSH, PFLUSH, PTEST (M9, M10)
-// and the floating-point instructions (M11) -- is a micro-operation with
-// `halt`, which stops the pipeline when it reaches write-back.
+// not built yet -- the F-line's floating-point instructions (M11) -- is a
+// micro-operation with `halt`, which stops the pipeline when it reaches write-back.
 //
 // The status register's writers (MOVE to SR, ANDI, ORI and EORI to SR, RTE,
 // STOP) and NOP and RESET are serialising (`ser`): the core lets nothing after
@@ -1730,10 +1729,10 @@ module rd68041_decode (
         u.xvec = 8'd10;
       end
 
-      // 1111: the F-line. CINV, CPUSH and MOVE16; PFLUSH ($F500-$F51F) and
-      // PTEST ($F548, $F568; M10), privileged, and the floating-point
-      // instructions (M11) are not built; the rest, a scope of 00 for CINV
-      // and CPUSH among it, is vector 11 (UM 9.4).
+      // 1111: the F-line. CINV, CPUSH, MOVE16, PFLUSH ($F500-$F51F) and
+      // PTEST ($F548, $F568), privileged; the floating-point instructions
+      // (M11) are not built; the rest, a scope of 00 for CINV and CPUSH
+      // among it, is vector 11 (UM 9.4).
       default: begin
         u.len = 5'd2;
         if (op[11:8] == 4'h4 && op[4:3] != 2'b00) begin
@@ -1750,8 +1749,15 @@ module rd68041_decode (
           u.cond = {3'b000, op[5]};
         end else if (op[11:8] == 4'h5 && (op[7:5] == 3'b000 || op[7:3] == 5'b01001 ||
                                           op[7:3] == 5'b01101)) begin
+          // PFLUSH, PTEST (PRM 6; UM 3.7): op[4:3] PFLUSH's opmode (00 N,
+          // 01 the page, 10 AN, 11 A), op[5] PTEST's R; An the logical
+          // address, DFC the space. Run as CINV is, the MMU's operation
+          // in place of the caches' (cond[1]).
           priv = 1'b1;
-          u.halt = 1'b1;
+          u.b_reg = ay;
+          u.cmo = 1'b1; u.ser = 1'b1; u.cof = 1'b1;
+          u.fn = op[6] ? {2'b01, 1'b0, op[5]} : {2'b00, op[4:3]};
+          u.cond = 4'b0010;
         end else if (op[11:5] == 7'b0110000 || op[11:3] == 9'b011000100) begin
           // MOVE16 (PRM 4): a line read of the source into the data memory
           // unit's buffer, a line write of the destination from it, then the

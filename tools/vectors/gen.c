@@ -49,6 +49,7 @@
  *       index  group  nwords  w0..w5   the instruction, at PROG_BASE
  *       d0..d7  a0..a6  usp  isp  sr   the state it starts from
  *       msp  sfc  dfc  vbr  cacr
+ *       tc itt0 itt1 dtt0 dtt1 mmusr urp srp   (the MMU's, since M10)
  *       npoke  then npoke pairs of     long words put into memory before the
  *         address and value            run, for the few instructions that need
  *                                      something specific there
@@ -59,6 +60,7 @@
  *                                      vector the oracle took, 0 for none
  *       d0..d7  a0..a6  usp  isp  sr  pc   the state it finished in
  *       msp  vbr  sfc  dfc  cacr
+ *       tc itt0 itt1 dtt0 dtt1 mmusr urp srp
  *       nacc                           how many operand accesses it made
  *         per access: addr  rw  bytes  fc  value  mask
  *
@@ -122,6 +124,7 @@ struct test {
     int          flow;      /* the instruction may legitimately change the PC */
     unsigned int d[8], a[7], usp, isp, sr;
     unsigned int imsp, isfc, idfc, ivbr, icacr;
+    unsigned int immu[8];     /* TC ITT0 ITT1 DTT0 DTT1 MMUSR URP SRP */
     int          npoke;
     unsigned int poke_a[4], poke_v[4];
     unsigned int srmask;      /* which status-register bits to compare */
@@ -208,6 +211,8 @@ static void emit(int nw, const unsigned int *w, int pcrel, int flow)
     t->idfc  = 0;
     t->ivbr  = 0;
     t->icacr = 0;
+    /* The MMU's too, translation off: only pmmu040 sets them. */
+    for (i = 0; i < 8; i++) t->immu[i] = 0;
     t->bcdfill = 0;
 }
 
@@ -1442,6 +1447,79 @@ static void g_cinv_cpush(void)
         user_mode(op, 0, 0);
 }
 
+/* The MMU's instructions and registers (UM 3.1, 3.7; PRM 6), translation
+ * off -- the translated behaviour, table searches and access faults, is
+ * make cosim's (m10_mmu) and core_mmu_tb's, which build tables.
+ *
+ * MOVEC to and from TC, ITT0-1, DTT0-1, MMUSR, URP and SRP: the registers
+ * start random (TC with E clear) and the bits that read as zero are the
+ * test (UM 3.1); a value written to TC has E cleared too, so that the
+ * ILLEGAL after it is fetched untranslated. PFLUSH, every encoding, in
+ * supervisor and user mode. PTEST, both kinds, of an address a TTR of the
+ * space DFC names matches -- the one PTEST result the manual defines with
+ * translation off (T and R, UM 3.1.4) -- for each of the four spaces that
+ * are data or program; and in user mode. URP and SRP keep bits 8-0 as
+ * written (UM 3.1.1 only says they must be zero). */
+static const unsigned int MMU_RC[8] = { 0x003, 0x004, 0x005, 0x006, 0x007,
+                                        0x805, 0x806, 0x807 };
+static void mmu_random(struct test *t)
+{
+    int i;
+    for (i = 0; i < 8; i++) t->immu[i] = rnd();
+    t->immu[0] &= 0x7FFFu;                       /* TC: E clear */
+    t->immu[1] &= ~0x8000u;                      /* the TTRs disabled, so that */
+    t->immu[2] &= ~0x8000u;                      /* the fetch after is plain */
+    t->immu[3] &= ~0x8000u;
+    t->immu[4] &= ~0x8000u;
+}
+static void g_pmmu040(void)
+{
+    static const unsigned int dfcs[4] = { 1, 2, 5, 6 };
+    int i, ad, n, k, j, d;
+    unsigned int op;
+    for (i = 0; i < 8; i++)
+        for (ad = 0; ad < 2; ad++)
+            for (n = 1; n < 4; n++) {
+                unsigned int ext = (unsigned)(ad << 15) | (unsigned)(n << 12) | MMU_RC[i];
+                plain2(0x4E7A, ext, 2, 0);       /* MOVEC Rc,Rn */
+                for (k = 0; k < 2; k++) mmu_random(&tests[ntests - 1 - k]);
+                plain2(0x4E7B, ext, 2, 0);       /* MOVEC Rn,Rc */
+                for (k = 0; k < 2; k++) {
+                    struct test *t = &tests[ntests - 1 - k];
+                    mmu_random(t);
+                    /* TC E, and a TTR's E: off, so the fetch after is plain. */
+                    if (i <= 4) {
+                        if (ad) t->a[n] &= ~0x8000u; else t->d[n] &= ~0x8000u;
+                    }
+                }
+            }
+    for (op = 0xF500u; op <= 0xF51Fu; op++) {    /* PFLUSHN, PFLUSH, PFLUSHAN, PFLUSHA */
+        plain(op, 2, 1);
+        for (k = 0; k < 2; k++) mmu_random(&tests[ntests - 1 - k]);
+    }
+    for (op = 0xF500u; op <= 0xF51Fu; op += 9u) user_mode(op, 0, 0);
+    for (j = 0; j < 2; j++)                      /* PTESTW, PTESTR */
+        for (n = 0; n < 8; n++)
+            for (d = 0; d < 4; d++) {
+                plain((j ? 0xF568u : 0xF548u) | (unsigned)n, 1, 1);
+                {
+                    struct test *t = &tests[ntests - 1];
+                    /* A7 is the stack: the TTR then matches it, which is
+                     * fine -- PTEST does not move it. */
+                    unsigned int an = (n == 7) ? t->isp : t->a[n];
+                    /* Not write protected for PTESTW: UAE040 answers B
+                     * there, where UM 3.1.4 says T and R (doc/oracles.md). */
+                    unsigned int ttr = (an & 0xFF000000u) | 0x0000C000u |
+                                       (rnd() & (j ? 0x0364u : 0x0360u));
+                    mmu_random(t);
+                    t->idfc = dfcs[d];
+                    if (dfcs[d] & 2u) t->immu[1] = ttr; else t->immu[3] = ttr;
+                }
+            }
+    user_mode(0xF548u, 0, 0);
+    user_mode(0xF56Fu, 0, 0);
+}
+
 /* ------------------------------------------------------------------ */
 /* The catalogue                                                       */
 /* ------------------------------------------------------------------ */
@@ -1480,6 +1558,7 @@ static const struct group GROUPS[] = {
     { "trace",   g_trace   },
     { "ea",      g_ea      },
     { "cinv_cpush", g_cinv_cpush },
+    { "pmmu040", g_pmmu040 },
 };
 #define NGROUPS ((int)(sizeof GROUPS / sizeof GROUPS[0]))
 
@@ -1505,6 +1584,7 @@ struct result {
     int          exc;          /* the first exception vector taken, or -1 */
     unsigned int d[8], a[7], usp, isp, sr, pc;
     unsigned int msp, vbr, sfc, dfc, cacr;
+    unsigned int mmu[8];
     unsigned int srmask;
     int          nacc;
     struct acc   acc[MAXACC];
@@ -1610,7 +1690,16 @@ static void setup(int i, uae040_state *st, void *u)
     st->dfc  = t->idfc;
     st->vbr  = t->ivbr;
     st->cacr = t->icacr;
+    st->tc   = t->immu[0];
+    st->itt0 = t->immu[1];
+    st->itt1 = t->immu[2];
+    st->dtt0 = t->immu[3];
+    st->dtt1 = t->immu[4];
+    st->mmusr = t->immu[5];
+    st->urp  = t->immu[6];
+    st->srp  = t->immu[7];
     st->pc   = PROG_BASE;
+    uae040_set_mmu(st);           /* (uae040_set_state leaves them alone) */
 
     res[cur].nacc = 0;
     res[cur].exc  = -1;
@@ -1717,6 +1806,8 @@ static void result(int i, const uae040_state *s, void *u)
     r->sfc  = s->sfc;
     r->dfc  = s->dfc;
     r->cacr = s->cacr;
+    r->mmu[0] = s->tc;   r->mmu[1] = s->itt0;  r->mmu[2] = s->itt1; r->mmu[3] = s->dtt0;
+    r->mmu[4] = s->dtt1; r->mmu[5] = s->mmusr; r->mmu[6] = s->urp;  r->mmu[7] = s->srp;
     r->srmask = undefined_ccr(t, s->sr, r->exc);
     normalise(t, r, s);
     /* The status register an exception stacked, at the bottom of the frame
@@ -1833,6 +1924,7 @@ int main(int argc, char **argv)
         for (j = 0; j < 7; j++) printf("%x ", t->a[j]);
         printf("%x %x %x %x %x %x %x %x\n", t->usp, t->isp, t->sr,
                t->imsp, t->isfc, t->idfc, t->ivbr, t->icacr);
+        for (j = 0; j < 8; j++) printf("%x%s", t->immu[j], j == 7 ? "\n" : " ");
         printf("%x", t->npoke);
         for (j = 0; j < t->npoke; j++) printf(" %x %x", t->poke_a[j], t->poke_v[j]);
         printf(" %x %x %x\n", r->srmask & t->srmask, (unsigned)t->bcdfill,
@@ -1841,6 +1933,7 @@ int main(int argc, char **argv)
         for (j = 0; j < 7; j++) printf("%x ", r->a[j]);
         printf("%x %x %x %x %x %x %x %x %x\n", r->usp, r->isp, r->sr, r->pc,
                r->msp, r->vbr, r->sfc, r->dfc, r->cacr);
+        for (j = 0; j < 8; j++) printf("%x%s", r->mmu[j], j == 7 ? "\n" : " ");
         printf("%x", r->nacc);
         for (j = 0; j < r->nacc; j++)
             printf(" %x %x %x %x %x %x", r->acc[j].addr, r->acc[j].rw,

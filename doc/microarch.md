@@ -134,6 +134,8 @@ it and hands over to the exception state machine:
 | `XS_SEQ` | the sequencer issues, in decode's place, an interrupt's acknowledge (the vector offset into T0), the frame's long words at their absolute addresses, a throwaway frame for an interrupt taken with M set, and the vector fetch, which jumps to the handler. Its end is an instruction boundary: a pending interrupt is taken there (UM 8.3), except after an interrupt's own |
 | `XS_STOP` | STOP, until an interrupt |
 | `XS_RST` | RESET: RSTO for 512 clocks |
+| `XS_CMO` | CINV, CPUSH, PFLUSH, PTEST: until the caches or the data memory unit are done |
+| `XS_UNDO` | before `XS_SR`, for an instruction that takes an exception after some of its micro-operations wrote registers: the undo log's old values written back, one a clock |
 
 A fault on any of the sequencer's micro-operations is a double bus fault: the core halts.
 
@@ -144,6 +146,13 @@ starts again from the next instruction, in the new mode's space. So the SR's sys
 and the stack pointers change only in `XS_SR`, decode reads S and M as they are (for the
 privileged instructions and for which supervisor stack pointer MOVEC means), and nothing
 needs to be undone.
+
+**The undo log.** An instruction of several micro-operations may write registers before
+one of its later ones takes an access fault -- CMPM's first postincrement, MOVEM's
+loaded registers and its address register. The restart model (`doc/checkpoint.md`) needs
+them as they were: the first time a micro-operation of an instruction that has not
+finished writes a register, the register file's old value is saved, and an exception
+taken before the instruction's last micro-operation puts them back in `XS_UNDO`.
 
 **The stack pointers.** A7 is the active one; the core holds the other two (USP, ISP,
 MSP). Whatever changes S or M swaps them in `XS_SR`. MOVEC of the active one is a plain
@@ -159,17 +168,18 @@ samples agree (UM 7.5.1); it is pending above the mask, or on a transition to 7 
 is taken. IPEND is that. The acknowledge is a byte read at $FFFFFFFF, TT 11, TM the level:
 a vector on D7-D0, AVEC (24 + level) or TEA (24, spurious).
 
-Not yet (M10): a write that ends in a bus error is not reported (the data memory unit
-drops it); MOVEM's continuation (CM) and the trace continuation (CT) of a format $7 frame
-are neither set nor honoured by RTE -- a faulted MOVEM restarts from its first transfer.
-`doc/divergences.md` has these.
+Not yet: a write that ends in a bus error is not reported (the data memory unit drops
+it); MOVEM's continuation (CM) and the trace continuation (CT) of a format $7 frame are
+neither set nor honoured by RTE -- a faulted MOVEM restarts from its first transfer, its
+registers put back by the undo log. `doc/divergences.md` has these.
 
 ## Caches (M9)
 
 **Attributes.** Each memory unit has an `rd68041_attr`: its two transparent
 translation registers, matched on A31-A24 and the mode, give an access its cache mode,
 UPA and write protection; no match, with translation off, is cachable write-through
-(UM 3.1.2, 3.1.3). The ATC's page descriptors join them at M10.
+(UM 3.1.2, 3.1.3); with translation on, the ATC's entry gives them instead (below,
+"The MMU").
 
 **The instruction cache** (`rtl/rd68041_ifu.sv`). A fetch from a cachable address with
 IE set reads the half-line it is in on one clock and compares the four tags on the next;
@@ -221,6 +231,61 @@ alone. The read waits for every queued write, so the buffer is free when it fill
 **MOVEC to a control register is serialising**, like the SR's writers: what follows it
 sees the caches' enables, the TTRs' modes and VBR as written.
 
+## The MMU (M10)
+
+**Translation** (UM 3.5, Figure 3-22) is done where each memory unit's accesses start.
+The data memory unit translates the read OF asks for while its state machine rests --
+in the same clock as the fast read's tag compare, the ATC's physical page feeding the
+cache's tag comparison, since the cache is indexed by bits the page offset holds -- and
+every piece the state machine moves, in `X_RD`, holding the physical address, mode and
+UPA for the rest of the piece. The fetch unit translates each lookup's address as it
+starts and holds the physical page for the lookup, the fill or the long word. In both: a
+TTR that matches makes the address physical with the TTR's attributes; else, with TC's
+E, the ATC (`rd68041_atc`, 64 entries, 4 ways, LUT RAM read without a clock, tagged by
+FC2) gives the page, its mode and UPA, and an access fault if the entry is not
+resident, is supervisor-only for a user access, or (data) write protected for a write;
+else the defaults. A miss, or a write to a page whose entry has M clear, is a table
+search.
+
+**The table search** (UM 3.2, Figures 3-9 and 3-10) is the data memory unit's walker,
+for both ATCs: an ATC miss in the data memory unit puts the operation it was translating
+aside and searches; the fetch unit asks for a search (`iw_req`) and is handed the entry
+(`iw_fill`). The descriptors are read and written as operations of the data memory
+unit's own state machine -- long words, physical, through the data cache when it has
+the line but never allocating (UM 3.2.1), TM 011 or 100 (UM Table 5-4) -- so a search
+meets the snooper, the push buffer and the bus as any access does. The root, pointer and
+page descriptors in turn, an indirect one followed once; a table descriptor's U set by a
+write after the next level's read (Figure 3-10's note); a page descriptor's U and M as
+Table 3-1 says -- a locked read-modify-write to set U when the access is a read, or a
+write that is refused (W accumulated over the levels, or S on a user access), a plain
+write to set U and M, or M -- then the entry, resident or not: an invalid descriptor or a
+bus error makes a non-resident one, which faults when the access is tried again. The
+interrupted operation then starts again from its translation, which now hits.
+
+**Writes are translated in \<ea\> fetch.** A write is made from the write queue, long
+after its instruction left write-back, so its access fault could no longer be the
+instruction's. Instead, with TC's E or a DTT enabled, every write's micro-operation asks
+the data memory unit for a probe in \<ea\> fetch -- its translation checked as a write, a
+search made if needed (setting M), no data moved -- and a fault is taken there like a
+read's, before the instruction has written anything: RW clear, the frame's write-backs
+empty, the instruction restarted by RTE with the undo log's registers put back
+(`doc/divergences.md`). A probe that hits the ATC is answered on the next clock, as a
+read that hits the cache is. A read-modify-write's read is checked as a write (UM
+8.4.6.7), so its write needs no probe.
+
+**PTEST and PFLUSH** (UM 3.7) are serialising and run in the exception state machine's
+`XS_CMO`, as CINV does, the data memory unit doing the work once its write queue is
+empty: PFLUSH flushes both ATCs, by page (the lookup port) or all at once, sparing
+global entries for the N forms, keyed by DFC's FC2; PTEST flushes the entry from the ATC
+DFC names (the instruction ATC for a program space), answers T and R if a TTR of that
+space matches, else searches (as a write for PTESTW) and fills the ATC, and writes MMUSR
+from the result (UM Figure 3-6: B alone after a bus error).
+
+**The access fault frame.** ATC is set for a translation fault, MA for one on the
+second page of an access that spans two (UM 8.4.6.2), FA the access's first byte (UM
+8.4.6.4); an instruction fetch's ATC fault marks its words in the queue as a bus error
+does, and decode turns the instruction that needs one into the fault.
+
 ## Status
 
 **M4: measured.** The storage above (`rtl/rd68041_bram.sv`, `rd68041_atc.sv`,
@@ -271,3 +336,15 @@ write-through and copyback, as well. What is on the bus is checked against the m
 and `core_snoop_tb`: a random alternate master reads and writes memory the program
 shares with it, its every transfer snooped -- dirty data sourced, sunk and invalidated --
 and both sides' views stay coherent.
+
+**M10, part 1: the MMU.** Both ATCs, the table search with indirect descriptors and the
+U and M updates, write protection, supervisor-only pages, TTRs with translation on,
+PTEST, PFLUSH, translated instruction fetches, and the access faults they make (ATC, MA,
+RW of a write found by its probe). `core_mmu_tb` runs `m10_mmu` -- tables built by the
+program, translated reads, writes and code, five ATC faults, PTEST of four kinds,
+PFLUSH -- and checks the descriptors' U and M bits in memory, with the caches off and
+(`make cache`) on, the tables write-through and then copyback; `make cosim` runs the same
+program against UAE040 register for register, frames included but for the two things the
+two do differently (`doc/oracles.md`); `make vectors OP=pmmu040` sweeps MOVEC to and from
+the MMU's registers, PFLUSH in every encoding and PTEST against TTRs. Not yet (part 2): a
+write's bus error, and MOVEM's and trace's continuations.

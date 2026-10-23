@@ -20,8 +20,10 @@
 // them in one clock, and so that reset clears them (doc/divergences.md: the
 // part's reset does not).
 //
-// Replacement (UM 3.3): an invalid entry of the set if there is one; otherwise
-// the entry a 2-bit counter names, "incremented for each ATC access".
+// Replacement (UM 3.3): the entry the fill's own page already has, if it has
+// one -- a table search that sets M "writes over the old ATC entry" -- else an
+// invalid entry of the set, else the entry a 2-bit counter names,
+// "incremented for each ATC access".
 //
 // Flushing (UM 3.7.2): all entries, or all non-global ones, at once; or the
 // entries a page address matches, given on the lookup port -- PFLUSH is
@@ -82,6 +84,7 @@ module rd68041_atc (
   logic [15:0] g_flat [0:3];  // global
 
   logic [W-1:0] rd [0:3];      // way w's entry at lk_set
+  logic [W-1:0] rdf [0:3];     // ... and at fill_set
   logic  [3:0]  hit_w;
   logic  [1:0]  ctr;
   logic  [1:0]  vic_way;      // the way a fill goes to
@@ -97,6 +100,7 @@ module rd68041_atc (
                                 fill_w, fill_r};
     end
     assign rd[w] = ram[lk_set];
+    assign rdf[w] = ram[fill_set];
 
     // UM 3.3: "all 16 bits of this field are used in the comparison ... when
     // the page size is 4 Kbytes. For 8-Kbytes pages, the least significant bit
@@ -129,9 +133,17 @@ module rd68041_atc (
   assign lk_r     = e[0];
 
   // --- replacement -----------------------------------------------------------
+  // The fill's page's own entry, compared at the fill's set.
+  logic [3:0] own_w;
+  for (genvar w = 0; w < 4; w++) begin : g_own
+    wire [15:0]  ftag = rdf[w][W-1 -: 16];
+    assign own_w[w] = v_flat[w][fill_set] && (rdf[w][W-17] == fill_s) &&
+                      (ftag[15:1] == fill_la[31:17]) && (page8k || (ftag[0] == fill_la[16]));
+  end
   always_comb begin
     vic_way = ctr;
     for (int w = 3; w >= 0; w--) if (!v_flat[w][fill_set]) vic_way = w[1:0];
+    for (int w = 3; w >= 0; w--) if (own_w[w]) vic_way = w[1:0];
   end
 
   // --- valid and global bits, the counter ----------------------------------

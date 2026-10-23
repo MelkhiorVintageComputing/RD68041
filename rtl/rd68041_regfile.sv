@@ -31,6 +31,7 @@ module rd68041_regfile (
     input  logic  [4:0] ra, rb, rc, rd, re,
     output logic [31:0] qa, qb, qc, qd, qe,
     output logic [31:0] q15,      // A7, the active stack pointer: the stack swap's (M8)
+    output logic [31:0] o0, o1, o2, // what each write port's register holds before the write
 
     input  logic        we0,
     input  logic  [4:0] wa0,
@@ -70,5 +71,8 @@ module rd68041_regfile (
   assign qd = (rd < 5'd20) ? r[rd] : 32'h0;
   assign qe = (re < 5'd20) ? r[re] : 32'h0;
   assign q15 = r[15];
+  assign o0  = (wa0 < 5'd20) ? r[wa0] : 32'h0;
+  assign o1  = (wa1 < 5'd20) ? r[wa1] : 32'h0;
+  assign o2  = (wa2 < 5'd20) ? r[wa2] : 32'h0;
 
 endmodule

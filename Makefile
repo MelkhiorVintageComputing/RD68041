@@ -215,7 +215,7 @@ CACHE ?= 0
 
 # The directed benches that run a program (core_exc_tb, core_fault_tb) take it
 # from build/programs/.
-SIMPROGS := m8_int m8_fault m9_cache m9_snoop
+SIMPROGS := m8_int m8_fault m9_cache m9_snoop m10_mmu
 
 sim: dirs $(patsubst %,$(BUILD)/programs/%.hex,$(SIMPROGS))
 	@rm -f $(addprefix $(BUILD)/,$(addsuffix .simres,$(TBS))); \
@@ -609,10 +609,22 @@ CPUTEST_MAX  ?= 40
 .PHONY: cache
 cache:
 	@$(MAKE) --no-print-directory cosim PROGS="m9_icache m9_dcache m9_move16"
+	@$(MAKE) --no-print-directory mmu-cache
 	@for c in 1 2; do echo "== vectors-all CACHE=$$c"; \
 	  $(MAKE) --no-print-directory vectors-all CACHE=$$c || exit 1; done
 	@for c in 1 2; do echo "== cputest CACHE=$$c"; \
 	  $(MAKE) --no-print-directory cputest CACHE=$$c || exit 1; done
+
+# core_mmu_tb with the caches on: the tables write-through, then copyback.
+mmu-cache: dirs $(BUILD)/programs/m10_mmu.hex
+	@iverilog $(IVFLAGS) -I sim/tb -o $(BUILD)/core_mmu_tb.vvp -s core_mmu_tb \
+	    $(RTL) $(MODELS) sim/tb/core_mmu_tb.sv > $(BUILD)/core_mmu_tb.build.log 2>&1 \
+	  || { grep -v $(NOTES) $(BUILD)/core_mmu_tb.build.log; exit 1; }
+	@ok=1; for cm in 0 20; do \
+	  vvp $(BUILD)/core_mmu_tb.vvp +cacr=80008000 +cm=$$cm > $(BUILD)/core_mmu_tb-cm$$cm.log 2>&1; \
+	  grep -E '^  FAIL|^FAIL|^PASS' $(BUILD)/core_mmu_tb-cm$$cm.log | head -20; \
+	  grep -q '^PASS' $(BUILD)/core_mmu_tb-cm$$cm.log || ok=0; \
+	done; test $$ok -eq 1
 
 .PHONY: cputest
 cputest: dirs $(CTBUILD)/run/stamp

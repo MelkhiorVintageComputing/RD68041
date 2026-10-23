@@ -114,8 +114,8 @@ module rd68041_core #(
   wire  [2:0] imask  = sr_sys[2:0];
   assign sr = {sr_sys, 3'b000, ccr_w};
 
-  // The control registers (UM 2.2.2, 3.1, 4.2), written at write-back. M7 holds
-  // the MMU's as plain registers for MOVEC; M10 gives them meaning. A7
+  // The control registers (UM 2.2.2, 3.1, 4.2), written at write-back; MMUSR by
+  // PTEST too. A7
   // (register 15) is the active stack pointer -- the USP in user mode, the ISP
   // or, with M set, the MSP in supervisor mode -- and the other two are held
   // here; whatever changes S or M swaps them.
@@ -200,6 +200,7 @@ module rd68041_core #(
   logic [31:0] of_md;                         // the operand read
   logic        of_got;                        // ... is in of_md
   logic        of_er, of_av;                  // ... ended in a bus error, or with AVEC
+  logic        of_at, of_ma;                  // ... an ATC fault, on the second page
   logic [31:0] ex_md;
   logic        ex_er, ex_av;
   logic [31:0] w_res;                         // the result
@@ -223,7 +224,10 @@ module rd68041_core #(
   //   XS_STOP  STOP: waiting for an interrupt (UM 8.2.9; trace never stops it)
   //   XS_RST   RESET: RSTO for 512 clocks (UM 7.10)
   //   XS_CMO   CINV, CPUSH: until the caches are done (UM 4.2)
-  typedef enum logic [2:0] { XS_IDLE, XS_SR, XS_SEQ, XS_STOP, XS_RST, XS_CMO } xs_e;
+  //   XS_UNDO  before XS_SR, for an exception an instruction takes after some of
+  //            its micro-operations completed: the registers they changed are put
+  //            back, so that the instruction restarts from where it began (below)
+  typedef enum logic [2:0] { XS_IDLE, XS_SR, XS_SEQ, XS_STOP, XS_RST, XS_CMO, XS_UNDO } xs_e;
   xs_e         xs;
   logic        x_exc;                         // XS_SR: an exception (else serialising only)
   logic        x_int;                         // ... an interrupt, at level x_lvl
@@ -234,6 +238,7 @@ module rd68041_core #(
   logic [15:0] x_ssw, x_sr0;                  // the SSW; the SR the frame holds
   logic        x_srw, x_stp, x_rst, x_trc;    // serialising: an SR write, STOP, RESET, traced
   logic        x_cmo;                         // ... CINV or CPUSH: x_cmf {caches, scope}, at x_cma
+  logic        x_cmm;                         // ... PFLUSH or PTEST: x_cmf[2:0] the kind
   logic  [3:0] x_cmf;
   logic        x_cmp;
   logic [31:0] x_cma;
@@ -243,8 +248,27 @@ module rd68041_core #(
   logic        xs_int;                        // the sequence running is an interrupt's
   logic  [8:0] rst_cnt;
   logic        x_flush;                       // write-back empties the pipeline behind it
+
+  // The undo log. The pipeline commits an instruction a micro-operation at a
+  // time, so an instruction can have changed registers -- an address register
+  // a (An)+ moved, the registers MOVEM loaded so far -- before a later
+  // micro-operation of it faults. The restart model wants it to have done
+  // nothing (UM 8.3, doc/checkpoint.md): each architectural register an
+  // instruction's micro-operations before its last write is saved here the
+  // first time, and XS_UNDO writes the saved values back when the instruction
+  // takes an exception before completing.
+  logic [31:0] ush [0:15];
+  logic [15:0] umask;
   logic        ic_op, ic_busy;                // CINV, CPUSH of the instruction cache
   logic        dc_op, dc_busy;                // ... and of the data cache
+  logic        mm_op, mm_busy;                // PFLUSH, PTEST
+  logic        mmusr_we;
+  logic [31:0] mmusr_v;
+  // The instruction ATC's flushes and table searches, done by the data unit.
+  logic        if_flush, if_fl_s, iw_req, iw_s, iw_fill, iw_fill_s, iw_done;
+  logic  [1:0] if_fl_kind;
+  logic [31:0] if_fl_la, iw_la, iw_entry;
+  logic [31:12] iw_fill_la;
 
   // ===========================================================================
   // Instruction fetch and decode
@@ -252,7 +276,7 @@ module rd68041_core #(
   logic [191:0] q_win;
   logic   [3:0] q_cnt, q_pop;
   logic  [31:0] q_pc;
-  logic  [11:0] q_err;
+  logic  [11:0] q_err, q_atc;
   logic         q_aerr;
   logic         go;
   logic  [31:0] go_pc;
@@ -263,14 +287,18 @@ module rd68041_core #(
       .clk(clk), .rst_n(rst_n), .crst(crst),
       .go(go), .go_pc(go_pc),
       .stop(halted || lock_open || xs == XS_SR || xs == XS_STOP || xs == XS_RST ||
-            xs == XS_CMO),
+            xs == XS_CMO || xs == XS_UNDO),
       .sup(sup), .ic_en(cacr[15]), .itt0(itt0), .itt1(itt1),
-      .q_win(q_win), .q_cnt(q_cnt), .q_pc(q_pc), .q_err(q_err), .q_aerr(q_aerr), .q_pop(q_pop),
+      .q_win(q_win), .q_cnt(q_cnt), .q_pc(q_pc), .q_err(q_err), .q_atc(q_atc), .q_aerr(q_aerr), .q_pop(q_pop),
       .f_valid(f_valid), .f_ready(f_ready), .f_addr(f_addr), .f_tm(f_tm), .f_siz(f_siz),
       .f_ci(f_ci), .f_upa(f_upa),
       .f_rsp(f_rsp), .f_lw(rsp_lw), .f_data(rsp_data), .f_tci(rsp_tci), .f_done(f_done),
       .f_err(f_err),
       .ic_op(ic_op), .ic_scope(x_cmf[1:0]), .ic_addr(x_cma), .ic_p8k(tc[14]), .ic_busy(ic_busy),
+      .tc_e(tc[15]), .tc_p(tc[14]),
+      .if_flush(if_flush), .if_fl_kind(if_fl_kind), .if_fl_la(if_fl_la), .if_fl_s(if_fl_s),
+      .iw_req(iw_req), .iw_la(iw_la), .iw_s(iw_s), .iw_fill(iw_fill), .iw_fill_la(iw_fill_la),
+      .iw_fill_s(iw_fill_s), .iw_entry(iw_entry), .iw_done(iw_done),
       .sn_addr(sn_addr), .sn_ihit(sn_ihit), .sn_iinv(sn_iinv));
 
 
@@ -364,7 +392,7 @@ module rd68041_core #(
       end else begin
         de_u.xvec = 8'd2;
         de_u.imm  = de_fa & 32'hFFFF_FFFC;
-        de_u.tgt  = {16'h0, 4'h0, 2'b00, 1'b0, 1'b1, 1'b0, 2'b00, rd68041_pkg::TT_NORMAL,
+        de_u.tgt  = {16'h0, 4'h0, 1'b0, q_atc[de_fk], 1'b0, 1'b1, 1'b0, 2'b00, rd68041_pkg::TT_NORMAL,
                      sup ? rd68041_pkg::TM_SUP_CODE : rd68041_pkg::TM_USER_CODE};
       end
     end
@@ -393,7 +421,7 @@ module rd68041_core #(
   // The register file
   // ===========================================================================
   logic [4:0]  ra, rb, rc, rd, re;
-  logic [31:0] qa, qb, qc, qd, qe, q15;
+  logic [31:0] qa, qb, qc, qd, qe, q15, rf_o0, rf_o1, rf_o2;
   logic        we0, we1, we2;
   logic [4:0]  wa0, wa1, wa2;
   logic [31:0] wd0, wd1, wd2;
@@ -403,6 +431,7 @@ module rd68041_core #(
       .clk(clk), .rst_n(rst_n),
       .ra(ra), .rb(rb), .rc(rc), .rd(rd), .re(re),
       .qa(qa), .qb(qb), .qc(qc), .qd(qd), .qe(qe), .q15(q15),
+      .o0(rf_o0), .o1(rf_o1), .o2(rf_o2),
       .we0(we0), .wa0(wa0), .wd0(wd0), .wm0(wm0),
       .we1(we1), .wa1(wa1), .wd1(wd1),
       .we2(we2), .wa2(wa2), .wd2(wd2));
@@ -552,12 +581,22 @@ module rd68041_core #(
   // them, the frame's: UM 8.1 fetches the vector last, and a double bus fault
   // on it leaves memory as it then is (UM 8.2.1).
   wire xs_hold  = of_u.xs && ((ex_u.valid && ex_u.st) || (w_u.valid && w_u.st) || !st_empty);
-  wire of_wants = of_u.valid && of_u.ld && !of_got && running && !st_ahead && !xs_hold;
+  // A write is translated here, so that its access fault is the
+  // instruction's, taken before it writes anything -- the frame then has no
+  // write-back pending, and the instruction is restarted (UM 8.4.6;
+  // doc/divergences.md): the data unit's probe, when translation or a data
+  // TTR is on. A locked write's page was checked by its read (ld_wr). One of
+  // exception processing's writes that faults is a double bus fault (w_dbl).
+  wire mmu_on   = tc[15] || dtt0[15] || dtt1[15];
+  wire of_prb   = of_u.st && !of_u.ld && !of_u.lk && mmu_on;
+  wire of_mem   = of_u.ld || of_prb;
+  wire of_wants = of_u.valid && of_mem && !of_got && running &&
+                  (of_prb || (!st_ahead && !xs_hold));
   assign ld_valid = (rs == R_SSP || rs == R_PC) || of_wants;
   assign ld_addr  = (rs == R_SSP) ? 32'h0 : (rs == R_PC) ? 32'h4 : of_ea;
   assign ld_sz    = (rs == R_RUN) ? of_u.sz : rd68041_pkg::SZ_L;
 
-  wire of_ready = !of_u.ld || of_got || ld_done;
+  wire of_ready = !of_mem || of_got || ld_done;
   assign of_stall = ex_stall || (of_u.valid && !of_ready);
 
   // A read that ended in a bus error is an access fault (UM 8.2.1), taken when
@@ -566,14 +605,24 @@ module rd68041_core #(
   // a write ("the data memory unit considers the read portion of
   // read-modify-write transfers ... a write", UM 8.4.6.7). An acknowledge
   // cycle's bus error is an answer, not a fault.
-  logic        ld_avec;
+  logic        ld_avec, ld_atc, ld_ma;
   wire         of_err = of_got ? of_er : ld_err;
-  wire         of_f   = of_u.valid && of_u.ld && !of_u.ack && of_err;
+  wire         of_atc = of_got ? of_at : ld_atc;
+  wire         of_mab = of_got ? of_ma : ld_ma;
+  wire         of_f   = of_u.valid && of_mem && !of_u.ack && of_err;
+  // An access fault (ATC set) on a read checked as a write -- a probe, a
+  // read-modify-write's read -- is a write's (RW 0); a bus error on an
+  // unlocked one's read is the read's. A MOVES's space of data or program is
+  // TM's data one (UM 3.5.2, Table 3-2).
+  wire         of_rw  = !(of_u.lk || of_prb || (of_atc && of_u.st));
+  wire  [2:0]  of_afc = of_prb ? dfc : sfc;
+  wire  [2:0]  of_fc  = (of_afc[1:0] == 2'b10) ? {of_afc[2], 2'b01} : of_afc;
   wire  [1:0]  of_siz = (of_u.sz == rd68041_pkg::SZ_B) ? rd68041_pkg::SIZ_BYTE :
                         (of_u.sz == rd68041_pkg::SZ_W) ? rd68041_pkg::SIZ_WORD : rd68041_pkg::SIZ_LONG;
-  wire [15:0]  of_ssw = {4'h0, 2'b00, of_u.lk, !of_u.lk, 1'b0, of_siz,
-                         of_u.alt ? rd68041_pkg::TT_ALTFC : rd68041_pkg::TT_NORMAL,
-                         of_u.alt ? sfc : (sup ? rd68041_pkg::TM_SUP_DATA : rd68041_pkg::TM_USER_DATA)};
+  wire [15:0]  of_ssw = {4'h0, of_mab, of_atc, of_u.lk, of_rw, 1'b0, of_siz,
+                         (of_u.alt && (of_fc[1:0] != 2'b01)) ? rd68041_pkg::TT_ALTFC :
+                                                                rd68041_pkg::TT_NORMAL,
+                         of_u.alt ? of_fc : (sup ? rd68041_pkg::TM_SUP_DATA : rd68041_pkg::TM_USER_DATA)};
   rd68041_pkg::uop_t of_out;                  // the micro-operation as it goes on to EX
   always_comb begin
     of_out = of_u;
@@ -1248,19 +1297,36 @@ module rd68041_core #(
     end
   end
   // CINV and CPUSH: the instruction cache's part starts as XS_SR applies.
-  assign ic_op = x_apply && !x_exc && x_cmo && x_cmf[3];
-  assign dc_op = x_apply && !x_exc && x_cmo && x_cmf[2];
-  wire   cmo_done = (xs == XS_CMO) && !ic_busy && !dc_busy;
+  assign ic_op = x_apply && !x_exc && x_cmo && !x_cmm && x_cmf[3];
+  assign dc_op = x_apply && !x_exc && x_cmo && !x_cmm && x_cmf[2];
+  // PFLUSH and PTEST, the same way, in the data unit.
+  assign mm_op = x_apply && !x_exc && x_cmo && x_cmm;
+  wire   cmo_done = (xs == XS_CMO) && !ic_busy && !dc_busy && !mm_busy && !mm_op;
   // Fetching starts again behind a serialising instruction, a RESET, or a
   // CINV or CPUSH.
   wire x_go = (x_apply && !x_exc && !x_rst && !x_cmo && !x_trc && !x_stp) ||
               (((xs == XS_RST && rst_cnt == 9'd511) || cmo_done) && !x_trc);
   assign rsto = (xs == XS_RST);
 
-  assign we0 = (w_wr && w_u.wr) || (rs == R_SSP && ld_done) || xr_we;
-  assign wa0 = (rs == R_SSP || xr_we) ? 5'd15 : w_u.wr_reg;
-  assign wd0 = (rs == R_SSP) ? ld_data : xr_we ? xr_v : w_res;
-  assign wm0 = (rs == R_SSP || xr_we) ? 4'hF : lanes_of(w_u.wr_sz);
+  // XS_UNDO: one register put back a clock, the lowest first.
+  logic [3:0] xu_r;
+  always_comb begin
+    xu_r = 4'd0;
+    for (int r = 15; r >= 0; r--) if (umask[r]) xu_r = 4'(r);
+  end
+  wire xu_we = (xs == XS_UNDO) && (umask != 16'h0);
+
+  assign we0 = (w_wr && w_u.wr) || (rs == R_SSP && ld_done) || xr_we || xu_we;
+  assign wa0 = xu_we ? {1'b0, xu_r} : (rs == R_SSP || xr_we) ? 5'd15 : w_u.wr_reg;
+  assign wd0 = xu_we ? ush[xu_r] : (rs == R_SSP) ? ld_data : xr_we ? xr_v : w_res;
+  assign wm0 = (rs == R_SSP || xr_we || xu_we) ? 4'hF : lanes_of(w_u.wr_sz);
+
+  // What the log takes this clock: the old value of each architectural
+  // register a micro-operation that is not its instruction's last writes.
+  wire u_log  = w_go && !w_u.last;
+  wire u_log0 = u_log && w_wr && w_u.wr && !w_u.wr_reg[4];
+  wire u_log1 = u_log && (w_u.ea_upd != rd68041_pkg::U_NONE);
+  wire u_log2 = u_log && w_wr && w_u.wr2 && !w_u.wr2_reg[4];
   // The address register update; the register file lets a result or a second
   // result to the same register win over it.
   assign we1 = w_go && (w_u.ea_upd != rd68041_pkg::U_NONE);
@@ -1283,12 +1349,15 @@ module rd68041_core #(
 
   rd68041_dmu u_dmu (
       .clk(clk), .rst_n(rst_n), .crst(crst), .sup(sup), .sfc(sfc), .dfc(dfc),
-      .de(cacr[31]), .dtt0(dtt0), .dtt1(dtt1),
+      .de(cacr[31]), .dtt0(dtt0), .dtt1(dtt1), .itt0(itt0), .itt1(itt1),
+      .tc_e(tc[15]), .tc_p(tc[14]), .urp(urp), .srp(srp),
       .ld_valid(ld_valid), .ld_addr(ld_addr), .ld_pre(of_ea_nx), .ld_sz(ld_sz),
       .ld_done(ld_done), .ld_data(ld_data), .ld_err(ld_err), .ld_cancel(ld_cancel),
       .ld_lock(of_u.lk && rs == R_RUN), .ld_alt(of_u.alt && rs == R_RUN),
       .ld_ack(of_u.ack && rs == R_RUN), .ld_tm(of_u.fn[2:0]), .ld_avec(ld_avec),
-      .ld_noalloc(of_u.xs || rs != R_RUN), .ld_m16(of_u.m16 && rs == R_RUN),
+      .ld_noalloc(of_u.xs || rs != R_RUN), .ld_m16(of_u.m16 && of_u.ld && rs == R_RUN),
+      .ld_wr((of_u.lk || (of_u.ld && of_u.st)) && rs == R_RUN),
+      .ld_probe(of_prb && rs == R_RUN), .ld_atc(ld_atc), .ld_ma(ld_ma),
       .st_valid(w_st && running && !w_u.halt), .st_addr(w_ea),
       .st_sz(w_u.sz), .st_data(w_std), .st_lock(w_u.lk), .st_locke(w_u.lke),
       .st_alt(w_u.alt), .st_noalloc(w_u.xs), .st_m16(w_u.m16),
@@ -1296,6 +1365,11 @@ module rd68041_core #(
       .lock_open(lock_open),
       .dc_op(dc_op), .dc_scope(x_cmf[1:0]), .dc_push(x_cmp), .dc_addr(x_cma),
       .dc_p8k(tc[14]), .dc_busy(dc_busy),
+      .mm_op(mm_op), .mm_kind(x_cmf[2:0]), .mm_addr(x_cma), .mm_busy(mm_busy),
+      .mmusr_we(mmusr_we), .mmusr_v(mmusr_v),
+      .if_flush(if_flush), .if_fl_kind(if_fl_kind), .if_fl_la(if_fl_la), .if_fl_s(if_fl_s),
+      .iw_req(iw_req), .iw_la(iw_la), .iw_s(iw_s), .iw_fill(iw_fill), .iw_fill_la(iw_fill_la),
+      .iw_fill_s(iw_fill_s), .iw_entry(iw_entry), .iw_done(iw_done),
       .d_valid(d_valid), .d_ready(d_ready), .d_addr(d_addr), .d_write(d_write),
       .d_siz(d_siz), .d_tt(d_tt), .d_tm(d_tm), .d_tln(d_tln), .d_upa(d_upa), .d_ci(d_ci),
       .d_lock(d_lock), .d_locke(d_locke), .d_wdata(d_wdata128), .d_rsp(d_rsp), .d_lw(d_lw),
@@ -1306,7 +1380,7 @@ module rd68041_core #(
 
   // A redirect, or an exception, kills <ea> fetch: its read, if one is on the
   // bus, is cancelled.
-  assign ld_cancel = (redirect || x_flush) && of_u.valid && of_u.ld && !of_got;
+  assign ld_cancel = (redirect || x_flush) && of_u.valid && of_mem && !of_got;
 
   assign go    = (rs == R_PC && ld_done) || redirect || x_go;
   assign go_pc = (rs == R_PC) ? ld_data : redirect ? redirect_pc : x_npc;
@@ -1340,10 +1414,12 @@ module rd68041_core #(
       x_exc     <= 1'b0; x_int <= 1'b0; x_lvl <= '0; x_vec <= '0; x_fmt <= '0;
       x_pc      <= '0; x_addr <= '0; x_ssw <= '0; x_sr0 <= '0;
       x_srw     <= 1'b0; x_stp <= 1'b0; x_rst <= 1'b0; x_trc <= 1'b0;
-      x_cmo     <= 1'b0; x_cmf <= '0; x_cmp <= 1'b0; x_cma <= '0;
+      x_cmo     <= 1'b0; x_cmm <= 1'b0; x_cmf <= '0; x_cmp <= 1'b0; x_cma <= '0;
       x_srn     <= '0; x_npc <= '0; x_ipc <= '0; x_rerun <= 1'b0;
       xs_int    <= 1'b0;
       rst_cnt   <= '0;
+      for (int r = 0; r < 16; r++) ush[r] <= '0;
+      umask     <= '0;
       seq       <= 5'd0;
       de_ind    <= 2'b00;
       de_len    <= 5'd0;
@@ -1360,6 +1436,7 @@ module rd68041_core #(
       of_an     <= '0; ex_an <= '0; w_an <= '0;
       of_md     <= '0; of_got <= 1'b0; ex_md <= '0;
       of_er     <= 1'b0; of_av <= 1'b0; ex_er <= 1'b0; ex_av <= 1'b0;
+      of_at     <= 1'b0; of_ma <= 1'b0;
       w_res     <= '0; w_res2 <= '0; w_std <= '0; w_npc <= '0; w_ccr <= '0;
       w_nowr    <= 1'b0; w_nost <= 1'b0; w_cof <= 1'b0;
       div_go    <= 1'b0; div_done <= 1'b0;
@@ -1377,6 +1454,7 @@ module rd68041_core #(
       itt0      <= '0; itt1 <= '0; dtt0 <= '0; dtt1 <= '0;
       nmi       <= 1'b0;
       xs        <= XS_IDLE;
+      umask     <= '0;
       seq       <= 5'd0;
       de_halted <= 1'b0;
       ea_u      <= '0;
@@ -1425,13 +1503,23 @@ module rd68041_core #(
             rd68041_pkg::CR_MSP:   msp   <= w_res;
             rd68041_pkg::CR_ISP:   isp   <= w_res;
             rd68041_pkg::CR_MMUSR: mmusr <= w_res;
-            rd68041_pkg::CR_URP:   urp   <= w_res & 32'hFFFF_FE00;
-            rd68041_pkg::CR_SRP:   srp   <= w_res & 32'hFFFF_FE00;
+            // UM 3.1.1: bits 8-0 "must be zero" -- kept as written (a table
+            // search uses 31-9), as UAE040 keeps them (doc/oracles.md).
+            rd68041_pkg::CR_URP:   urp   <= w_res;
+            rd68041_pkg::CR_SRP:   srp   <= w_res;
             default: ;
           endcase
         end
       end
       if (!w_stall) w_u <= '0;
+
+      // --- the undo log ---------------------------------------------------------
+      if (u_log0 && !umask[wa0[3:0]]) begin ush[wa0[3:0]] <= rf_o0; umask[wa0[3:0]] <= 1'b1; end
+      if (u_log1 && !umask[wa1[3:0]]) begin ush[wa1[3:0]] <= rf_o1; umask[wa1[3:0]] <= 1'b1; end
+      if (u_log2 && !umask[wa2[3:0]]) begin ush[wa2[3:0]] <= rf_o2; umask[wa2[3:0]] <= 1'b1; end
+      if (w_go && w_u.last) umask <= '0;
+      if (xu_we) umask[xu_r] <= 1'b0;
+      if (xs == XS_UNDO && umask == 16'h0) xs <= XS_SR;
 
       // --- exception processing ---------------------------------------------
       if (xs == XS_SEQ && w_end && w_u.xs) xs <= XS_IDLE;
@@ -1507,7 +1595,7 @@ module rd68041_core #(
       // An exception, an interrupt or a serialising micro-operation, from
       // write-back: XS_SR next.
       if (x_flush) begin
-        xs     <= XS_SR;
+        xs     <= (w_pre && umask != 16'h0) ? XS_UNDO : XS_SR;
         x_exc  <= w_x || w_trace || w_int;
         x_int  <= w_int;
         x_lvl  <= nmi ? 3'd7 : ipl_lvl;
@@ -1521,6 +1609,7 @@ module rd68041_core #(
         x_stp  <= w_u.stp && !w_x;
         x_rst  <= w_u.rsto && !w_x;
         x_cmo  <= w_u.cmo && !w_x;
+        x_cmm  <= w_u.cond[1];
         x_cmf  <= w_u.fn;
         x_cmp  <= w_u.cond[0];
         x_cma  <= w_res;
@@ -1530,6 +1619,9 @@ module rd68041_core #(
         x_trc  <= (tr[1] || (tr[0] && w_cof)) && !w_rerun;
         x_rerun <= w_rerun;
       end
+
+      // PTEST's result (UM 3.1.4).
+      if (mmusr_we) mmusr <= mmusr_v;
 
       // --- the divider ------------------------------------------------------
       if (div_start) div_go <= 1'b1;
@@ -1555,9 +1647,11 @@ module rd68041_core #(
       end
 
       // --- <ea> fetch -> execute --------------------------------------------
-      if (of_u.valid && of_u.ld && !of_got && ld_done) begin
+      if (of_u.valid && of_mem && !of_got && ld_done) begin
         of_md  <= ld_data;
         of_er  <= ld_err;
+        of_at  <= ld_atc;
+        of_ma  <= ld_ma;
         of_av  <= ld_avec;
         of_got <= 1'b1;
       end

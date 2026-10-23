@@ -13,6 +13,10 @@
 //   UM 8.4.6.2 the SSW: RW, SIZE, TT, TM of the faulted access; a locked
 //              read-modify-write's read is a write (RW clear, LK set); an
 //              instruction fetch's TM is $6 (supervisor program)
+//   UM 8.3     an instruction that faults after some of its micro-operations
+//              completed restarts from where it began: CMPM's first address
+//              register, MOVEM's address register and the registers it loaded
+//              (doc/microarch.md, the undo log)
 //   UM 8.2.1   a bus error while a vector is fetched for an exception: a
 //              double bus fault, and the processor halts, the frame already
 //              written
@@ -70,6 +74,12 @@ module core_fault_tb;
     record(2, "(c) an instruction fetch",    8'h27, 32'h0000_8040,     16'h0106, 32'h0000_8040);
     record(3, "(d) TAS's locked read",       8'h27, rdl(RES + 32'h88), 16'h0225, 32'h0000_8020);
     check("(d) the bus after the locked fault: D3", reg_of(3), 32'h1234);
+    check("(f) CMPM: A0 as it was before the instruction", rdl(RES + 32'h90), 32'h0000_5000);
+    check("(f) CMPM: the FA of its frame", rdl(RES + 20*4 + 10), 32'h0000_8030);
+    check("(g) MOVEM: A2 as it was before", rdl(RES + 32'h98), 32'h0000_7FF8);
+    check("(g) MOVEM: D0 as it was before", rdl(RES + 32'h9C), 32'hFFFF_FFFF);
+    check("(g) MOVEM: D1 as it was before", rdl(RES + 32'hA0), 32'hFFFF_FFFF);
+    check("(g) MOVEM: the FA of its frame", rdl(RES + 20*5 + 10), 32'h0000_8000);
     check("(e) halted (a double bus fault)", {31'h0, dut.u_core.halted}, 32'h1);
     check("(e) TRAP #0's frame, written before the vector: its word", {16'h0, rdw(32'hEFFE)},
           32'h0080);

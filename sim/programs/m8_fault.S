@@ -70,6 +70,25 @@ fd_ret:
         move.l  %d2, SCRATCH
         move.l  SCRATCH, %d3
 
+        | (f) CMPM, its second read faulting after the first moved A0: the
+        | instruction restarts from where it began, A0 put back
+        move.l  #ff_ret, RESUME
+        lea     0x5000, %a0
+        lea     BERR + 0x30, %a1
+        cmpm.l  (%a0)+, (%a1)+
+ff_ret: move.l  %a0, RES + 0x90
+        move.l  %a1, RES + 0x94
+        | (g) MOVEM, its third long word faulting after two registers were
+        | loaded and A2 moved twice: all three put back
+        move.l  #fg_ret, RESUME
+        lea     BERR - 8, %a2
+        moveq   #-1, %d0
+        moveq   #-1, %d1
+        movem.l (%a2)+, %d0-%d3
+fg_ret: move.l  %a2, RES + 0x98
+        move.l  %d0, RES + 0x9C
+        move.l  %d1, RES + 0xA0
+
         | (e) the vector read faults while TRAP #0's frame is being built: a
         | double bus fault, and the processor halts
         move.l  #BERR, %d0

@@ -56,10 +56,54 @@ queue is empty, so every write before the exception reaches memory first, and a 
 frame's WB3S, WB2S and WB1S always have V clear. The handler that completes the pending
 write-backs finds none, which the frame allows; what differs is when the writes reach the
 bus. It also keeps the writes' function codes those of the mode they were made in, since
-the SR changes only after them. At M10, when a write can itself fault, the write-back
-slots get their contents (`doc/checkpoint.md`).
+the SR changes only after them. A write's own translation fault is taken before the
+write is made (below), so it is never one of them either.
 
 **Checked by:** `core_fault_tb` (the WB status words of four frames).
+
+## A write's access fault is taken before the write
+
+**UM 8.2.1, 8.4.6.3, 8.4.6.7.** The part makes a write after the instruction has executed;
+when its translation fails, the write is one of the frame's pending write-backs, for the
+handler to complete once it has mapped the page. UAE040 stacks such a write in WB3
+(`doc/oracles.md`).
+
+**What this design does.** With translation or a data TTR on, every write is translated
+in \<ea\> fetch first, by a probe (`doc/microarch.md`, "The MMU"), and a fault there is
+taken as a read's is: the frame's PC is the instruction's, RW is clear, FA, SIZE, TT and
+TM are the write's, no write-back is pending, and RTE restarts the instruction, its
+registers put back as for any access fault (the undo log). A handler that maps the page
+and returns sees the write made by the instruction's second run. What differs:
+
+- an instruction that wrote memory before the write that faulted (MOVEM to memory, a
+  write to a second operand) makes those writes again;
+- the search the probe makes sets the page's M before the write is made, so an
+  exception that comes between them -- a later access of the same instruction that
+  faults -- leaves M set on a page the instruction did not write.
+
+A write that faults after its probe passed -- only if the tables changed under it -- is
+dropped. **Checked by:** `core_mmu_tb` (the write to a write-protected page), `make
+cosim` (`m10_mmu`).
+
+## Reset clears the ATCs
+
+**UM 3.7.4:** "The assertion of RSTI disables translation by clearing the E-bits ... but it
+does not flush the ATCs."
+
+**What this design does.** Reset clears every entry's valid bit (ASIC: nothing has a
+value it was not given at reset). Software must flush after a reset anyway, as the
+manual says; what it cannot do is rely on an entry surviving one.
+
+## A table search finds a cached descriptor with the cache disabled
+
+**UM 3.2.1:** "If table descriptors are allocated in the data cache and the cache is
+disabled, the processor locks up trying to access a cached descriptor during a table
+search."
+
+**What this design does.** With DE clear the search's accesses go to memory, as every
+other access does, and see what memory holds (not a dirty line's newer data); nothing
+locks up. With DE set they read a line the cache has, never allocating one, and write
+through a line they hit.
 
 ## Not yet: a write that ends in a bus error, and the format $7 continuations
 
@@ -67,11 +111,11 @@ slots get their contents (`doc/checkpoint.md`).
 exception". **UM 8.4.6.2, 8.4.6.7:** MOVEM's continuation (CM) and the trace
 continuation (CT).
 
-**What this design does until M10.** A write answered with TEA is dropped, with no
+**What this design does, not yet otherwise.** A write answered with TEA is dropped, with no
 exception; a MOVEM whose read faults is restarted from its first transfer, so a MOVEM
 whose addressing mode uses a register the list loaded can restart from the wrong address
 (the case CM exists for); CT is never set, and RTE of a format $7 frame resumes at its PC
-whatever the continuation bits say. These are M10's (`doc/plan.md`).
+whatever the continuation bits say. These are M10's second part (`doc/plan.md`).
 
 ## An address error during exception processing is a double bus fault
 
@@ -131,7 +175,8 @@ cache and never allocates.
 **UM 4.6.2:** "if a bus error terminates a push transfer, the processor immediately
 takes an exception." **UM 8.2.1:** a write's bus error always does.
 
-**What this design does until M10.** A push answered with TEA is dropped. A copyback
+**What this design does, not yet otherwise.** A push answered with TEA is dropped. A copyback
 write whose allocating line read faults on its first long word is written through to
 memory instead; one whose own bus write faults is dropped (above, "a write that ends in
-a bus error"). M10 brings the access error frame's write-back slots, and these with them.
+a bus error"). M10's second part brings the access error frame's write-back slots, and
+these with them.

@@ -11,11 +11,10 @@
 // A TTR matches when it is enabled, A31-A24 equal its base outside its mask,
 // and its S field takes the access's mode (00 user only, 01 supervisor only,
 // 1x either); TT0 wins when both do. "The TTRs operate independently of the
-// E-bit in the TCR" (UM 3.1.3), so they apply with translation off, which is
-// all there is until M10. An access no TTR matches with translation off has
-// the defaults (UM 3.1.2): cachable write-through, not write protected, UPA
-// zero. With translation on, the ATC's page descriptor supplies them (M10);
-// until then, the same defaults.
+// E-bit in the TCR" (UM 3.1.3), so they apply with translation off too. An
+// access no TTR matches with translation off has the defaults (UM 3.1.2):
+// cachable write-through, not write protected, UPA zero; with translation on,
+// the ATC's entry supplies them (rd68041_dmu, rd68041_ifu).
 
 module rd68041_attr (
     input  logic [31:24] addr,
@@ -24,7 +23,7 @@ module rd68041_attr (
     input  logic [31:0]  ttr1,
     output logic  [1:0]  cm,      // 00 write-through, 01 copyback, 10 serialised, 11 inhibited
     output logic  [1:0]  upa,     // U1, U0 for UPA1-UPA0
-    output logic         wp,      // write protected (the fault is M10's)
+    output logic         wp,      // write protected
     output logic         tt       // a TTR matched
 );
 

@@ -74,6 +74,7 @@ module core_vec_tb;
   logic [31:0] fd   [0:7];
   logic [31:0] fa   [0:6];
   logic [31:0] fusp, fisp, fsr, fpc, fmsp, fvbr, fsfc, fdfc, fcacr;
+  logic [31:0] immu [0:7], fmmu [0:7], cmmu [0:7];
   logic [31:0] racc [0:MAXACC-1];
   logic [31:0] rrw  [0:MAXACC-1];
   logic [31:0] rby  [0:MAXACC-1];
@@ -188,6 +189,7 @@ module core_vec_tb;
       dep_sfc  = sfcv[2:0];
       dep_dfc  = dfcv[2:0];
       dep_cacr = cacrv;
+      for (n = 0; n < 8; n++) dep_mmu[n] = immu[n];
       deposit();
       cap_clear();
       cap_on = 1'b1;
@@ -201,8 +203,10 @@ module core_vec_tb;
       for (n = 0; n < npoke; n++) restore(pa[n], 4);
 
       // With the caches forced on (+cache), MOVEC from CACR reads what the
-      // bench put there, not the test's CACR: not compared.
-      if (dep_cache != 0 && w[0][15:0] == 16'h4E7A && w[1][11:0] == 12'h002) begin
+      // bench put there, not the test's CACR, and with copyback (2) MOVEC from
+      // DTT0 likewise: not compared.
+      if (dep_cache != 0 && w[0][15:0] == 16'h4E7A &&
+          (w[1][11:0] == 12'h002 || (dep_cache == 2 && w[1][11:0] == 12'h006))) begin
         pending++;
         g_pend[grp]++;
         disable one;
@@ -252,6 +256,17 @@ module core_vec_tb;
                  dut.u_core.vbr, dut.u_core.sfc, dut.u_core.dfc, dut.u_core.cacr,
                  fvbr, fsfc, fdfc, fcacr);
       end
+      cmmu[0] = dut.u_core.tc;   cmmu[1] = dut.u_core.itt0;  cmmu[2] = dut.u_core.itt1;
+      cmmu[3] = dut.u_core.dtt0; cmmu[4] = dut.u_core.dtt1;  cmmu[5] = dut.u_core.mmusr;
+      cmmu[6] = dut.u_core.urp;  cmmu[7] = dut.u_core.srp;
+      for (n = 0; n < 8; n++)
+        if (!bad && cmmu[n] !== fmmu[n] && !(n == 3 && dep_cache == 2)) begin
+          bad = 1'b1;
+          $sformat(why, "%s is %08h, UAE040 says %08h",
+                   n == 0 ? "TC" : n == 1 ? "ITT0" : n == 2 ? "ITT1" : n == 3 ? "DTT0" :
+                   n == 4 ? "DTT1" : n == 5 ? "MMUSR" : n == 6 ? "URP" : "SRP",
+                   cmmu[n], fmmu[n]);
+        end
       if (!bad && ((dut.u_core.sr ^ fsr[15:0]) & srmask[15:0]) !== 16'd0) begin
         bad = 1'b1;
         $sformat(why, "SR is %04h, UAE040 says %04h (comparing %04h)",
@@ -478,6 +493,7 @@ module core_vec_tb;
       for (n = 0; n < 7; n++) void'($fscanf(vec, "%h", av[n]));
       void'($fscanf(vec, "%h %h %h %h %h %h %h %h",
                     uspv, ispv, srv, mspv, sfcv, dfcv, vbrv, cacrv));
+      for (n = 0; n < 8; n++) void'($fscanf(vec, "%h", immu[n]));
       void'($fscanf(vec, "%h", npoke));
       for (n = 0; n < npoke; n++) void'($fscanf(vec, "%h %h", pa[n], pv[n]));
       void'($fscanf(vec, "%h %h %h", srmask, fill, excv));
@@ -485,6 +501,7 @@ module core_vec_tb;
       for (n = 0; n < 7; n++) void'($fscanf(vec, "%h", fa[n]));
       void'($fscanf(vec, "%h %h %h %h %h %h %h %h %h",
                     fusp, fisp, fsr, fpc, fmsp, fvbr, fsfc, fdfc, fcacr));
+      for (n = 0; n < 8; n++) void'($fscanf(vec, "%h", fmmu[n]));
       void'($fscanf(vec, "%h", nread));
       for (n = 0; n < nread; n++)
         void'($fscanf(vec, "%h %h %h %h %h %h", racc[n], rrw[n], rby[n], rfc[n],

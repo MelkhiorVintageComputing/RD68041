@@ -10,6 +10,23 @@ synchroniser) are in RD68031's `doc/bugs-found.md`.*
 
 ---
 
+## M10: found while building the MMU
+
+1. **An instruction that faulted after some of its micro-operations had written
+   registers left them written.** CMPM's first postincrement, MOVEM's loaded registers
+   and its address register stood when a later access of the same instruction faulted,
+   so RTE restarted the instruction from changed registers -- harmless before M10 only
+   because a bus error is rarely returned from. Found by review, designing the MMU's
+   restart model (`doc/checkpoint.md`): the core now logs each register's old value the
+   first time an instruction's micro-operation writes it, and puts them back before the
+   frame (`XS_UNDO`). `core_fault_tb` (f) and (g) fail without it.
+2. **MOVEC to URP or SRP cleared bits 8-0.** UM 3.1.1 says only that they must be zero;
+   UAE040 keeps them, and so now does the core (a search uses bits 31-9). Caught by the
+   `pmmu040` vector group, its first run.
+
+The MMU itself passed `core_mmu_tb` and `make cosim` (`m10_mmu`) at their first run;
+`core_mmu_tb` fails when a table descriptor's U write is suppressed (checked by hand).
+
 ## M9: found while building the caches
 
 1. **Words queued at entries 8-11 of the instruction queue were lost**: a size cast of

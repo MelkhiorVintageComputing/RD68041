@@ -94,6 +94,9 @@ logic [31:0] dep_a [0:7];
 logic [15:0] dep_sr = 16'h2700;
 logic [31:0] dep_usp = 0, dep_isp = 0, dep_msp = 0, dep_vbr = 0, dep_cacr = 0;
 logic  [2:0] dep_sfc = 0, dep_dfc = 0;
+// ... and the MMU's: TC, ITT0, ITT1, DTT0, DTT1, MMUSR, URP, SRP.
+logic [31:0] dep_mmu [0:7];
+initial for (int i = 0; i < 8; i++) dep_mmu[i] = 32'h0;
 // +cache=1: the caches on (CACR's DE and IE), write-through; +cache=2: and
 // DTT0 copyback over everything. The sweeps' tests then run through the caches.
 int          dep_cache = 0;
@@ -113,6 +116,15 @@ task automatic deposit();
   dut.u_core.sfc    = dep_sfc;
   dut.u_core.dfc    = dep_dfc;
   dut.u_core.cacr   = (dep_cacr | ((dep_cache != 0) ? 32'h8000_8000 : 32'h0)) & 32'h8000_8000;
+  // The MMU's, masked as MOVEC would leave them (UM 3.1).
+  dut.u_core.tc     = dep_mmu[0] & 32'h0000_C000;
+  dut.u_core.itt0   = dep_mmu[1] & 32'hFFFF_E364;
+  dut.u_core.itt1   = dep_mmu[2] & 32'hFFFF_E364;
+  dut.u_core.dtt0   = dep_mmu[3] & 32'hFFFF_E364;
+  dut.u_core.dtt1   = dep_mmu[4] & 32'hFFFF_E364;
+  dut.u_core.mmusr  = dep_mmu[5];
+  dut.u_core.urp    = dep_mmu[6];
+  dut.u_core.srp    = dep_mmu[7];
   if (dep_cache == 2) dut.u_core.dtt0 = 32'h0000_E020;
   dut.u_core.sr_sys = {dep_sr[15:12], 1'b0, dep_sr[10:8]};
   dut.u_core.ccr_x  = dep_sr[4:0];

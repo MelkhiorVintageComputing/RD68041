@@ -38,7 +38,15 @@
 // invalidation. The snooper (rd68041_snoop) looks up a snooped transfer's line
 // on the cache's second port and invalidates it on a hit (UM Table 4-3).
 //
-// Until M10 the physical address is the logical one.
+// Translation (UM 3): each lookup's fetch address is translated as the
+// lookup starts -- ITT0/ITT1, else with translation on the instruction ATC
+// (rd68041_atc), else the logical address is the physical one -- and the
+// physical page, mode and UPA held for its lookup, fill or long word. A miss
+// in the ATC asks the data memory unit for a table search (iw_req), which
+// hands back the entry (iw_fill); then the lookup is done again. An entry not
+// resident, or a user fetch from a supervisor page, puts the words marked in
+// the queue (q_err and q_atc), as a bus error does. PFLUSH and PTEST of a
+// program space flush the ATC from the data memory unit (if_flush).
 
 module rd68041_ifu (
     input  logic          clk,
@@ -52,12 +60,15 @@ module rd68041_ifu (
     input  logic          ic_en,       // CACR's IE
     input  logic [31:0]   itt0,
     input  logic [31:0]   itt1,
+    input  logic          tc_e,        // TC's E
+    input  logic          tc_p,        // TC's P
 
     // To decode.
     output logic [191:0]  q_win,       // the queue from its head, word 0 in 191:176
     output logic  [3:0]   q_cnt,       // how many words are there (0-12)
     output logic [31:0]   q_pc,        // the head word's address
     output logic [11:0]   q_err,       // which of them came from a faulted fetch (bit k: word k)
+    output logic [11:0]   q_atc,       // ... faulted in the ATC (not resident, or supervisor)
     output logic          q_aerr,      // fetching was redirected to an odd address
     input  logic  [3:0]   q_pop,       // words decode takes this clock (0-12)
 
@@ -83,6 +94,20 @@ module rd68041_ifu (
     input  logic          ic_p8k,      // TC's P: 8 KB pages
     output logic          ic_busy,
 
+    // The ATC's flushes and table searches, from and by the data memory unit.
+    input  logic          if_flush,
+    input  logic  [1:0]   if_fl_kind,  // 0 page nonglobal, 1 page, 2 all nonglobal, 3 all
+    input  logic [31:0]   if_fl_la,
+    input  logic          if_fl_s,
+    output logic          iw_req,
+    output logic [31:0]   iw_la,
+    output logic          iw_s,
+    input  logic          iw_fill,
+    input  logic [31:12]  iw_fill_la,
+    input  logic          iw_fill_s,
+    input  logic [31:0]   iw_entry,    // {PA31-PA12, G, U1, U0, S, CM, M, W, R, 000}
+    input  logic          iw_done,
+
     // The snooper.
     input  logic [31:0]   sn_addr,
     output logic          sn_ihit,
@@ -93,6 +118,7 @@ module rd68041_ifu (
 
   logic [15:0] q [0:QN-1];
   logic        qe [0:QN-1];     // ... from a fetch that faulted
+  logic        qt [0:QN-1];     // ... in the ATC
   logic  [3:0] head, cnt;       // the head index, the words held
   logic [31:0] hpc;             // the head word's address
   logic [31:0] fa;              // the next word to fetch
@@ -106,6 +132,7 @@ module rd68041_ifu (
       i = 4'((int'(head) + k) % QN);
       q_win[191 - 16*k -: 16] = q[i];
       q_err[k] = qe[i];
+      q_atc[k] = qt[i];
     end
   end
   assign q_cnt  = cnt;
@@ -114,18 +141,45 @@ module rd68041_ifu (
 
   // --- the fetch address's attributes, and the cache ----------------------------
   // The state of a fetch: a lookup, its result, a line fill, or a long word.
-  typedef enum logic [2:0] { F_IDLE, F_LOOK, F_INV, F_FILL, F_LONG } f_e;
+  //   F_WALK  the ATC missed: a table search, by the data memory unit
+  typedef enum logic [2:0] { F_IDLE, F_LOOK, F_INV, F_FILL, F_LONG, F_WALK } f_e;
   f_e          fs;
-  logic [31:0] la;              // the address looked up or being filled
+  logic [31:0] la;              // the address looked up or being filled (logical)
+  logic [31:12] lp;             // ... its physical page
+  logic  [1:0] lcm, lupa;       // ... its mode and UPA
 
-  // The attributes of what is fetched: the line a fill is for, else fa.
-  logic [1:0] f_cm;
+  // The fetch address's translation.
+  logic [1:0] tt_cm, tt_upa;
   logic       f_wp, f_tt;       // write protection means nothing to a fetch
-  wire  [31:24] at_a = (fs == F_INV || fs == F_FILL) ? la[31:24] : fa[31:24];
   rd68041_attr u_attr (
-      .addr(at_a), .sup(sup), .ttr0(itt0), .ttr1(itt1),
-      .cm(f_cm), .upa(f_upa), .wp(f_wp), .tt(f_tt));
-  wire cachable = ic_en && !f_cm[1];
+      .addr(fa[31:24]), .sup(sup), .ttr0(itt0), .ttr1(itt1),
+      .cm(tt_cm), .upa(tt_upa), .wp(f_wp), .tt(f_tt));
+  logic          lk_hit, lk_sprot, lk_m, lk_w, lk_r;
+  logic [31:12]  lk_pa;
+  logic  [1:0]   lk_u, lk_cm;
+  wire           lk_count;
+  rd68041_atc u_iatc (
+      .clk(clk), .rst_n(rst_n), .crst(crst), .page8k(tc_p),
+      .lk_la(if_flush ? if_fl_la[31:12] : fa[31:12]), .lk_s(if_flush ? if_fl_s : sup),
+      .lk_count(lk_count), .lk_hit(lk_hit), .lk_pa(lk_pa),
+      .lk_u(lk_u), .lk_sprot(lk_sprot), .lk_cm(lk_cm), .lk_m(lk_m), .lk_w(lk_w), .lk_r(lk_r),
+      .fill_we(iw_fill), .fill_la(iw_fill_la), .fill_s(iw_fill_s), .fill_g(iw_entry[11]),
+      .fill_pa(iw_entry[31:12]), .fill_u(iw_entry[10:9]), .fill_sprot(iw_entry[8]),
+      .fill_cm(iw_entry[7:6]), .fill_m(iw_entry[5]), .fill_w(iw_entry[4]),
+      .fill_r(iw_entry[3]),
+      .fl_all(if_flush && if_fl_kind[1]), .fl_page(if_flush && !if_fl_kind[1]),
+      .fl_nonglobal(if_flush && !if_fl_kind[0]));
+  wire          t_ph   = f_tt || !tc_e;
+  wire [31:12]  t_pa   = t_ph ? fa[31:12] : lk_pa;
+  wire  [1:0]   t_cm   = f_tt ? tt_cm : (tc_e ? lk_cm : 2'b00);
+  wire  [1:0]   t_upa  = f_tt ? tt_upa : (tc_e ? lk_u : 2'b00);
+  wire          t_walk = !t_ph && !lk_hit;
+  wire          t_flt  = !t_ph && lk_hit && (!lk_r || (lk_sprot && !sup));
+  wire cachable = ic_en && !t_cm[1];
+  assign f_upa  = lupa;
+  assign iw_req = (fs == F_WALK);
+  assign iw_la  = fa;
+  assign iw_s   = sup;
   logic  [1:0] vway;            // the way being filled
   logic        busy;            // the transfer is on the bus
   logic        drop;            // a redirect came: what arrives is not queued
@@ -163,7 +217,7 @@ module rd68041_ifu (
   // Port 0: the fetch's lookup, or CINV's line once no lookup is in flight.
   wire   m_p0    = (ms == M_LINE) && (fs != F_LOOK);
   assign p0_set  = m_p0 ? ma[9:4] : la[9:4];
-  assign p0_ptag = m_p0 ? ma[31:10] : la[31:10];
+  assign p0_ptag = m_p0 ? ma[31:10] : {lp, la[11:10]};
   assign p2_set  = mk[7:2];
   assign p2_way  = mk[1:0];
 
@@ -172,7 +226,7 @@ module rd68041_ifu (
   wire        m_t     = (m_p0 && p0_hit) || (ms == M_PAGE && page_hit);
   wire        fill_t  = (fs == F_INV) || (fs == F_FILL && busy && f_done && !ferr && !f_err && !ftci);
   always_comb begin
-    t_we = 1'b0; t_set = la[9:4]; t_way = vway; t_tag = la[31:10]; t_valid = 1'b0;
+    t_we = 1'b0; t_set = la[9:4]; t_way = vway; t_tag = {lp, la[11:10]}; t_valid = 1'b0;
     if (sn_t) begin
       t_we = 1'b1; t_set = sn_addr[9:4]; t_way = p1_way;
     end else if (m_t) begin
@@ -222,17 +276,25 @@ module rd68041_ifu (
   wire        err_in = busy && f_done && f_err && !drop && !full &&
                        (fs == F_LONG || (!ferr_beat && fa[31:2] == la[31:2])) &&
                        ({1'b0, room} >= {2'b00, lw_n});
+  // ... or an ATC fault: the words, marked, without a transfer.
+  wire        want_lk;
+  wire        atc_in = want_lk && t_flt;
+  assign lk_count = want_lk && !t_ph;
 
   logic [2:0]  in_n;
   logic [15:0] in_w [0:3];
-  logic        in_e;
+  logic        in_e, in_t;
   always_comb begin
-    in_n = 3'd0; in_e = 1'b0;
+    in_n = 3'd0; in_e = 1'b0; in_t = 1'b0;
     for (int k = 0; k < 4; k++) in_w[k] = 16'h0;
     if (hit_in) begin
       in_n = hit_n;
       for (int k = 0; k < 4; k++)
         in_w[k] = hl[63 - 16*(int'(la[2:1]) + k) -: 16];
+    end else if (atc_in) begin
+      in_n = lw_n;
+      in_e = 1'b1;
+      in_t = 1'b1;
     end else if (lw_in || err_in) begin
       in_n = lw_n;
       in_e = err_in;
@@ -259,16 +321,19 @@ module rd68041_ifu (
   wire [1:0] pick = victim(p0_valid, rnd);
 
   // --- the bus ---------------------------------------------------------------------
-  wire want_lk = on && !stop && !aerr && !go && (fs == F_IDLE) && (room >= 4'd4);
+  assign want_lk = on && !stop && !aerr && !go && (fs == F_IDLE) && (room >= 4'd4);
   assign f_valid = ((fs == F_FILL) || (fs == F_LONG)) && !busy;
-  assign f_addr  = (fs == F_FILL) ? {la[31:2], 2'b00} : {fa[31:2], 2'b00};
+  assign f_addr  = (fs == F_FILL) ? {lp, la[11:2], 2'b00} : {lp, fa[11:2], 2'b00};
   assign f_siz   = (fs == F_FILL) ? rd68041_pkg::SIZ_LINE : rd68041_pkg::SIZ_LONG;
-  assign f_ci    = (fs == F_LONG) && f_cm[1];
+  assign f_ci    = (fs == F_LONG) && lcm[1];
   assign f_tm    = sup ? rd68041_pkg::TM_SUP_CODE : rd68041_pkg::TM_USER_CODE;
 
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      for (int i = 0; i < QN; i++) begin q[i] <= 16'h0000; qe[i] <= 1'b0; end
+      for (int i = 0; i < QN; i++) begin q[i] <= 16'h0000; qe[i] <= 1'b0; qt[i] <= 1'b0; end
+      lp    <= '0;
+      lcm   <= '0;
+      lupa  <= '0;
       aerr  <= 1'b0;
       head  <= '0;
       cnt   <= '0;
@@ -307,17 +372,22 @@ module rd68041_ifu (
       end
       // Written out: a loop variable in this process would be a register to
       // yosys (doc/coding-standard.md).
-      if (in_n > 3'd0) begin q[wi[0]] <= in_w[0]; qe[wi[0]] <= in_e; end
-      if (in_n > 3'd1) begin q[wi[1]] <= in_w[1]; qe[wi[1]] <= in_e; end
-      if (in_n > 3'd2) begin q[wi[2]] <= in_w[2]; qe[wi[2]] <= in_e; end
-      if (in_n > 3'd3) begin q[wi[3]] <= in_w[3]; qe[wi[3]] <= in_e; end
+      if (in_n > 3'd0) begin q[wi[0]] <= in_w[0]; qe[wi[0]] <= in_e; qt[wi[0]] <= in_t; end
+      if (in_n > 3'd1) begin q[wi[1]] <= in_w[1]; qe[wi[1]] <= in_e; qt[wi[1]] <= in_t; end
+      if (in_n > 3'd2) begin q[wi[2]] <= in_w[2]; qe[wi[2]] <= in_e; qt[wi[2]] <= in_t; end
+      if (in_n > 3'd3) begin q[wi[3]] <= in_w[3]; qe[wi[3]] <= in_e; qt[wi[3]] <= in_t; end
       cnt <= cnt_nxt;
       if (in_n != 3'd0) fa <= fa_nxt;
 
       // --- the fetch -----------------------------------------------------------
       case (fs)
         F_IDLE: begin
-          if (want_lk) begin
+          if (want_lk && t_walk) begin
+            fs <= F_WALK;
+          end else if (want_lk && !t_flt) begin
+            lp   <= t_pa;
+            lcm  <= t_cm;
+            lupa <= t_upa;
             if (cachable) begin
               // The half-line at fa is being read; its tags are compared on
               // the next clock.
@@ -368,6 +438,7 @@ module rd68041_ifu (
             fs <= F_IDLE;
           end
         end
+        F_WALK: if (iw_done) fs <= F_IDLE;
         default: fs <= F_IDLE;
       endcase
       if (fs == F_LOOK) drop <= 1'b0;
@@ -405,7 +476,8 @@ module rd68041_ifu (
   end
 
   logic unused_ok;
-  assign unused_ok = &{1'b0, f_wp, f_tt, nd0, nd1, nd2, b_rdata, sn_addr[3:0], la[0], ma[3:0],
-                       f_cm[0], p2_tag[11:10]};
+  assign unused_ok = &{1'b0, f_wp, nd0, nd1, nd2, b_rdata, sn_addr[3:0], la[0], ma[3:0],
+                       lcm[0], p2_tag[11:10], lk_m, lk_w, if_fl_la[11:0],
+                       iw_entry[2:0]};
 
 endmodule
