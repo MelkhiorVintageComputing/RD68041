@@ -34,8 +34,8 @@ module fpu_dp_tb;
   logic        c_lt, c_eq, c_un;
 
   rd68041_fpu_dp u_dp (
-      .clk(clk), .rst_n(rst_n), .crst(1'b0), .kill(1'b0), .start(start), .op(op), .a(a), .b(b),
-      .prec(prec), .rmode(rmode), .isz(isz), .busy(busy), .done(done), .r(r),
+      .clk(clk), .rst_n(rst_n), .crst(1'b0), .kill(1'b0), .start_i(start), .op_i(op), .a_i(a),
+      .b_i(b), .prec_i(prec), .rmode_i(rmode), .isz_i(isz), .busy(busy), .done(done), .r(r),
       .f_snan(f_snan), .f_operr(f_operr), .f_ovfl(f_ovfl), .f_unfl(f_unfl), .f_dz(f_dz),
       .f_inex(f_inex), .f_spec(f_spec), .f_dnz(), .i_exp(i_exp), .i_man(i_man), .r_int(r_int),
       .c_lt(c_lt), .c_eq(c_eq), .c_un(c_un));

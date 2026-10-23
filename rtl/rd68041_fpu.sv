@@ -219,9 +219,9 @@ module rd68041_fpu
   logic [66:0] d_iman;
   logic [31:0] d_int;
   rd68041_fpu_dp u_dp (
-      .clk(clk), .rst_n(rst_n), .crst(crst), .kill(flush), .start(dp_start && !flush),
-      .op(dp_op), .a(dp_a),
-      .b(dp_b), .prec(dp_prec), .rmode(rmode), .isz(dp_isz), .busy(dp_busy), .done(dp_done),
+      .clk(clk), .rst_n(rst_n), .crst(crst), .kill(flush), .start_i(dp_start && !flush),
+      .op_i(dp_op), .a_i(dp_a),
+      .b_i(dp_b), .prec_i(dp_prec), .rmode_i(rmode), .isz_i(dp_isz), .busy(dp_busy), .done(dp_done),
       .r(dp_r), .f_snan(d_snan), .f_operr(d_operr), .f_ovfl(d_ovfl), .f_unfl(d_unfl),
       .f_dz(d_dz), .f_inex(d_inex), .f_spec(d_spec), .f_dnz(d_dnz), .i_exp(d_iexp), .i_man(d_iman),
       .r_int(d_int), .c_lt(d_lt), .c_eq(d_eq), .c_un(d_un));

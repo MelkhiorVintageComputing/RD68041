@@ -36,13 +36,13 @@ module rd68041_fpu_dp
     input  logic         crst,
 
     input  logic         kill,       // abandon the operation under way
-    input  logic         start,
-    input  logic  [3:0]  op,         // D_*
-    input  rd68041_fpu_pkg::fpn_t         a,          // the destination operand
-    input  rd68041_fpu_pkg::fpn_t         b,          // the source operand
-    input  logic  [1:0]  prec,       // the rounding precision: P_X, P_S, P_D
-    input  logic  [1:0]  rmode,      // R_N, R_Z, R_M, R_P
-    input  logic  [1:0]  isz,        // D_INT: 0 a byte, 1 a word, 2 a long
+    input  logic         start_i,    // the inputs below are taken on this clock
+    input  logic  [3:0]  op_i,       // D_*
+    input  rd68041_fpu_pkg::fpn_t         a_i,        // the destination operand
+    input  rd68041_fpu_pkg::fpn_t         b_i,        // the source operand
+    input  logic  [1:0]  prec_i,     // the rounding precision: P_X, P_S, P_D
+    input  logic  [1:0]  rmode_i,    // R_N, R_Z, R_M, R_P
+    input  logic  [1:0]  isz_i,      // D_INT: 0 a byte, 1 a word, 2 a long
 
     output logic         busy,
     output logic         done,       // one clock: the outputs hold until the next start
@@ -63,6 +63,29 @@ module rd68041_fpu_dp
     output logic         c_eq,
     output logic         c_un
 );
+
+  // ===========================================================================
+  // The inputs, registered as the operation is started: it works from flops,
+  // not from the operand selection in front of the unit (which, with the
+  // alignment of an add behind it, was M11's critical path,
+  // doc/size-and-speed.md). The operation proper starts a clock later.
+  // ===========================================================================
+  logic                  start;
+  logic  [3:0]           op;
+  rd68041_fpu_pkg::fpn_t a, b;
+  logic  [1:0]           prec, rmode, isz;
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      start <= 1'b0; op <= '0; a <= '0; b <= '0; prec <= '0; rmode <= '0; isz <= '0;
+    end else if (crst || kill) begin
+      start <= 1'b0;
+    end else begin
+      start <= start_i;
+      if (start_i) begin
+        op <= op_i; a <= a_i; b <= b_i; prec <= prec_i; rmode <= rmode_i; isz <= isz_i;
+      end
+    end
+  end
 
   // ===========================================================================
   // The operation
@@ -322,7 +345,7 @@ module rd68041_fpu_dp
   // ===========================================================================
   // The state machine
   // ===========================================================================
-  assign busy = (s != S_IDLE) && (s != S_DONE);
+  assign busy = start || ((s != S_IDLE) && (s != S_DONE));
 
   // The multiplier: a 64 x 16 partial product a clock.
   wire [79:0] pp = q_a * q_b[16*cnt[1:0] +: 16];

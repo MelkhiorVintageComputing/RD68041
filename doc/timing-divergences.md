@@ -71,18 +71,21 @@ To be measured at M15; what the design does:
 ## The FPU (M11)
 
 The data path's clocks (BCLK) from start to its answer, measured on
-`rd68041_fpu_dp` alone with normal extended operands, against the sum of UM 10.7.3's
-conversion, execution and normalisation stages (PCLK, an idle FPU, register operands):
+`rd68041_fpu_dp` alone with normal extended operands -- the first of them the clock its
+inputs are registered on, which keeps the operand selection out of the operation's
+first step (M11's critical path, `doc/size-and-speed.md`) -- against the sum of UM
+10.7.3's conversion, execution and normalisation stages (PCLK, an idle FPU, register
+operands):
 
 | Operation | Here | UM 10.7.3 |
 |---|---|---|
-| FMOVE, FABS, FNEG (to a register) | 3 | 2 |
-| FADD, FSUB | 5 | 2 + 3 + 2 |
-| FMUL, FSGLMUL | 7 | 2 + 5 + 2 |
-| FDIV, FSGLDIV | 71 | 2 + 37.5 + 2 |
-| FSQRT | 70 | 2 + 103 + 2 |
-| FCMP | 1 | 2 + 3 + 1 |
-| FMOVE to an integer (the conversion) | 2 | 3 |
+| FMOVE, FABS, FNEG (to a register) | 4 | 2 |
+| FADD, FSUB | 6 | 2 + 3 + 2 |
+| FMUL, FSGLMUL | 8 | 2 + 5 + 2 |
+| FDIV, FSGLDIV | 72 | 2 + 37.5 + 2 |
+| FSQRT | 71 | 2 + 103 + 2 |
+| FCMP | 2 | 2 + 3 + 1 |
+| FMOVE to an integer (the conversion) | 3 | 3 |
 
 Around it, what the design adds and the part does not:
 
@@ -93,7 +96,7 @@ Around it, what the design adds and the part does not:
   full latency here and almost nothing on the part.
 - **Divide and square root are a bit a clock** (restoring). With PCLK twice BCLK the
   part's FDIV is about 21 bus clocks and its FSQRT about 54: here FDIV takes about 3.4
-  times as long, FSQRT 1.3 times, FADD (3.5 bus clocks on the part) 1.4 times.
+  times as long, FSQRT 1.3 times, FADD (3.5 bus clocks on the part) 1.7 times.
 - **A memory operand is a load a long word**, each a micro-operation through \<ea\>
   fetch, and an FMOVE to memory a store a long word after the conversion; FMOVEM moves a
   long word a clock, three per data register.

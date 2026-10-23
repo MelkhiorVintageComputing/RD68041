@@ -208,6 +208,11 @@ as the FPSP's own frames do (`gen_except.S`, `do_build`).
   which UAE040 runs; an unsupported data type in opclass 000/010, which UAE040 stacks as
   format $3 and which is compared as format $0; FPCR's bits 3-0, compared as zeros; a
   NaN's or an infinity's integer bit, a don't care (UM Table 9-5);
-- `make vectors OP=fpu` against UAE040;
-- `make cosim` programs with FP code, exceptions and FSAVE/FRESTORE;
-- `make fpsp`: the M68040FPSP on the core, its transcendental results against UAE040's.
+- `make cosim`: `m11_fpu_a` and `m11_fpu_b`, FP code and its exceptions, register for
+  register against UAE040;
+- `core_fpu_tb` (`m11_fpu_c`): what UAE040 does otherwise, against the manual and the
+  FPSP's frame contract -- the null, idle, unimplemented and busy frames, the formats of
+  the unimplemented and unsupported traps, a posted exception's frame, a busy frame's
+  round trip, FRESTORE that resumes an operation;
+- from M13, `make fpsp`: the M68040FPSP on the core, as Linux's own in rd-virt
+  (`doc/plan.md`, M11's gate).
