@@ -400,4 +400,5 @@ frame, its \<ea\> calculated and not accessed (`doc/fpu.md`, "The MC68LC040"). `
 check FPU=0` passes; `make cosim-lc` runs the integer programs and `m12_lc040` against
 UAE040 `-L`, `make vectors-all FPU=0` every group with the `lc040` one (1,610 vectors)
 added, and `core_lc040_tb` checks against the manual what UAE040 `-L` stacks otherwise
-(`m12_lc040_b`).
+(`m12_lc040_b`). `make impl FPU=0`: 30.96 MHz, 23,887 LUTs; the MC68040 30.05 MHz
+(`doc/size-and-speed.md`).
