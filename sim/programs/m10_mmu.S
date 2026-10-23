@@ -24,12 +24,12 @@
 | The bench checks the descriptors' U and M bits (UM 3.2.5, Table 3-1) in
 | memory afterwards. It may set CFG: a CACR, and CM bits for pages 0-15 (the
 | tables, the program and its stacks), so that the table searches read
-| through the data cache (make cache). Run under make cosim too (PROGS=m10_mmu): the handler
-| loads each frame's SSW and FA into D7 and D4, so the trace compares them --
-| but for two things this design and UAE040 do differently (doc/oracles.md,
-| doc/divergences.md): the SIZE of an instruction fetch's fault, and the
-| write-back slots, which here are always empty (a write's fault is taken
-| before it is made), so the handler copies neither.
+| through the data cache (make cache). make cosim-mmu runs it against UAE040:
+| the handler loads each frame's SSW and FA into D7 and D4, so the trace
+| compares them -- but for two things this design and UAE040 do differently
+| (doc/oracles.md, doc/divergences.md): the SIZE of an instruction fetch's
+| fault, and a write's translation fault, which here is taken before the
+| write (no write-back pending), so the handler copies neither.
 
         .equ    ISP_TOP, 0x0000F000
         .equ    USP_TOP, 0x0000B000

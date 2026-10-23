@@ -292,8 +292,8 @@ behaviour and counts each case.
 
 ### The MMU against UAE040 (M10)
 
-`m10_mmu` (`make cosim PROGS=m10_mmu`, 242 instructions) and the `pmmu040` vector group
-(332 vectors) agree with UAE040 on: translation through three-level tables and an
+`m10_mmu` (264 instructions) and the `pmmu040` vector group (332 vectors) -- `make
+cosim-mmu` runs both -- agree with UAE040 on: translation through three-level tables and an
 indirect descriptor, translated code, the MMUSR of PTEST for a resident page written to
 (M), an invalid one, PTESTW of a write-protected one, a TTR in a data and in a program
 space; PFLUSH's effect on a stale entry; MOVEC to and from every MMU register, with the

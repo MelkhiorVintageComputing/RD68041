@@ -104,7 +104,9 @@ help:
 	@echo "  make vectors-all  ... every group"
 	@echo "  make ea           ... the addressing-mode sweep (OP=ea)"
 	@echo "  make cache        the caches against the oracles: their cosims, vectors-all and"
-	@echo "                    cputest with the caches on (CACHE=1 write-through, 2 copyback)"
+	@echo "                    cputest with the caches on (CACHE=1 write-through, 2 copyback),"
+	@echo "                    and core_mmu_tb with them on"
+	@echo "  make cosim-mmu    the MMU against UAE040: m10_mmu, and the pmmu040 vectors"
 	@echo "  make cputest      the integer cputest corpus on the core (CPUTEST_SEL=ADD,MOVE.L"
 	@echo "                    CPUTEST_MAX=$(CPUTEST_MAX))"
 	@echo "  make qemu040      build QEMU (m68k-softmmu, build/qemu/) and the qemu040 trace plugin"
@@ -614,6 +616,12 @@ cache:
 	  $(MAKE) --no-print-directory vectors-all CACHE=$$c || exit 1; done
 	@for c in 1 2; do echo "== cputest CACHE=$$c"; \
 	  $(MAKE) --no-print-directory cputest CACHE=$$c || exit 1; done
+
+# The MMU against UAE040: m10_mmu register for register (the program core_mmu_tb
+# runs), and the pmmu040 vector group.
+cosim-mmu:
+	@$(MAKE) --no-print-directory cosim PROGS=m10_mmu
+	@$(MAKE) --no-print-directory vectors OP=pmmu040
 
 # core_mmu_tb with the caches on: the tables write-through, then copyback.
 mmu-cache: dirs $(BUILD)/programs/m10_mmu.hex
