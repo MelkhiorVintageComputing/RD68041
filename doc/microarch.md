@@ -130,7 +130,7 @@ it and hands over to the exception state machine:
 
 | State | |
 |---|---|
-| `XS_SR` | waits until every queued write has gone (so the frame never holds a pending write-back, and the function codes of the writes are the old mode's), then, in one clock: the SR changes (S set, T1 T0 cleared, an interrupt's level the mask), A7 is saved to the stack pointer it was and loaded with the frame's address on the one it becomes, and the frame's address is worked out |
+| `XS_SR` | waits until every queued write has gone (so the function codes of the writes are the old mode's; one that faults meanwhile replaces an interrupt or a trace with its access fault), then, in one clock: the SR changes (S set, T1 T0 cleared, an interrupt's level the mask), A7 is saved to the stack pointer it was and loaded with the frame's address on the one it becomes, and the frame's address is worked out |
 | `XS_SEQ` | the sequencer issues, in decode's place, an interrupt's acknowledge (the vector offset into T0), the frame's long words at their absolute addresses, a throwaway frame for an interrupt taken with M set, and the vector fetch, which jumps to the handler. Its end is an instruction boundary: a pending interrupt is taken there (UM 8.3), except after an interrupt's own |
 | `XS_STOP` | STOP, until an interrupt |
 | `XS_RST` | RESET: RSTO for 512 clocks |
@@ -168,10 +168,20 @@ samples agree (UM 7.5.1); it is pending above the mask, or on a transition to 7 
 is taken. IPEND is that. The acknowledge is a byte read at $FFFFFFFF, TT 11, TM the level:
 a vector on D7-D0, AVEC (24 + level) or TEA (24, spurious).
 
-Not yet: a write that ends in a bus error is not reported (the data memory unit drops
-it); MOVEM's continuation (CM) and the trace continuation (CT) of a format $7 frame are
-neither set nor honoured by RTE -- a faulted MOVEM restarts from its first transfer, its
-registers put back by the undo log. `doc/divergences.md` has these.
+**A write's bus error** (M10). A write is made from the queue after its instruction
+completed. When one ends in a bus error -- its transfer, the line read a copyback write
+miss allocates, MOVE16's line write -- or its translation fails after all, the data
+memory unit freezes the queue and holds what the frame needs: the faulted write as WB1
+(memory aligned, its physical address; MOVE16's line in PD0-PD3, WB1S clear) and the
+two queued behind it as WB2 and WB3 (`rd68041_dmu`'s `wf_tail`). The core takes the
+access fault on the next micro-operation to reach write-back, which does not complete:
+its instruction is the frame's PC, the undo log puts its registers back, and the queue
+is emptied into the frame (`wf_ack`). So that such a fault always finds an uncommitted
+micro-operation, an exception or a serialising micro-operation waits in write-back for
+the queue to empty before it commits; an interrupt or a trace, taken at a boundary,
+waits in `XS_SR` instead, and the access fault replaces it there. A fault on one of
+exception processing's own writes is a double bus fault. The continuation bits are never
+set (`doc/divergences.md`).
 
 ## Caches (M9)
 
@@ -346,5 +356,11 @@ PFLUSH -- and checks the descriptors' U and M bits in memory, with the caches of
 (`make cache`) on, the tables write-through and then copyback; `make cosim` runs the same
 program against UAE040 register for register, frames included but for the two things the
 two do differently (`doc/oracles.md`); `make vectors OP=pmmu040` sweeps MOVEC to and from
-the MMU's registers, PFLUSH in every encoding and PTEST against TTRs. Not yet (part 2): a
-write's bus error, and MOVEM's and trace's continuations.
+the MMU's registers, PFLUSH in every encoding and PTEST against TTRs.
+
+**M10, part 2: a write's bus error.** Reported as the part does, with the write and the
+two behind it in the frame's write-back slots, MOVE16's line in its push data;
+`core_fault_tb` checks four such frames -- a long write, a misaligned one with two
+writes queued behind it, MOVE16, and a traced write -- against UM 8.4.6. The
+continuation bits are never set, and a push's bus error is not reported
+(`doc/divergences.md`).

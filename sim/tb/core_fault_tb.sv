@@ -17,6 +17,14 @@
 //              completed restarts from where it began: CMPM's first address
 //              register, MOVEM's address register and the registers it loaded
 //              (doc/microarch.md, the undo log)
+//   UM 8.2.1   a write that ends in a bus error is an access fault, taken on
+//              the micro-operation in write-back (here a NOP that waits for
+//              it), with the write in WB1, memory aligned, at its physical
+//              address, and the writes queued behind it in WB2 and WB3,
+//              register aligned, not made (UM 8.4.6.3, 8.4.6.5, Table 8-5);
+//              MOVE16's line write: the line in PD0-PD3, WB1S clear; a traced
+//              write: the access fault in place of the trace
+//              (doc/divergences.md)
 //   UM 8.2.1   a bus error while a vector is fetched for an exception: a
 //              double bus fault, and the processor halts, the frame already
 //              written
@@ -30,7 +38,9 @@ module core_fault_tb;
 
 `include "rd68041_core_harness.svh"
 
-  localparam logic [31:0] RES = 32'h0000_FE00;
+  localparam logic [31:0] RES  = 32'h0000_FE00;
+  localparam logic [31:0] RES2 = 32'h0000_FA00;
+  localparam logic [31:0] RESB = 32'h0000_FB80;
 
   string       image;
   int unsigned nfail;
@@ -67,6 +77,36 @@ module core_fault_tb;
     check({what, ": WB3S, WB2S, WB1S"}, {rdw(r + 14), rdw(r + 16)} | {16'h0, rdw(r + 18)}, 32'h0);
   endtask
 
+  // A write's fault: record k at RESB, its write-backs at RES2 (fault n).
+  task automatic record_wb(input int k, input int fn, input string what,
+                           input logic [31:0] pc, input logic [15:0] ssw, input logic [31:0] fa,
+                           input logic [15:0] wb3s, input logic [15:0] wb2s,
+                           input logic [15:0] wb1s, input logic [31:0] wb3a,
+                           input logic [31:0] wb3d, input logic [31:0] wb2a,
+                           input logic [31:0] wb2d, input logic [31:0] wb1a,
+                           input logic [31:0] wb1d);
+    logic [31:0] r, q;
+    r = RESB + 20 * k;
+    q = RES2 + 36 * fn;
+    check({what, ": the stacked PC"}, rdl(r + 2), pc);
+    check({what, ": the format and vector word"}, {16'h0, rdw(r + 6)}, 32'h7008);
+    check({what, ": the SSW"}, {16'h0, rdw(r + 8)}, {16'h0, ssw});
+    check({what, ": FA"}, rdl(r + 10), fa);
+    check({what, ": WB3S"}, {16'h0, rdw(r + 14)}, {16'h0, wb3s});
+    check({what, ": WB2S"}, {16'h0, rdw(r + 16)}, {16'h0, wb2s});
+    check({what, ": WB1S"}, {16'h0, rdw(r + 18)}, {16'h0, wb1s});
+    if (wb3s != 16'h0) begin
+      check({what, ": WB3A"}, rdl(q + 0), wb3a);
+      check({what, ": WB3D"}, rdl(q + 4), wb3d);
+    end
+    if (wb2s != 16'h0) begin
+      check({what, ": WB2A"}, rdl(q + 8), wb2a);
+      check({what, ": WB2D"}, rdl(q + 12), wb2d);
+    end
+    check({what, ": WB1A"}, rdl(q + 16), wb1a);
+    check({what, ": WB1D (PD0)"}, rdl(q + 20), wb1d);
+  endtask
+
   task automatic finish_up();
     // SSW (UM 8.4.6.2): CP CU CT CM MA ATC LK RW X SIZE(2) TT(2) TM(3).
     record(0, "(a) a long read, supervisor", 8'h27, rdl(RES + 32'h80), 16'h0105, 32'h0000_8000);
@@ -80,14 +120,47 @@ module core_fault_tb;
     check("(g) MOVEM: D0 as it was before", rdl(RES + 32'h9C), 32'hFFFF_FFFF);
     check("(g) MOVEM: D1 as it was before", rdl(RES + 32'hA0), 32'hFFFF_FFFF);
     check("(g) MOVEM: the FA of its frame", rdl(RES + 20*5 + 10), 32'h0000_8000);
+    // WBnS (UM Figure 8-8): V, SIZE(2), TT(2), TM(3).
+    record_wb(0, 6, "(h) a write's bus error", rdl(RES + 32'hA4), 16'h0005, 32'h0000_8050,
+              16'h0, 16'h0, 16'h0085, 32'h0, 32'h0, 32'h0, 32'h0, 32'h0000_8050, 32'h1122_3344);
+    record_wb(1, 7, "(i) a long word across into it, two behind it", rdl(RES + 32'hA8),
+              16'h0005, 32'h0000_8102, 16'h00A5, 16'h00C5, 16'h0085, 32'h0000_5203,
+              32'h0000_00C3, 32'h0000_5200, 32'h0000_BBB2, 32'h0000_8102, 32'hCCDD_AABB);
+    check("(i) the writes behind it not made", rdl(32'h0000_5200), 32'h0);
+    record_wb(2, 8, "(j) MOVE16's line write", rdl(RES + 32'hAC), 16'h006D, 32'h0000_8080,
+              16'h0, 16'h0, 16'h0000, 32'h0, 32'h0, 32'h0, 32'h0, 32'h0000_8080, 32'h0102_0304);
+    check("(j) PD1", rdl(RES2 + 36 * 8 + 24), 32'h0506_0708);
+    check("(j) PD2", rdl(RES2 + 36 * 8 + 28), 32'h090A_0B0C);
+    check("(j) PD3", rdl(RES2 + 36 * 8 + 32), 32'h0D0E_0F10);
+    check("(j) MOVE16 done: A0", rdl(RES + 32'hB4), 32'h0000_5110);
+    check("(j) MOVE16 done: A1", rdl(RES + 32'hB8), 32'h0000_8090);
+    record_wb(3, 9, "(k) a traced write's bus error", rdl(RES + 32'hBC), 16'h0005,
+              32'h0000_8090, 16'h0, 16'h0, 16'h0085, 32'h0, 32'h0, 32'h0, 32'h0,
+              32'h0000_8090, 32'h0000_ABCD);
+    check("(k) the SR stacked traced", {16'h0, rdw(RESB + 60) & 16'hC000}, 32'h8000);
+    check("(k) traces taken: the next instruction's, not the write's", rdl(RES + 32'hB0), 32'd1);
     check("(e) halted (a double bus fault)", {31'h0, dut.u_core.halted}, 32'h1);
     check("(e) TRAP #0's frame, written before the vector: its word", {16'h0, rdw(32'hEFFE)},
           32'h0080);
     check("no stray exception (D6)", reg_of(6), 32'h0);
-    if (nfail == 0) $display("PASS: core_fault_tb: four access faults and a double bus fault");
+    if (nfail == 0)
+      $display("PASS: core_fault_tb: access faults on reads, fetches and writes, a double bus fault");
     else            $display("FAIL: core_fault_tb: %0d checks failed", nfail);
     $finish;
   endtask
+
+  // +wftrace: the writes queued and the write faults, by clock (triage).
+  always @(posedge clk) begin
+    if ($test$plusargs("wftrace") && rst_n) begin
+      if (dut.u_core.u_dmu.st_valid && dut.u_core.u_dmu.st_ready)
+        $display("  %0d: queued %h (W pc %h)", cyc, dut.u_core.u_dmu.st_addr, dut.u_core.w_u.pc);
+      if (dut.u_core.u_dmu.wf_now)
+        $display("  %0d: write fault, x=%0d qn=%0d (W pc %h)", cyc, dut.u_core.u_dmu.x,
+                 dut.u_core.u_dmu.qn, dut.u_core.w_u.pc);
+      if (dut.u_core.u_dmu.d_valid && dut.u_core.u_dmu.d_ready)
+        $display("  %0d: bus %h", cyc, dut.u_core.u_dmu.d_addr);
+    end
+  end
 
   // The end: the double bus fault halts the processor.
   always @(posedge clk) begin
@@ -104,6 +177,8 @@ module core_fault_tb;
     boot(image);
     // Every transfer in $8000-$80FF: TEA on its first long word.
     u_mem.set_region(1, 32'h0000_8000, 32'hFFFF_FF00, 0, 0, 0, 0, 0);
+    // ... and in $8100-$81FF, after 40 wait states: (i).
+    u_mem.set_region(2, 32'h0000_8100, 32'hFFFF_FF00, 40, 0, 0, 0, 0);
   end
 
   initial begin

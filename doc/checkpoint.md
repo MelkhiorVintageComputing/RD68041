@@ -32,9 +32,11 @@ reached W:
 
 - a fault on an **operand read**, or on a store's translation in OF: the instruction that
   made it. It has not completed; RTE runs it again.
-- a fault on a **write-back** (a store already past W, waiting in WB2 or WB1, or being
-  written): a later instruction. The store's instruction completed at W, and its write is
-  in the frame for the handler to finish.
+- a fault on a **write-back** (a store already past W, in the data memory unit's queue):
+  the instruction whose micro-operation is next in W, which does not complete -- the
+  store's instruction completed at W, and its write is in the frame for the handler to
+  finish. Exceptions and serialising instructions wait in W for the queue to empty
+  before they commit, so there always is such a micro-operation.
 - a fault on a **push**: the instruction whose miss caused it, which has not completed.
 
 ### The three write-back slots
@@ -44,14 +46,16 @@ them:
 
 | Frame | Part (UM 2.1) | Here |
 |---|---|---|
-| WB3 | the integer unit's, "a temporary holding register (WB3)" | the store a completed instruction left at W, not yet taken by the data memory unit; logical address, register-aligned data |
-| WB2 | the data memory unit's, "prior to address translation" | the store the data memory unit has taken and is translating or looking up; logical address, register-aligned data |
-| WB1 | the bus controller's, "multiplexes the data to the correct data byte lanes" | the store at the bus unit (a write-through or cache-inhibited write, or the write miss's transfer); physical address, memory-aligned data (Table 8-5) |
+| WB3 | the integer unit's, "a temporary holding register (WB3)" | the third of the write queue's three: the newest store, not started; logical address, register-aligned data |
+| WB2 | the data memory unit's, "prior to address translation" | the second: the store behind the one that faulted, not started; logical address, register-aligned data |
+| WB1 | the bus controller's, "multiplexes the data to the correct data byte lanes" | the head: the store that faulted (on the bus, or its translation); physical address, memory-aligned data (Table 8-5) |
 
 On a fault, each slot that holds a write is stacked with its status byte's V set; one that
 does not has V clear. The order the handler completes them in is WB1, WB2, WB3 — the order
-they were issued. A push fault stacks the line in PD0–PD3 and WB1S clear (UM 8.4.6.3);
-WB1A is then the push's physical address, as FA is (UM 8.4.6.4).
+they were issued. A MOVE16 write's fault stacks its line in PD0–PD3 with WB1S clear (UM
+8.4.6.3), WB1A the line's physical address. A push fault would stack the line in PD0–PD3
+and WB1S clear, WB1A the push's physical address, as FA is (UM 8.4.6.4); it is not
+reported (`doc/divergences.md`).
 
 ### MOVEM: CM
 
@@ -60,11 +64,12 @@ the effective address field contains the calculated effective address", and RTE 
 MOVEM "using the effective address on the stack (instead of repeating the effective
 address calculate operation) if the address mode is PC relative (mode = 111, register =
 010 or 011) or indirect with index (mode = 110)" — the modes whose registers MOVEM may
-have overwritten. **This design does exactly that**: CM set on any MOVEM data fault, EA
-stacked, RTE using it for those modes and recalculating for the rest; "all operand
-accesses for the MOVEM that occurred before the faulted access are repeated"
-(UM 8.4.6.7). The registers MOVEM loads before the fault are written at W only if the
-whole instruction completes, so a restart starts from the architectural values.
+have overwritten. *Planned here at M5: CM set, the EA stacked and used by RTE.* **What was
+built (M10) is simpler and gives the same result**: the registers MOVEM loads before
+the fault are put back by the undo log (`doc/microarch.md`), so a restart recalculates
+the effective address from the values it started with, and "all operand accesses for
+the MOVEM that occurred before the faulted access are repeated" (UM 8.4.6.7). CM is
+never set; RTE ignores it (`doc/divergences.md`).
 
 ### A misaligned access: MA
 
@@ -79,8 +84,11 @@ CT, CU and CP mark an exception that was to be taken after the instruction an ac
 interrupted (UM 8.3): RTE converts the frame and takes it. CT: "move the words on the
 stack an offset of $00–$0B ... to offset $30–$3B, adjusting the stack pointer by +$30 ...
 change the stack frame format to $2" and take the trace vector; CU and CP the same with
-the F-line and the FP post-instruction vectors (UM 8.4.6.2). Built at M8 (CT) and M11 (CU,
-CP).
+the F-line and the FP post-instruction vectors (UM 8.4.6.2). *Planned for M8 (CT) and M11
+(CU, CP).* **CT is not built**: an exception waits in W for the queued writes before it
+commits, so only a trace (or an interrupt) taken at a boundary can meet a write's fault
+after the instruction completed, and there the access fault replaces it and the trace
+is lost (`doc/divergences.md`). CU and CP are M11's.
 
 ### Which frame for which exception
 

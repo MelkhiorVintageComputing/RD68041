@@ -262,6 +262,9 @@ module rd68041_core #(
   logic        ic_op, ic_busy;                // CINV, CPUSH of the instruction cache
   logic        dc_op, dc_busy;                // ... and of the data cache
   logic        mm_op, mm_busy;                // PFLUSH, PTEST
+  logic        wf_pend, wf_xs, wf_ack;        // a write faulted (rd68041_dmu)
+  logic [383:0] wf_tail;                      // ... its frame's long words 3-14
+  logic        x_wft;                         // the frame is a write's fault: wf_tail
   logic        mmusr_we;
   logic [31:0] mmusr_v;
   // The instruction ATC's flushes and table searches, done by the data unit.
@@ -1226,7 +1229,12 @@ module rd68041_core #(
   wire   w_x     = w_u.valid && (w_u.xvec != 8'd0);
   wire   w_pre   = w_x && !w_u.xnext;
   wire   w_st    = w_u.valid && w_u.st && !w_nost && !w_pre;
-  assign w_stall = w_u.valid && (w_u.halt || (w_st && !st_ready));
+  // An exception, or a serialising micro-operation, waits here for every
+  // queued write to be made before it commits, so that a write that faults
+  // meanwhile is taken first (w_wf) -- the micro-operation not done, its
+  // instruction run again. While one is pending nothing leaves write-back.
+  assign w_stall = w_u.valid && (w_u.halt || (w_st && !st_ready) || wf_pend ||
+                                 ((w_u.xvec != 8'd0 || w_u.ser) && !st_empty));
   wire   w_fire  = w_u.valid && !w_stall && running;
   wire   w_go    = w_fire && !w_pre;
   wire   w_wr    = w_go && !w_nowr;
@@ -1243,9 +1251,16 @@ module rd68041_core #(
   // of an interrupt's own processing (UM 7.5.1: "at least one instruction in
   // an interrupt exception handler before recognizing another").
   wire   w_int   = w_end && !w_u.ser && int_pend && !(w_u.xs && xs_int) && !w_trace;
+  // A write that faulted (UM 8.2.1), not exception processing's: an access
+  // fault, taken on whatever is in write-back, which has not completed --
+  // its instruction runs again, its registers put back by the undo log. The
+  // frame's PC is that instruction's; the write and the two behind it are
+  // the frame's write-backs. One of exception processing's is a double bus
+  // fault (below).
+  wire   w_wf    = w_u.valid && running && wf_pend && !wf_xs;
   // ... and with any of those, or a serialising micro-operation, everything
   // behind it goes and XS_SR takes over.
-  assign x_flush = w_fire && !w_dbl && (w_x || w_trace || w_int || w_u.ser);
+  assign x_flush = (w_fire && !w_dbl && (w_x || w_trace || w_int || w_u.ser)) || w_wf;
 
   // The frame each vector has (doc/checkpoint.md).
   function automatic logic [3:0] fmt_of(input logic [7:0] v);
@@ -1269,6 +1284,12 @@ module rd68041_core #(
   // interrupt stack (UM 8.2.9). A serialising write of the SR swaps the stack
   // pointers if the active one changes.
   wire        x_apply = running && (xs == XS_SR) && st_empty;
+  // An interrupt or a trace, taken at a boundary, waits here for the writes
+  // of the instruction before it: if one of them faults, the access fault is
+  // taken in its place, at the same PC -- the interrupt is still pending
+  // after it; the trace is lost (doc/divergences.md).
+  wire        x_conv  = running && (xs == XS_SR) && wf_pend && !wf_xs;
+  assign wf_ack = w_wf || x_conv;
   wire        s0      = sr_sys[5];
   wire        m0      = sr_sys[4];
   wire [31:0] sup_sp  = s0 ? q15 : (m0 ? msp : isp);
@@ -1340,7 +1361,8 @@ module rd68041_core #(
       .clk(clk), .rst_n(rst_n), .crst(crst),
       .start(x_apply && x_exc), .vec(x_vec), .intr(x_int), .level(x_lvl), .fmt(x_fmt),
       .sr_old(x_sr0), .sr_new(x_sr0 | 16'h2000), .pc(x_pc), .addr(x_addr),
-      .ssw(x_ssw), .base(x_base), .two(x_two), .base2(x_base2), .vbr(vbr),
+      .ssw(x_ssw), .tail(wf_tail), .use_tail(x_wft),
+      .base(x_base), .two(x_two), .base2(x_base2), .vbr(vbr),
       .valid(exc_valid), .uop(exc_v), .take(xs_take));
 
   // <ea> fetch's next address, for the data cache's port A: the one <ea>
@@ -1362,6 +1384,7 @@ module rd68041_core #(
       .st_sz(w_u.sz), .st_data(w_std), .st_lock(w_u.lk), .st_locke(w_u.lke),
       .st_alt(w_u.alt), .st_noalloc(w_u.xs), .st_m16(w_u.m16),
       .st_ready(st_ready), .st_empty(st_empty),
+      .wf_pend(wf_pend), .wf_xs(wf_xs), .wf_tail(wf_tail), .wf_ack(wf_ack),
       .lock_open(lock_open),
       .dc_op(dc_op), .dc_scope(x_cmf[1:0]), .dc_push(x_cmp), .dc_addr(x_cma),
       .dc_p8k(tc[14]), .dc_busy(dc_busy),
@@ -1415,6 +1438,7 @@ module rd68041_core #(
       x_pc      <= '0; x_addr <= '0; x_ssw <= '0; x_sr0 <= '0;
       x_srw     <= 1'b0; x_stp <= 1'b0; x_rst <= 1'b0; x_trc <= 1'b0;
       x_cmo     <= 1'b0; x_cmm <= 1'b0; x_cmf <= '0; x_cmp <= 1'b0; x_cma <= '0;
+      x_wft     <= 1'b0;
       x_srn     <= '0; x_npc <= '0; x_ipc <= '0; x_rerun <= 1'b0;
       xs_int    <= 1'b0;
       rst_cnt   <= '0;
@@ -1485,6 +1509,8 @@ module rd68041_core #(
       // --- write-back -------------------------------------------------------
       if (w_u.valid && w_u.halt && running) halted <= 1'b1;
       if (w_dbl) halted <= 1'b1;
+      // A write of exception processing's that faulted: a double bus fault too.
+      if (wf_pend && wf_xs) halted <= 1'b1;
       if (w_go) begin
         ccr_w <= w_ccr;
         if (w_u.crw) begin
@@ -1594,8 +1620,16 @@ module rd68041_core #(
       end
       // An exception, an interrupt or a serialising micro-operation, from
       // write-back: XS_SR next.
+      if (x_conv) begin
+        x_exc  <= 1'b1;
+        x_int  <= 1'b0;
+        x_vec  <= 8'd2;
+        x_fmt  <= 4'h7;
+        x_trc  <= 1'b0;
+        x_wft  <= 1'b1;
+      end
       if (x_flush) begin
-        xs     <= (w_pre && umask != 16'h0) ? XS_UNDO : XS_SR;
+        xs     <= ((w_pre || w_wf) && umask != 16'h0) ? XS_UNDO : XS_SR;
         x_exc  <= w_x || w_trace || w_int;
         x_int  <= w_int;
         x_lvl  <= nmi ? 3'd7 : ipl_lvl;
@@ -1618,6 +1652,22 @@ module rd68041_core #(
         x_ipc  <= w_u.pc;
         x_trc  <= (tr[1] || (tr[0] && w_cof)) && !w_rerun;
         x_rerun <= w_rerun;
+        x_wft  <= 1'b0;
+        if (w_wf) begin
+          x_exc  <= 1'b1;
+          x_int  <= 1'b0;
+          x_vec  <= 8'd2;
+          x_fmt  <= 4'h7;
+          x_pc   <= w_u.pc;
+          x_sr0  <= {sr_sys, 3'b000, ccr_w};
+          x_srw  <= 1'b0;
+          x_stp  <= 1'b0;
+          x_rst  <= 1'b0;
+          x_cmo  <= 1'b0;
+          x_trc  <= 1'b0;
+          x_rerun <= 1'b0;
+          x_wft  <= 1'b1;
+        end
       end
 
       // PTEST's result (UM 3.1.4).

@@ -307,9 +307,11 @@ vector, SSW and FA. Where they differ:
   the MC68040 fetches long words (UM 7.3, 4.4.3), which the core reports ($0506), as it
   does for a fetch's bus error (`core_fault_tb`). `m10_mmu` keeps SIZE out of the
   register it compares.
-- **A write's ATC fault.** UAE040 stacks the write in WB3, V set, as the part does
-  (UM 8.4.6.3); the core takes the fault before the write (`doc/divergences.md`), so its
-  write-back status words are clear. `m10_mmu` does not read them.
+- **A write's ATC fault.** UAE040 completes the instruction -- its condition codes set
+  -- and stacks the write in WB3, V set, as the part does (UM 8.4.6.3); the core takes
+  the fault before the write (`doc/divergences.md`), the instruction not done, its
+  write-back status words clear. `m10_mmu` does not read them, and writes a value whose
+  condition codes are those already set.
 - **PTESTW of an address a write-protected TTR matches.** UAE040 answers MMUSR $0800 (B,
   a bus error); UM 3.1.4: a TTR match is "the R-bit is set, and all other bits are
   zero" with T -- **UAE040 wrong**. The `pmmu040` group keeps W out of PTESTW's TTRs.

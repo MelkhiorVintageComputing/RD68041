@@ -38,6 +38,8 @@ module rd68041_exc (
     input  logic  [31:0]  pc,          // the frame's PC
     input  logic  [31:0]  addr,        // $2: ADDR; $7: FA
     input  logic  [15:0]  ssw,         // $7: the special status word
+    input  logic [383:0]  tail,        // $7 of a write's fault: long words 3-14 (rd68041_dmu),
+    input  logic          use_tail,    // ... held there until the frame is written
     input  logic  [31:0]  base,        // the frame's address
     input  logic          two,         // a throwaway frame too ...
     input  logic  [31:0]  base2,       // ... here
@@ -62,6 +64,7 @@ module rd68041_exc (
   logic  [2:0] x_level;
   logic  [3:0] x_fmt;
   logic [15:0] x_sr_old, x_sr_new, x_ssw;
+  logic        x_tail;
   logic [31:0] x_pc, x_addr, x_base, x_base2, x_vbr;
 
   // The frame's length in long words.
@@ -88,8 +91,8 @@ module rd68041_exc (
   // The frame's long word n (doc/checkpoint.md): SR and the PC's high half;
   // the PC's low half and the format/vector-offset word; then $2's ADDR, or
   // $7's EA, SSW and WB3S, WB2S and WB1S, FA, and the write-backs and push
-  // data, all empty (the core lets every write finish before it takes an
-  // exception).
+  // data -- empty but for a write's fault, whose long words 3-14 the data
+  // memory unit holds (tail).
   function automatic logic [31:0] frame_lw(input logic [3:0] n, input logic [3:0] f,
                                            input logic [15:0] srv, input logic [31:0] p,
                                            input logic [7:0] v, input logic [31:0] a,
@@ -158,6 +161,7 @@ module rd68041_exc (
         u.ea_disp = x_base + {25'h0, n, 2'b00};
         u.st = 1'b1;
         u.imm = frame_lw(n, x_fmt, x_sr_old, x_pc, x_vec, x_addr, x_ssw);
+        if (x_tail && n >= 4'd3) u.imm = tail[32*(int'(n) - 3) +: 32];
       end
     endcase
     // An interrupt's vector offset is T0's: the format word is ORed with it.
@@ -181,6 +185,7 @@ module rd68041_exc (
       x_sr_old <= '0;
       x_sr_new <= '0;
       x_ssw    <= '0;
+      x_tail   <= 1'b0;
       x_pc     <= '0;
       x_addr   <= '0;
       x_base   <= '0;
@@ -199,6 +204,7 @@ module rd68041_exc (
       x_sr_old <= sr_old;
       x_sr_new <= sr_new;
       x_ssw    <= ssw;
+      x_tail   <= use_tail;
       x_pc     <= pc;
       x_addr   <= addr;
       x_base   <= base;

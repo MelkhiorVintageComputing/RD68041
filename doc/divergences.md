@@ -45,21 +45,22 @@ the result -- the modes are not built (above) and the captured levels are only r
 so `tools/timing/anchors.py` lists 53 and 54 as not about this design, with this entry as
 the reason. A board that relies on a mode select must hold it for a clock after RSTI.
 
-## Every write finishes before an exception is taken
+## The writes before an exception are made before it is taken
 
 **UM 8.2.1, 8.4.6.3.** A data access fault "freezes the pipeline", and the writes that
 are pending are stacked in the access error frame's write-back slots, for the handler to
 complete; other exceptions stack nothing of them.
 
-**What this design does.** Exception processing waits until the data memory unit's write
-queue is empty, so every write before the exception reaches memory first, and a format $7
-frame's WB3S, WB2S and WB1S always have V clear. The handler that completes the pending
-write-backs finds none, which the frame allows; what differs is when the writes reach the
-bus. It also keeps the writes' function codes those of the mode they were made in, since
-the SR changes only after them. A write's own translation fault is taken before the
-write is made (below), so it is never one of them either.
+**What this design does.** An exception, or a serialising instruction, waits in
+write-back until the data memory unit's write queue is empty, so every write before it
+reaches memory first; an interrupt or a trace, taken at a boundary, waits in `XS_SR`
+for the writes of the instruction before it. A format $7 frame therefore has write-backs
+pending only when one of those writes is itself what faulted (below, "A write's bus
+error"). The handler that completes write-backs finds none otherwise, which the frame
+allows; what differs is when the writes reach the bus. It also keeps the writes'
+function codes those of the mode they were made in, since the SR changes only after them.
 
-**Checked by:** `core_fault_tb` (the WB status words of four frames).
+**Checked by:** `core_fault_tb` (the WB status words of the read and fetch faults).
 
 ## A write's access fault is taken before the write
 
@@ -105,17 +106,41 @@ other access does, and see what memory holds (not a dirty line's newer data); no
 locks up. With DE set they read a line the cache has, never allocating one, and write
 through a line they hit.
 
-## Not yet: a write that ends in a bus error, and the format $7 continuations
+## A write's bus error is taken on what is in write-back
 
 **UM 8.2.1:** "a bus error on a data write access always results in an access fault
-exception". **UM 8.4.6.2, 8.4.6.7:** MOVEM's continuation (CM) and the trace
-continuation (CT).
+exception, causing the processor to begin exception processing immediately"; the saved
+PC is "the instruction executing at the time the fault was detected".
 
-**What this design does, not yet otherwise.** A write answered with TEA is dropped, with no
-exception; a MOVEM whose read faults is restarted from its first transfer, so a MOVEM
-whose addressing mode uses a register the list loaded can restart from the wrong address
-(the case CM exists for); CT is never set, and RTE of a format $7 frame resumes at its PC
-whatever the continuation bits say. These are M10's second part (`doc/plan.md`).
+**What this design does.** A write is made from the write queue after its instruction
+has completed. When it ends in a bus error -- its transfer, the line read a copyback
+write miss allocates (on the long word wanted), MOVE16's line write -- the queue
+freezes, and the access fault is taken on the next micro-operation to reach write-back,
+which does not complete: its instruction is the frame's PC, its registers are put back
+by the undo log, and RTE runs it again. The faulted write is WB1 (memory aligned, its
+physical address; for MOVE16 WB1S is clear and the line is in PD0-PD3), the two queued
+behind it are WB2 and WB3 (register aligned, logical addresses) and are not made: the
+handler completes them, in that order (`doc/checkpoint.md`). Which instruction the PC
+names depends on how far the pipeline had got, as on the part. Differences:
+
+- the reads made while the fault is pending -- for instructions that will not complete
+  -- are made, their data discarded, and made again when the instruction runs again;
+- an interrupt or a trace waiting for the writes of the instruction before it is
+  replaced by the access fault, at the same PC: the interrupt is taken after the
+  handler returns, as it is still pending; the trace of that instruction is lost (the
+  part sets CT and takes it after the RTE, UM 8.4.6.2).
+
+**Checked by:** `core_fault_tb` (h)-(k).
+
+## The format $7 continuation bits are never set
+
+**UM 8.4.6.2, 8.4.6.7:** MOVEM's continuation (CM), the trace continuation (CT), and the
+floating-point ones (CP, CU).
+
+**What this design does.** None is ever set, and RTE of a format $7 frame resumes at its
+PC whatever they say. A MOVEM that faults restarts from its first transfer with every
+register it loaded put back (the undo log), so its effective address is calculated from
+what it was -- the case CM exists for cannot arise. CT: above. CP and CU are M11's.
 
 ## An address error during exception processing is a double bus fault
 
@@ -124,8 +149,9 @@ error, address error, or reset, a double bus fault occurs" -- for the other exce
 an odd handler address is an address error exception.
 
 **What this design does.** Any fault on the micro-operations of exception processing,
-an odd vector included, halts the processor as a double bus fault. Only a vector table
-holding an odd handler address for a non-fault exception can tell.
+an odd vector included, halts the processor as a double bus fault -- a bus error on one
+of the frame's writes too, whenever it comes back. Only a vector table holding an odd
+handler address, or a stack that faults, for a non-fault exception can tell.
 
 ## Format error and odd PC on RTE
 
@@ -170,13 +196,14 @@ a line the cache holds is pushed if dirty and invalidated, and the transfer goes
 bus. The data it reads and leaves is the same; what differs is that MOVES never hits the
 cache and never allocates.
 
-## A write's line fill that faults, and pushes that fault, are not reported
+## A push that faults is not reported
 
 **UM 4.6.2:** "if a bus error terminates a push transfer, the processor immediately
-takes an exception." **UM 8.2.1:** a write's bus error always does.
+takes an exception", the line in PD0-PD3 (UM 8.4.6.6).
 
-**What this design does, not yet otherwise.** A push answered with TEA is dropped. A copyback
-write whose allocating line read faults on its first long word is written through to
-memory instead; one whose own bus write faults is dropped (above, "a write that ends in
-a bus error"). M10's second part brings the access error frame's write-back slots, and
-these with them.
+**What this design does.** A push answered with TEA is dropped: the line is invalidated
+as if it had been written, and its dirty data is lost. A push is a copyback line leaving
+the cache for memory that took it before, so a bus error there is a failure of the
+memory system, which software does not recover from; the frame for it, its write-backs
+and the order against the queued writes are not built. A copyback write whose allocating
+line read faults is reported (above, "A write's bus error").

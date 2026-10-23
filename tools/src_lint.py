@@ -121,20 +121,53 @@ def check_order(path):
             if re.search(r'\)\s*;', lines[n - 1]):
                 header_end = n
                 break
+        # A typedef declares its name and, for an enum, its members, at the
+        # line it starts on; a declaration of a typedef'd or a package's type
+        # (`x_e x;`, `rd68041_pkg::uop_t u;`) declares its names like any.
+        types = set()
+        typedef_lines = {}
+        n = header_end + 1
+        while n <= hi:
+            if n not in inner and re.match(r'^\s*typedef\b', lines[n - 1]):
+                first, text = n, ''
+                while n <= hi:
+                    text += ' ' + lines[n - 1]
+                    typedef_lines[n] = first
+                    if ';' in lines[n - 1] and text.count('{') == text.count('}'):
+                        break
+                    n += 1
+                body = re.search(r'\{(.*)\}', text, flags=re.S)
+                if body and re.search(r'\benum\b', text):
+                    for member in body.group(1).split(','):
+                        mm = re.match(r'\s*([A-Za-z_]\w*)', member)
+                        if mm:
+                            decl.setdefault(mm.group(1), first)
+                tm = re.search(r'([A-Za-z_]\w*)\s*;\s*$', text)
+                if tm:
+                    types.add(tm.group(1))
+                    decl.setdefault(tm.group(1), first)
+            n += 1
+        user_decl = re.compile(
+            r'^\s*(?:' + '|'.join(sorted(types) + [r'\w+::\w+']) + r')\s+'
+            r'((?:\[[^\]]*\]\s*)*)([A-Za-z_].*)$')
         for n in range(header_end + 1, hi + 1):
-            if n in inner:
+            if n in inner or n in typedef_lines:
                 continue
-            m = DECL.match(lines[n - 1])
+            m = DECL.match(lines[n - 1]) or user_decl.match(lines[n - 1])
             if m:
                 for name in declared_names(m.group(2)):
                     decl.setdefault(name, n)
+        in_macro = False
         for n in range(header_end + 1, hi + 1):
-            if n in inner:
-                continue
             line = lines[n - 1]
-            if re.match(r'^\s*`define\b', line):
-                continue                    # a macro body is text, not a use
-            m = DECL.match(line)
+            # A macro body is text, not a use -- its continuation lines too.
+            macro = in_macro or bool(re.match(r'^\s*`define\b', line))
+            in_macro = macro and line.rstrip().endswith('\\')
+            if n in inner or macro:
+                continue
+            if n in typedef_lines:
+                continue                    # its own names
+            m = DECL.match(line) or user_decl.match(line)
             skip = set(declared_names(m.group(2))) if m else set()
             for u in IDENT.finditer(line):
                 name = u.group(1)

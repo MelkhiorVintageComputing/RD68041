@@ -114,6 +114,13 @@ module rd68041_dmu (
     output logic          st_empty,    // nothing waiting
     output logic          lock_open,   // a locked sequence is under way
 
+    // A write that faulted (a bus error, or its translation): the queue is
+    // frozen, and what the access error frame needs is held, until wf_ack.
+    output logic          wf_pend,
+    output logic          wf_xs,       // ... it was exception processing's
+    output logic [383:0]  wf_tail,     // the frame's long words 3-14 (UM 8.4.6)
+    input  logic          wf_ack,      // the core has taken it: the queue empties
+
     // CINV and CPUSH of the data cache: one clock; busy until done.
     input  logic          dc_op,
     input  logic  [1:0]   dc_scope,    // 01 a line, 10 a page, 11 all
@@ -221,6 +228,34 @@ module rd68041_dmu (
   wire hit1 = (qn > 2'd1) && q_hit(ld_addr, ld_sz, qa[1], qs[1], qf[1][4]);
   wire hit2 = (qn > 2'd2) && q_hit(ld_addr, ld_sz, qa[2], qs[2], qf[2][4]);
 
+  // A write's SIZE, TT and TM, as the SSW and the write-back status words
+  // hold them (UM 8.4.6.2, 8.4.6.3): a MOVES's space of data or program is
+  // the data one (UM Table 3-2).
+  function automatic logic [6:0] wr_attr(input logic [1:0] sz, input logic m16,
+                                         input logic alt, input logic [2:0] dfc_,
+                                         input logic sup_);
+    logic [1:0] siz, tt;
+    logic [2:0] tm;
+    siz = m16 ? rd68041_pkg::SIZ_LINE :
+          (sz == rd68041_pkg::SZ_B) ? rd68041_pkg::SIZ_BYTE :
+          (sz == rd68041_pkg::SZ_W) ? rd68041_pkg::SIZ_WORD : rd68041_pkg::SIZ_LONG;
+    tt  = m16 ? rd68041_pkg::TT_MOVE16 :
+          (alt && alt_phys(dfc_)) ? rd68041_pkg::TT_ALTFC : rd68041_pkg::TT_NORMAL;
+    tm  = (alt && alt_phys(dfc_)) ? dfc_ :
+          alt ? {dfc_[2], 2'b01} :
+          sup_ ? rd68041_pkg::TM_SUP_DATA : rd68041_pkg::TM_USER_DATA;
+    wr_attr = {siz, tt, tm};
+  endfunction
+  // WB1D is memory aligned (UM Table 8-5): the operand's bytes in the lanes
+  // its address puts them in, wrapping.
+  function automatic logic [31:0] mem_align(input logic [31:0] d, input logic [1:0] sz,
+                                            input logic [1:0] a);
+    logic [31:0] l;
+    l = (sz == rd68041_pkg::SZ_B) ? {d[7:0], 24'h0} :
+        (sz == rd68041_pkg::SZ_W) ? {d[15:0], 16'h0} : d;
+    mem_align = 32'({l, l} >> (8 * int'(a)));
+  endfunction
+
   // ===========================================================================
   // Translation (UM 3.5, Figure 3-22)
   // ===========================================================================
@@ -232,6 +267,11 @@ module rd68041_dmu (
   // to a supervisor page, a write to a protected one is an access fault. A
   // table search's own accesses, an acknowledge cycle and a MOVES to a space
   // that is not data or program are physical.
+  // The state machine's states (below, "The state machine").
+  typedef enum logic [4:0] { X_IDLE, X_RD, X_LOOK, X_BUS, X_VRD0, X_VRD1, X_VRD2, X_PUSH,
+                             X_VINV, X_FILL, X_CMO, X_M16L, X_M16H0, X_M16H1, X_M16B,
+                             X_M16I, X_M16W, X_WK, X_MMF } x_e;
+  x_e          x;
   logic        xld;              // the operation is a read (else a write)
   logic [31:0] xa;               // the next byte's address (logical)
   logic        xsup;             // ... in the supervisor space
@@ -239,6 +279,7 @@ module rd68041_dmu (
   logic        xwr;              // ... checked as a write (a read-modify-write's read)
   logic        xw;               // the operation is the walker's own access
   logic [31:0] xpa;              // the piece's physical address, from X_RD on
+  logic [31:0] xpa0;             // ... and the operation's first byte's
   logic  [1:0] xcm, xupa;        // ... its cache mode and UPA
 
   wire        t_idle = (x == X_IDLE);
@@ -347,9 +388,7 @@ module rd68041_dmu (
   //            half-lines from the cache, or X_M16B the line from the bus
   //   X_M16I   MOVE16's write: a line the cache has is invalidated (UM 4.3.3);
   //            X_M16W the line on the bus
-  typedef enum logic [4:0] { X_IDLE, X_RD, X_LOOK, X_BUS, X_VRD0, X_VRD1, X_VRD2, X_PUSH,
-                             X_VINV, X_FILL, X_CMO, X_M16L, X_M16H0, X_M16H1, X_M16B,
-                             X_M16I, X_M16W, X_WK, X_MMF } x_e;
+  // (x_e and x are declared with translation, above.)
   //   X_WK     the walker (a table search, UM 3.2): its next descriptor access,
   //            itself one more operation of this state machine (xw)
   //   X_MMF    PFLUSH, or PTEST's flush of the entry before its search
@@ -357,7 +396,6 @@ module rd68041_dmu (
   logic         xm16;            // the operation is MOVE16's
   logic         xprb;            // ... a write's translation check, no data
   logic [31:0]  xa0;             // ... its first byte's address (MA)
-  x_e          x;
   logic  [2:0] xn;               // bytes still to move
   logic [31:0] xd;               // the write's data, or the read's so far
   logic        xbusy;            // a transfer of it is on the bus
@@ -579,8 +617,11 @@ module rd68041_dmu (
   wire        ld_cach = de && tr_ok && !tr_cm[1] && !ld_lock && !(ld_alt && alt_phys(ld_fc)) &&
                         !ld_ack && !ld_m16 && !ld_probe && !ld_wr;
   // (A probe has no data: the writes before it need not go first.)
+  // (Nor while the queue is frozen by a write that faulted: its writes will
+  // not be made, and the instruction the read is for will not complete.)
   wire        ld_req = ld_valid && !ld_done && !ld_cancel &&
-                       (ld_probe || (!(hit0 || hit1 || hit2) && !(tr_cm == 2'b10 && qn != 2'd0)));
+                       (ld_probe || wf_pend ||
+                        (!(hit0 || hit1 || hit2) && !(tr_cm == 2'b10 && qn != 2'd0)));
   // The fast read: in the state machine's rest, its tags on port 0.
   wire        fast   = (x == X_IDLE) && ld_req && ld_cach && ld_in1 && a_ok && p0_hit;
   // ... and the fast probe: translated in the rest, within one page.
@@ -596,8 +637,9 @@ module rd68041_dmu (
   // open nothing unlocked starts (UM 7.4.5: the transfers are indivisible).
   // MOVE16's read waits for every write: its buffer is free then.
   wire start_ld = (x == X_IDLE) && ld_req && !fast_a &&
-                  ((ld_lock || ld_m16) ? (qn == 2'd0) : !lock_open) && !(ld_m16 && lock_open);
-  wire start_st = (x == X_IDLE) && !start_ld && !fast_a && (qn != 2'd0) &&
+                  ((ld_lock || ld_m16) ? (qn == 2'd0 || wf_pend) : !lock_open) &&
+                  !(ld_m16 && lock_open);
+  wire start_st = (x == X_IDLE) && !start_ld && !fast_a && (qn != 2'd0) && !wf_pend &&
                   (!lock_open || qf[0][3]);
   wire start_c  = (x == X_IDLE) && !ld_req && (qn == 2'd0) && cmo_req;
   wire start_m  = (x == X_IDLE) && !ld_req && (qn == 2'd0) && !cmo_req && mm_req;
@@ -605,7 +647,9 @@ module rd68041_dmu (
   wire start_iw = (x == X_IDLE) && !start_ld && !fast_a && !start_st && !start_c && !start_m &&
                   !lock_open && iw_req && !iw_done;
 
-  assign st_ready = st_valid && (qn != 2'd3);
+  // A write that faults this clock (below) freezes the queue: nothing joins it.
+  logic  wf_now;
+  assign st_ready = st_valid && (qn != 2'd3) && !wf_pend && !wf_now;
 
   // --- port 0: the fast read's tags in the rest, else the piece's or CMO's line --
   // Indexed by the logical address's bits 9-4, which are the physical one's;
@@ -801,9 +845,37 @@ module rd68041_dmu (
   // is ahead of it in the queue.)
   wire q_out = !xld && !xw && (((x == X_LOOK) && x_cach && p0_hit && x_cb && !sn_any &&
                                 (xn == t_n)) ||
-                               ((x == X_BUS) && xbusy && d_done && (xn == cur_n || d_err)) ||
-                               ((x == X_M16W) && xbusy && d_done) ||
-                               ((x == X_RD) && tr_flt));
+                               ((x == X_BUS) && xbusy && d_done && (xn == cur_n) && !d_err) ||
+                               ((x == X_M16W) && xbusy && d_done && !d_err));
+
+  // --- a write that faults (UM 8.2.1: "a bus error on a data write access
+  // always results in an access fault exception") -------------------------------
+  // Its transfer ends in a bus error; or the line read a copyback write miss
+  // allocates faults on the long word wanted; or MOVE16's line write does; or
+  // its translation now fails. The queue freezes, the write and those behind
+  // it held for the frame: the faulted one is WB1 (memory aligned, its
+  // physical address) -- for MOVE16, its line in PD0-PD3, WB1S clear (UM
+  // 8.4.6.3) -- and the two behind it WB2 and WB3 (register aligned, logical),
+  // the order the handler completes them in (doc/checkpoint.md).
+  wire wf_bus = (x == X_BUS) && xbusy && d_done && d_err && !xld && !xw;
+  wire wf_fil = (x == X_FILL) && xbusy && d_done && fe0 && d_err && !xld && !xw;
+  wire wf_m16 = (x == X_M16W) && xbusy && d_done && d_err;
+  wire wf_atc = (x == X_RD) && tr_flt && !xld && !xw;
+  assign wf_now = wf_bus || wf_fil || wf_m16 || wf_atc;
+  wire       wf_ma = wf_atc && (tc_p ? (xa[31:13] != xa0[31:13]) : (xa[31:12] != xa0[31:12]));
+  wire [6:0] wa0   = wr_attr(qs[0], qf[0][4], qf[0][1], dfc, sup);
+  wire [6:0] wa1   = wr_attr(qs[1], qf[1][4], qf[1][1], dfc, sup);
+  wire [6:0] wa2   = wr_attr(qs[2], qf[2][4], qf[2][1], dfc, sup);
+  wire [15:0] wf_ssw  = {4'h0, wf_ma, wf_atc, qf[0][3], 1'b0, 1'b0, wa0};
+  wire [15:0] wf_wb3s = (qn > 2'd2) ? {8'h00, 1'b1, wa2} : 16'h0000;
+  wire [15:0] wf_wb2s = (qn > 2'd1) ? {8'h00, 1'b1, wa1} : 16'h0000;
+  wire [15:0] wf_wb1s = qf[0][4] ? 16'h0000 : {8'h00, 1'b1, wa0};
+  wire [31:0] wf_wb1a = qf[0][4] ? {xpa[31:4], 4'h0} : wf_atc ? qa[0] : xpa0;
+  wire [127:0] wf_pd  = qf[0][4] ? mb : {96'h0, mem_align(qd[0], qs[0], qa[0][1:0])};
+  wire [383:0] wf_cap = {wf_pd[127:96], wf_pd[95:64], wf_pd[63:32], wf_pd[31:0], wf_wb1a,
+                         (qn > 2'd1) ? qd[1] : 32'h0, (qn > 2'd1) ? qa[1] : 32'h0,
+                         (qn > 2'd2) ? qd[2] : 32'h0, (qn > 2'd2) ? qa[2] : 32'h0,
+                         qa[0], wf_wb2s, wf_wb1s, wf_ssw, wf_wb3s};
   wire [1:0] q_in = qn - {1'b0, q_out};
   assign st_empty = (qn == 2'd0) && !(x != X_IDLE && x != X_CMO && !xld);
 
@@ -879,6 +951,7 @@ module rd68041_dmu (
       mm_req  <= 1'b0; mkind <= '0; maddr <= '0; mm_wait <= 1'b0;
       iw_done <= 1'b0;
       mmusr_we <= 1'b0; mmusr_v <= '0;
+      wf_pend <= 1'b0; wf_xs <= 1'b0; wf_tail <= '0; xpa0 <= '0;
     end else if (crst) begin
       qn      <= '0;
       x       <= X_IDLE;
@@ -893,6 +966,7 @@ module rd68041_dmu (
       iw_done <= 1'b0;
       iw_fill <= 1'b0;
       af_we_q <= 1'b0;
+      wf_pend <= 1'b0;
     end else begin
       if (dc_op)   cmo_req <= 1'b1;
       if (start_c) cmo_req <= 1'b0;
@@ -1013,6 +1087,7 @@ module rd68041_dmu (
           xpa  <= tr_pa;
           xcm  <= tr_cm;
           xupa <= tr_upa;
+          if (xa == xa0) xpa0 <= tr_pa;
           if (tr_walk) begin
             // A table search, for the data ATC; the operation is put aside.
             s_ld <= xld; s_lk <= xlk; s_lke <= xlke; s_alt <= xalt; s_ack <= xack;
@@ -1024,7 +1099,8 @@ module rd68041_dmu (
             wk <= W_ROOT;
             `RD68041_WK_ACC(root_of(xsup, urp[31:9], srp[31:9], xa[31:25]), 1'b1, 32'h0, 1'b0, 1'b0)
           end else if (tr_flt) begin
-            // An access fault: a read answers it; a write is dropped (q_out).
+            // An access fault: a read answers it; a write's freezes the queue
+            // (wf_now).
             if (xld) begin
               ld_done <= !(xcancel || ld_cancel);
               ld_err  <= 1'b1;
@@ -1408,6 +1484,17 @@ module rd68041_dmu (
         x       <= X_WK;
       end
 
+      // A write faulted: the frame's part of it, and the state machine at rest.
+      if (wf_now) begin
+        wf_pend <= 1'b1;
+        wf_xs   <= qf[0][0];
+        wf_tail <= wf_cap;
+        xbusy   <= 1'b0;
+        xerr    <= 1'b0;
+        if (xlk) lock_open <= 1'b0;
+        x       <= X_IDLE;
+      end
+
       // A sink into the line a push holds: the push buffer has it too.
       // (Written out: a loop variable here would be a register to yosys.)
       if (sn_wr && sn_on_v && (x == X_PUSH || x == X_VRD2)) begin
@@ -1428,6 +1515,11 @@ module rd68041_dmu (
         qf[q_in] <= {st_m16, st_lock, st_locke, st_alt, st_noalloc};
       end
       qn <= qn - {1'b0, q_out} + {1'b0, st_ready};
+      // The core has the frozen writes in the frame: they go.
+      if (wf_ack) begin
+        qn      <= 2'd0;
+        wf_pend <= 1'b0;
+      end
     end
   end
 

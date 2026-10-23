@@ -108,7 +108,10 @@ _start:
         move.l  #0x55667788, 0x10008
         move.l  0x14004, OUT + 0x04
 
-        | (a) a write to a write-protected page
+        | (a) a write to a write-protected page. (UAE040 completes the MOVE and
+        | stacks its write; the core faults before it: D0 positive, so that the
+        | condition codes are the same either way.)
+        move.l  #0x12345678, %d0
         move.l  #fa_ret, RESUME
 fa1:    move.l  %d0, 0x11000
 fa_ret:
