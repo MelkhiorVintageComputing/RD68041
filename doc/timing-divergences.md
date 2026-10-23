@@ -38,3 +38,16 @@ that the measurement has something to explain:
 - **An interrupt is taken at the boundary after the one where it became pending** when
   an SR write is what lowered the mask, since the SR changes only after the serialising
   instruction has left write-back (UM 7.5.1: "within one instruction boundary").
+
+## The caches (M9)
+
+To be measured at M15; what the design does:
+
+- **A read that hits takes two clocks of \<ea\> fetch**, where the part's data cache
+  answers in one: the tags are compared on the clock the read is in \<ea\> fetch and the
+  answer registered. Misaligned reads, writes and misses go a piece at a time, a clock or
+  two each before any bus transfer.
+- **The instruction cache gives a half-line every second clock** -- about two words a
+  clock -- where the part's gives one a clock.
+- **A miss with a dirty victim pays for the push first** (`doc/divergences.md`).
+- **MOVEC to a control register serialises** the pipeline, and so refetches behind it.

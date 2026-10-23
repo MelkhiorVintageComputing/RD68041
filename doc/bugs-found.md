@@ -10,6 +10,36 @@ synchroniser) are in RD68031's `doc/bugs-found.md`.*
 
 ---
 
+## M9: found while building the caches
+
+1. **Words queued at entries 8-11 of the instruction queue were lost**: a size cast of
+   an `int` is signed in iverilog, and the index 8 became -8 (`doc/coding-standard.md`).
+   Caught by every cosim program, at their first instruction past the queue's eighth
+   word.
+2. **A write could be made twice.** The write queue's head was taken off a clock after
+   its last piece was done, and on that clock the data memory unit, idle again, started
+   it a second time. Caught by `make cosim` (`m7_a`, a byte of a long word written
+   twice over another write).
+3. **A locked or serialised read could wait forever**: it waits for the write queue to
+   empty, and the writes started only while no read was asking. Found reviewing the
+   same code.
+4. **The push buffer held its line backwards**, long word 0 where the bus unit takes long
+   word 3. Caught by `m9_dcache` against UAE040: a replaced dirty line came back wrong.
+5. **A MOVE16 read of a line in the cache took the fast read path**, which answers one
+   long word and leaves the MOVE16 buffer as it was. Caught by `m9_move16`.
+6. **MOVE16 (An)+,(An)+ incremented An twice.** Caught by cputest.
+7. **The access after MOVEC to DTTn used the old cache mode**, read in \<ea\> fetch before
+   the MOVEC reached write-back. MOVEC to a control register is serialising now. Caught
+   by `core_cache_tb`.
+8. **A copyback write could land in a line a snoop was invalidating.** A write that hits
+   is decided and done in one clock; the state machine gave way to the snooper's use of
+   the data port and the dirty bits but not to its invalidation of the tags, so in the
+   clock a snooped transfer invalidated the line the write went into an invalid line
+   and was lost. Found reviewing the write path while `core_snoop_tb` was failing --
+   which turned out to be the bench's own use of the snoop codes against UM 4.4.3 and
+   4.4.4 (mark invalid on a word read, or on a word write to a copyback page, drops the
+   rest of a dirty line, as the manual says it does).
+
 ## M8: found while building exception processing
 
 1. **Two always_comb blocks calling the same function hung iverilog 12** at time zero

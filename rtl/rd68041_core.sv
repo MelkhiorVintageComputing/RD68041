@@ -90,6 +90,7 @@ module rd68041_core #(
     input  logic [31:0]   sn_wdata,
     input  logic          sn_dinv,
     input  logic          sn_iinv,
+    input  logic          sn_rd,
 
     // For testbenches and, later, PST.
     output logic          retire,       // an instruction completed this clock
@@ -133,10 +134,12 @@ module rd68041_core #(
   // The arbiter: the data memory unit first, then instruction fetch.
   // ===========================================================================
   logic        d_valid, d_ready, d_write, d_rsp, d_done, d_err;
-  logic [31:0] d_addr, d_wdata;
+  logic [31:0] d_addr;
   logic  [1:0] d_siz, d_tt;
   logic  [2:0] d_tm;
-  logic        d_lock, d_locke, lock_open, d_avec;
+  logic        d_lock, d_locke, lock_open, d_avec, d_ci, d_tci;
+  logic  [1:0] d_tln, d_upa, d_lw;
+  logic [127:0] d_wdata128;
   logic        f_valid, f_ready, f_rsp, f_done, f_err, f_ci;
   logic [31:0] f_addr;
   logic  [2:0] f_tm;
@@ -147,15 +150,15 @@ module rd68041_core #(
   assign req_addr  = pick_d ? d_addr : f_addr;
   assign req_write = pick_d && d_write;
   assign req_siz   = pick_d ? d_siz : f_siz;
-  assign req_ciout = pick_d ? 1'b0 : f_ci;
-  assign req_upa   = pick_d ? 2'b00 : f_upa;
-  assign req_tln   = 2'b00;
+  assign req_ciout = pick_d ? d_ci : f_ci;
+  assign req_upa   = pick_d ? d_upa : f_upa;
+  assign req_tln   = pick_d ? d_tln : 2'b00;
   assign req_tt    = pick_d ? d_tt : rd68041_pkg::TT_NORMAL;
   assign req_lock  = pick_d && d_lock;
   assign req_locke = pick_d && d_locke;
   assign lock_seq  = lock_open;
   assign req_tm    = pick_d ? d_tm : f_tm;
-  assign req_wdata = {96'h0, d_wdata};
+  assign req_wdata = d_wdata128;
   assign d_ready   = pick_d && req_ready;
   assign f_ready   = !pick_d && req_ready;
 
@@ -176,6 +179,8 @@ module rd68041_core #(
   assign d_done = rsp_done  &&  rsp_own_d;
   assign d_err  = rsp_err   &&  rsp_own_d;
   assign d_avec = rsp_avec  &&  rsp_own_d;
+  assign d_lw   = rsp_lw;
+  assign d_tci  = rsp_tci;
   assign f_rsp  = rsp_valid && !rsp_own_d;
   assign f_done = rsp_done  && !rsp_own_d;
   assign f_err  = rsp_err   && !rsp_own_d;
@@ -239,6 +244,7 @@ module rd68041_core #(
   logic  [8:0] rst_cnt;
   logic        x_flush;                       // write-back empties the pipeline behind it
   logic        ic_op, ic_busy;                // CINV, CPUSH of the instruction cache
+  logic        dc_op, dc_busy;                // ... and of the data cache
 
   // ===========================================================================
   // Instruction fetch and decode
@@ -267,10 +273,7 @@ module rd68041_core #(
       .ic_op(ic_op), .ic_scope(x_cmf[1:0]), .ic_addr(x_cma), .ic_p8k(tc[14]), .ic_busy(ic_busy),
       .sn_addr(sn_addr), .sn_ihit(sn_ihit), .sn_iinv(sn_iinv));
 
-  // No data cache yet (M9, part 2).
-  assign sn_dhit   = 1'b0;
-  assign sn_ddirty = 1'b0;
-  assign sn_rdata  = 32'h0;
+
 
   logic  [4:0] seq;                           // micro-operations issued of this instruction
   logic  [1:0] de_ind, dec_ind;               // the indirection preludes it has
@@ -536,8 +539,14 @@ module rd68041_core #(
     e1 = a1[31:2] + {29'h0, ({1'b0, a1[1:0]} + nb(s1)) > 3'd4};
     touches = !((e0 < a1[31:2]) || (e1 < a0[31:2]));
   endfunction
-  wire st_ahead = (ex_u.valid && ex_u.st && touches(of_ea, of_u.sz, ex_ea, ex_u.sz)) ||
-                  (w_u.valid  && w_u.st  && touches(of_ea, of_u.sz, w_ea,  w_u.sz));
+  // A MOVE16 write covers its whole line; a MOVE16 read waits for every write
+  // (the data memory unit holds the line in between).
+  function automatic logic st_hits(input rd68041_pkg::uop_t x, input logic [31:0] x_a,
+                                   input rd68041_pkg::uop_t w, input logic [31:0] w_a);
+    st_hits = w.valid && w.st &&
+              (x.m16 || (w.m16 ? (x_a[31:4] == w_a[31:4]) : touches(x_a, x.sz, w_a, w.sz)));
+  endfunction
+  wire st_ahead = st_hits(of_u, of_ea, ex_u, ex_ea) || st_hits(of_u, of_ea, w_u, w_ea);
 
   // Exception processing's reads -- the vector -- wait for every write before
   // them, the frame's: UM 8.1 fetches the vector last, and a double bus fault
@@ -1240,7 +1249,8 @@ module rd68041_core #(
   end
   // CINV and CPUSH: the instruction cache's part starts as XS_SR applies.
   assign ic_op = x_apply && !x_exc && x_cmo && x_cmf[3];
-  wire   cmo_done = (xs == XS_CMO) && !ic_busy;
+  assign dc_op = x_apply && !x_exc && x_cmo && x_cmf[2];
+  wire   cmo_done = (xs == XS_CMO) && !ic_busy && !dc_busy;
   // Fetching starts again behind a serialising instruction, a RESET, or a
   // CINV or CPUSH.
   wire x_go = (x_apply && !x_exc && !x_rst && !x_cmo && !x_trc && !x_stp) ||
@@ -1267,19 +1277,32 @@ module rd68041_core #(
       .ssw(x_ssw), .base(x_base), .two(x_two), .base2(x_base2), .vbr(vbr),
       .valid(exc_valid), .uop(exc_v), .take(xs_take));
 
+  // <ea> fetch's next address, for the data cache's port A: the one <ea>
+  // calculate hands on, else the one it holds.
+  wire [31:0] of_ea_nx = ea_stall ? of_ea : agu_ea;
+
   rd68041_dmu u_dmu (
       .clk(clk), .rst_n(rst_n), .crst(crst), .sup(sup), .sfc(sfc), .dfc(dfc),
-      .ld_valid(ld_valid), .ld_addr(ld_addr), .ld_sz(ld_sz),
+      .de(cacr[31]), .dtt0(dtt0), .dtt1(dtt1),
+      .ld_valid(ld_valid), .ld_addr(ld_addr), .ld_pre(of_ea_nx), .ld_sz(ld_sz),
       .ld_done(ld_done), .ld_data(ld_data), .ld_err(ld_err), .ld_cancel(ld_cancel),
       .ld_lock(of_u.lk && rs == R_RUN), .ld_alt(of_u.alt && rs == R_RUN),
       .ld_ack(of_u.ack && rs == R_RUN), .ld_tm(of_u.fn[2:0]), .ld_avec(ld_avec),
+      .ld_noalloc(of_u.xs || rs != R_RUN), .ld_m16(of_u.m16 && rs == R_RUN),
       .st_valid(w_st && running && !w_u.halt), .st_addr(w_ea),
       .st_sz(w_u.sz), .st_data(w_std), .st_lock(w_u.lk), .st_locke(w_u.lke),
-      .st_alt(w_u.alt), .st_ready(st_ready), .st_empty(st_empty), .lock_open(lock_open),
+      .st_alt(w_u.alt), .st_noalloc(w_u.xs), .st_m16(w_u.m16),
+      .st_ready(st_ready), .st_empty(st_empty),
+      .lock_open(lock_open),
+      .dc_op(dc_op), .dc_scope(x_cmf[1:0]), .dc_push(x_cmp), .dc_addr(x_cma),
+      .dc_p8k(tc[14]), .dc_busy(dc_busy),
       .d_valid(d_valid), .d_ready(d_ready), .d_addr(d_addr), .d_write(d_write),
-      .d_siz(d_siz), .d_tt(d_tt), .d_tm(d_tm), .d_lock(d_lock), .d_locke(d_locke),
-      .d_wdata(d_wdata), .d_rsp(d_rsp),
-      .d_data(rsp_data), .d_done(d_done), .d_err(d_err), .d_avec(d_avec));
+      .d_siz(d_siz), .d_tt(d_tt), .d_tm(d_tm), .d_tln(d_tln), .d_upa(d_upa), .d_ci(d_ci),
+      .d_lock(d_lock), .d_locke(d_locke), .d_wdata(d_wdata128), .d_rsp(d_rsp), .d_lw(d_lw),
+      .d_data(rsp_data), .d_tci(d_tci), .d_done(d_done), .d_err(d_err), .d_avec(d_avec),
+      .sn_addr(sn_addr), .sn_rd(sn_rd), .sn_dhit(sn_dhit), .sn_ddirty(sn_ddirty),
+      .sn_rdata(sn_rdata), .sn_wr(sn_wr), .sn_wbe(sn_wbe), .sn_wdata(sn_wdata),
+      .sn_dinv(sn_dinv));
 
   // A redirect, or an exception, kills <ea> fetch: its read, if one is on the
   // bus, is cancelled.
@@ -1615,6 +1638,6 @@ module rd68041_core #(
   end
 
   logic unused_ok;
-  assign unused_ok = &{1'b0, reset_v, x_cmp, x_cmf[2], sn_wr, sn_wbe, sn_wdata, sn_dinv};
+  assign unused_ok = &{1'b0, reset_v};
 
 endmodule

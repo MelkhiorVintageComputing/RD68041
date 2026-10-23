@@ -78,7 +78,8 @@ module rd68041_snoop (
     output logic  [3:0] sn_wbe,
     output logic [31:0] sn_wdata,
     output logic        sn_dinv,
-    output logic        sn_iinv
+    output logic        sn_iinv,
+    output logic        sn_rd          // it reads the data cache at sn_addr this clock
 );
 
   typedef enum logic [2:0] {
@@ -122,6 +123,10 @@ module rd68041_snoop (
   // The sourced transfer's last TA is on the bus at this edge.
   wire src_end  = (st == SN_SRC) && !ta_n_o &&
                   (!is_line || (beat == 2'd3));
+
+  // The data cache's port B is read at sn_addr while the lines are looked up
+  // and while a dirty line is sourced.
+  assign sn_rd = (st == SN_LOOK) || (st == SN_SRC);
 
   // The lookup: the latched address, the long word being read.
   assign sn_addr = {x_a[31:4], (st == SN_SRC) ? (x_a[3:2] + rd_k) : x_a[3:2], 2'b00};

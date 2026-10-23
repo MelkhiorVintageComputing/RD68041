@@ -114,7 +114,8 @@ module rd68041_biu (
     output logic  [3:0]  sn_wbe,
     output logic [31:0]  sn_wdata,
     output logic         sn_dinv,
-    output logic         sn_iinv
+    output logic         sn_iinv,
+    output logic         sn_rd
 );
 
   // ---------------------------------------------------------------------------
@@ -245,7 +246,7 @@ module rd68041_biu (
       .ta_n_o(ta_n_o), .ta_on_d(s_ta_on_d),
       .sn_addr(sn_addr), .sn_dhit(sn_dhit), .sn_ddirty(sn_ddirty),
       .sn_ihit(sn_ihit), .sn_rdata(sn_rdata), .sn_wr(sn_wr), .sn_wbe(sn_wbe),
-      .sn_wdata(sn_wdata), .sn_dinv(sn_dinv), .sn_iinv(sn_iinv)
+      .sn_wdata(sn_wdata), .sn_dinv(sn_dinv), .sn_iinv(sn_iinv), .sn_rd(sn_rd)
   );
 
   rd68041_late_release u_ta_rel (

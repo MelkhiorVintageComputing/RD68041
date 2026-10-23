@@ -186,6 +186,41 @@ in the exception state machine's `XS_CMO`: all at once, a line by its set, a pag
 walking the 256 lines; the snooper invalidates a line a snooped transfer hits
 (Table 4-3).
 
+**The data cache** (`rtl/rd68041_dmu.sv`). The cache's port A is addressed with the
+address \<ea\> fetch will hold next (the one \<ea\> calculate hands on, or the one it
+holds), so a read that fits in a half-line has its data out of the RAM on the clock it is
+in \<ea\> fetch; its tags are compared then, and a hit is answered on the next clock --
+two clocks of \<ea\> fetch where the part takes one (`doc/timing-divergences.md`).
+Everything else goes a piece at a time (each aligned in a long word, as UM 7.3 splits
+an operand) through a state machine: a cachable piece's half-line read on port B and
+its tags compared; a hit read from or written into the cache (a copyback write setting
+the long word's D bit, a write-through one also going to the bus); a miss that allocates
+-- a read, a copyback write, neither from exception processing or MOVE16 -- taking the
+invalid way or the counter's, pushing it first if it is dirty, then filling it by a
+line read; a cache-inhibited, locked, alternate-space or acknowledge piece going to the
+bus, after a line the cache holds has been pushed if dirty and invalidated. A push
+copies the line into the push buffer and writes it with TM 000, a long word if one long
+word is dirty, the line otherwise, and invalidates it; it is done before the fill that
+needs the way, where the part does it after (`doc/divergences.md`). The writes queued
+from write-back drain through the same machine, a read going first unless it touches
+one of them or its page is serialised.
+
+**The snooper** has the data cache's port B, its tags and its dirty bits first in the
+clocks it uses them; the state machine waits, and a write that hits waits out any clock
+the snooper touches the cache at all, since it decides and writes in one. While a push waits for the bus its line
+stays valid and dirty, where the snooper finds it: a sink into it is copied into the push
+buffer too, and a snoop that invalidates it cancels the push.
+
+**MOVE16** is a line read of the source into the data memory unit's MOVE16 buffer -- from
+the cache if the line is there, else a TT 01 burst from the long word the address names,
+not allocated -- and a line write of the destination from it, queued at write-back like
+any write, which invalidates a line the cache holds first (UM 4.3.3); then the address
+registers that postincrement, by 16, after both transfers so that a fault leaves them
+alone. The read waits for every queued write, so the buffer is free when it fills it.
+
+**MOVEC to a control register is serialising**, like the SR's writers: what follows it
+sees the caches' enables, the TTRs' modes and VBR as written.
+
 ## Status
 
 **M4: measured.** The storage above (`rtl/rd68041_bram.sv`, `rd68041_atc.sv`,
@@ -225,3 +260,14 @@ not built are MOVE16 (M9); `make cosim` adds `m8_exc` (traps, privilege, trace, 
 master stack, throwaway and format-error RTEs); `core_exc_tb` (interrupts, STOP, RESET,
 BKPT) and `core_fault_tb` (access faults, the double bus fault) check against the manual
 what no oracle runs.
+
+**M9: the caches.** Both caches, write-through and copyback, write-allocate in copyback
+mode, the push buffer, CINV and CPUSH by line, page and whole, MOVE16, the TTRs' cache
+modes with translation off, CIOUT, TLN and UPA, and snooping into both caches. Against
+UAE040, `make cosim` runs `m9_icache`, `m9_dcache` and `m9_move16` with the caches on,
+and `make cache` runs the vector sweep and the cputest corpus with them forced on,
+write-through and copyback, as well. What is on the bus is checked against the manual by
+`core_cache_tb` (fills, write-through, pushes by size, CIOUT, TCI, TAS on a dirty line)
+and `core_snoop_tb`: a random alternate master reads and writes memory the program
+shares with it, its every transfer snooped -- dirty data sourced, sunk and invalidated --
+and both sides' views stay coherent.

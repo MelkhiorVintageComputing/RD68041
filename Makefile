@@ -103,6 +103,8 @@ help:
 	@echo "                    default OP=$(VECGROUPS)); passed / failed / not built / pending"
 	@echo "  make vectors-all  ... every group"
 	@echo "  make ea           ... the addressing-mode sweep (OP=ea)"
+	@echo "  make cache        the caches against the oracles: their cosims, vectors-all and"
+	@echo "                    cputest with the caches on (CACHE=1 write-through, 2 copyback)"
 	@echo "  make cputest      the integer cputest corpus on the core (CPUTEST_SEL=ADD,MOVE.L"
 	@echo "                    CPUTEST_MAX=$(CPUTEST_MAX))"
 	@echo "  make qemu040      build QEMU (m68k-softmmu, build/qemu/) and the qemu040 trace plugin"
@@ -208,10 +210,12 @@ ucode-check: dirs
 TBS := $(filter-out core_cosim_tb core_vec_tb core_cputest_tb,$(patsubst sim/tb/%.sv,%,$(wildcard sim/tb/*_tb.sv)))
 MODELS := $(wildcard sim/models/*.sv)
 SIMJOBS ?= 4
+# The sweeps (vectors, cputest) with the caches on: 1 write-through, 2 copyback.
+CACHE ?= 0
 
 # The directed benches that run a program (core_exc_tb, core_fault_tb) take it
 # from build/programs/.
-SIMPROGS := m8_int m8_fault m9_cache
+SIMPROGS := m8_int m8_fault m9_cache m9_snoop
 
 sim: dirs $(patsubst %,$(BUILD)/programs/%.hex,$(SIMPROGS))
 	@rm -f $(addprefix $(BUILD)/,$(addsuffix .simres,$(TBS))); \
@@ -248,7 +252,7 @@ sim: dirs $(patsubst %,$(BUILD)/programs/%.hex,$(SIMPROGS))
 # boundary (UAE040: doc/oracles.md). PROGS defaults to every program but the
 # directed benches' (SIMPROGS), which no oracle runs.
 # ---------------------------------------------------------------------------
-PROGS   ?= m6_basic m7_a m7_b m7_c m8_exc m9_icache
+PROGS   ?= m6_basic m7_a m7_b m7_c m8_exc m9_icache m9_dcache m9_move16
 
 # Keep the intermediate files: the ELF is what objdump reads when a run fails.
 .SECONDARY:
@@ -523,7 +527,7 @@ vectors: dirs $(O40BUILD)/vectors_gen
 	@iverilog $(IVFLAGS) -I sim/tb -o $(BUILD)/core_vec_tb.vvp -s core_vec_tb \
 	    $(RTL) $(MODELS) sim/tb/core_vec_tb.sv > $(BUILD)/core_vec_tb.build.log 2>&1 \
 	  || { grep -v $(NOTES) $(BUILD)/core_vec_tb.build.log; exit 1; }
-	@vvp $(BUILD)/core_vec_tb.vvp +vec=$(BUILD)/vectors.hex +faillog=$(BUILD)/vectors.fail \
+	@vvp $(BUILD)/core_vec_tb.vvp +vec=$(BUILD)/vectors.hex +faillog=$(BUILD)/vectors.fail +cache=$(CACHE) \
 	    +show=$(VECSHOW) > $(BUILD)/core_vec_tb.log 2>&1; \
 	 grep -E '^  (FAIL|      )' $(BUILD)/core_vec_tb.log | head -$$(( $(VECSHOW) * 4 )); \
 	 grep -E '^core_vec_tb: ' $(BUILD)/core_vec_tb.log | sed 's/^core_vec_tb: /  /'; \
@@ -599,6 +603,17 @@ cputest-gen: dirs $(CTBUILD)/run/stamp $(CTBUILD)/fpu/stamp
 CPUTEST_SEL  ?=
 CPUTEST_MAX  ?= 40
 
+# The caches against the oracles (M9): the programs that run with them on, and
+# the two sweeps with them on, write-through (CACHE=1) and copyback (CACHE=2).
+# What is on the bus is core_cache_tb's and core_snoop_tb's, in `make sim`.
+.PHONY: cache
+cache:
+	@$(MAKE) --no-print-directory cosim PROGS="m9_icache m9_dcache m9_move16"
+	@for c in 1 2; do echo "== vectors-all CACHE=$$c"; \
+	  $(MAKE) --no-print-directory vectors-all CACHE=$$c || exit 1; done
+	@for c in 1 2; do echo "== cputest CACHE=$$c"; \
+	  $(MAKE) --no-print-directory cputest CACHE=$$c || exit 1; done
+
 .PHONY: cputest
 cputest: dirs $(CTBUILD)/run/stamp
 	@python3 tools/cputest/convert.py bench $(CTBUILD) $(CTBUILD)/run/data/*/ \
@@ -607,7 +622,7 @@ cputest: dirs $(CTBUILD)/run/stamp
 	@iverilog $(IVFLAGS) -I sim/tb -o $(BUILD)/core_cputest_tb.vvp -s core_cputest_tb \
 	    $(RTL) $(MODELS) sim/tb/core_cputest_tb.sv > $(BUILD)/core_cputest_tb.build.log 2>&1 \
 	  || { grep -v $(NOTES) $(BUILD)/core_cputest_tb.build.log; exit 1; }
-	@vvp $(BUILD)/core_cputest_tb.vvp +vec=$(CTBUILD)/cputest.vec +mem=$(CTBUILD) \
+	@vvp $(BUILD)/core_cputest_tb.vvp +vec=$(CTBUILD)/cputest.vec +mem=$(CTBUILD) +cache=$(CACHE) \
 	    +faillog=$(CTBUILD)/cputest.fail \
 	    > $(BUILD)/core_cputest_tb.log 2>&1; \
 	 grep -E '^  (FAIL|      )' $(BUILD)/core_cputest_tb.log | head -75; \

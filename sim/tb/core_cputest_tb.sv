@@ -167,6 +167,8 @@ module core_cputest_tb;
       // built, and that is what is compared.
       if (!built && dbl_seen) begin built = 1'b1; ok = 1'b1; end
       end_one();
+      // Copyback: what the test wrote may still be in the data cache.
+      if (dep_cache == 2) dc_writeback();
 
       if (!built) begin
         undo_writes();

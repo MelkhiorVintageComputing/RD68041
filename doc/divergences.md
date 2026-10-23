@@ -102,3 +102,36 @@ intended primarily for use by in-circuit emulators."
 
 **What this design does.** CDIS is sampled at reset, for the multiplexed-bus mode select
 (`rd68041_rstctl`), and otherwise ignored: only CACR's IE and DE enable the caches.
+
+## A dirty line is pushed before the fill that replaces it
+
+**UM 4.3.1.2, 4.6.2:** "the dirty line being replaced is temporarily placed in a push
+buffer while the new line is fetched from memory. ... After the bus transfer for the new
+line successfully completes, the dirty cache line is copied back to memory." A fill that
+is cache-inhibited or faults puts the dirty line back.
+
+**What this design does.** The push is written first, then the line is filled: the bus
+sees the push before the line read, and the latency of the miss includes the push. With
+the push done, a fill that fails has nothing to restore; the line is left invalid, which
+memory, now holding its data, agrees with. While the push waits for the bus the line
+stays in the cache, valid and dirty, and is snooped there (`doc/microarch.md`).
+
+## MOVES bypasses the data cache
+
+**UM 4.3:** an access's caching mode comes from its page or TTR, whatever its function
+code.
+
+**What this design does.** A MOVES read or write is treated as a cache-inhibited access:
+a line the cache holds is pushed if dirty and invalidated, and the transfer goes to the
+bus. The data it reads and leaves is the same; what differs is that MOVES never hits the
+cache and never allocates.
+
+## A write's line fill that faults, and pushes that fault, are not reported
+
+**UM 4.6.2:** "if a bus error terminates a push transfer, the processor immediately
+takes an exception." **UM 8.2.1:** a write's bus error always does.
+
+**What this design does until M10.** A push answered with TEA is dropped. A copyback
+write whose allocating line read faults on its first long word is written through to
+memory instead; one whose own bus write faults is dropped (above, "a write that ends in
+a bus error"). M10 brings the access error frame's write-back slots, and these with them.

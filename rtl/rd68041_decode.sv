@@ -1246,6 +1246,9 @@ module rd68041_decode (
             priv = 1'b1; u.cof = 1'b1;
             if (c == 4'hF) bad = 1'b1;
             if (op[0]) begin                     // Rn -> Rc
+              // Serialising: what comes after sees the register as written
+              // -- the caches' enables, the TTRs' cache modes, VBR.
+              u.ser = 1'b1;
               u.b_reg = {1'b0, x[15:12]};
               if (act) begin u.wr = 1'b1; u.wr_reg = 5'd15; end
               else begin u.crw = 1'b1; u.cr = c; end
@@ -1727,10 +1730,10 @@ module rd68041_decode (
         u.xvec = 8'd10;
       end
 
-      // 1111: the F-line. CINV and CPUSH; MOVE16 (M9), PFLUSH ($F500-$F51F)
-      // and PTEST ($F548, $F568; M10) -- privileged but for MOVE16 -- and the
-      // floating-point instructions (M11) are not built; the rest, a scope of
-      // 00 for CINV and CPUSH among it, is vector 11 (UM 9.4).
+      // 1111: the F-line. CINV, CPUSH and MOVE16; PFLUSH ($F500-$F51F) and
+      // PTEST ($F548, $F568; M10), privileged, and the floating-point
+      // instructions (M11) are not built; the rest, a scope of 00 for CINV
+      // and CPUSH among it, is vector 11 (UM 9.4).
       default: begin
         u.len = 5'd2;
         if (op[11:8] == 4'h4 && op[4:3] != 2'b00) begin
@@ -1749,7 +1752,49 @@ module rd68041_decode (
                                           op[7:3] == 5'b01101)) begin
           priv = 1'b1;
           u.halt = 1'b1;
-        end else if (op[11:6] == 6'b011000 || op[11:9] == 3'b001) begin
+        end else if (op[11:5] == 7'b0110000 || op[11:3] == 9'b011000100) begin
+          // MOVE16 (PRM 4): a line read of the source into the data memory
+          // unit's buffer, a line write of the destination from it, then the
+          // address registers that postincrement, by 16 -- after the
+          // transfers, so that a fault leaves them as they were.
+          logic        two;
+          logic [2:0]  ra, rb2;
+          logic [31:0] abs;
+          logic        s_abs, d_abs, inc_a, inc_b;
+          two   = op[5];                           // (Ax)+,(Ay)+
+          abs   = {ew(w, 0), ew(w, 1)};
+          ra    = op[2:0];
+          rb2   = w0[14:12];
+          s_abs = !two && op[3];
+          d_abs = !two && !op[3];
+          inc_a = two || !op[4];                   // Ax, or Ay of opmodes 00, 01
+          // Ay of (Ax)+,(Ay)+ -- once only when it is Ax: PRM 4 does not say,
+          // the cputest corpus increments it once (doc/oracles.md).
+          inc_b = two && (rb2 != ra);
+          need  = two ? 4'd1 : 4'd2;
+          u.len = two ? 5'd4 : 5'd6;
+          more  = (sq < (5'd1 + {4'h0, inc_a} + {4'h0, inc_b}));
+          u.last = !more;
+          if (!more) pop = need;
+          u.sz = rd68041_pkg::SZ_L;
+          case (sq)
+            5'd0, 5'd1: begin
+              u.m16 = 1'b1;
+              if (sq == 5'd0) u.ld = 1'b1; else u.st = 1'b1;
+              if ((sq == 5'd0) ? s_abs : d_abs) begin
+                u.ea_en = 1'b1; u.ea_base = rd68041_pkg::B_NONE; u.ea_disp = abs;
+              end else begin
+                `DEC_EA(ea_fix(3'd2, (sq == 5'd1 && two) ? rb2 : ra, w0), rd68041_pkg::SZ_L)
+              end
+            end
+            default: begin
+              u.a_sel = rd68041_pkg::S_IMM; u.imm = 32'd16;
+              u.b_reg = areg((sq == 5'd3 || !inc_a) ? rb2 : ra);
+              u.op = rd68041_pkg::OP_ADDA;
+              u.wr = 1'b1; u.wr_reg = areg((sq == 5'd3 || !inc_a) ? rb2 : ra);
+            end
+          endcase
+        end else if (op[11:9] == 3'b001) begin
           u.halt = 1'b1;
         end else begin
           u.xvec = 8'd11;

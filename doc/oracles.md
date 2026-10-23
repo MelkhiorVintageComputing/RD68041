@@ -269,6 +269,22 @@ behaviour and counts each case.
   invalidated", and the instruction cache is selected. Found by `m9_icache`, which now
   makes changed code coherent with CINV and CPUSHA only; `core_cache_tb` checks CPUSHL
   and CPUSHP of the instruction cache against the manual.
+- **MOVE16 (An)+,(An)+ with the same register twice** increments it once, by 16, in the
+  cputest corpus (four tests); PRM 4 says nothing of the case. The core follows the
+  corpus, whose tester its author checks against real processors.
+- **UAE040's copyback data cache agrees with the core** on everything `m9_dcache` and
+  `m9_move16` can see from the program: write-through and copyback writes, replacements
+  and pushes, CPUSHL and CPUSHA, CINV dropping dirty data, TAS, CAS and MOVES on dirty
+  lines, a cache-inhibited access to a line the cache holds, and MOVE16 reading a dirty
+  source line from the cache and invalidating its destination. What is on the bus is
+  checked against the manual instead (`core_cache_tb`).
+- **The caches against the oracles** (`make cache`): `m9_icache`, `m9_dcache` and
+  `m9_move16` against UAE040 with the caches on, and the vector sweep and the cputest
+  corpus run with the caches forced on, write-through (`CACHE=1`) and copyback through
+  DTT0 (`CACHE=2`); a MOVEC that reads CACR is set aside then, since the bench put its
+  value there. MOVE16 has no vector group: the vector bench compares operand accesses,
+  and a line is not one; the corpus's 652 MOVE16 tests and `m9_move16` cover it. The
+  `cinv_cpush` group sweeps CINV and CPUSH's encodings in both modes.
 - **No oracle runs interrupts** (UAE040's harness and the corpus have no interrupt
   source), and the access error frame is UAE040's to judge only from M10. `core_exc_tb`
   and `core_fault_tb` check interrupts, STOP, RESET, BKPT, the format $7 frames of read

@@ -129,7 +129,7 @@ module rd68041_top #(
   // The snooper's port to the caches.
   logic [31:0]  sn_addr, sn_wdata, sn_rdata;
   logic  [3:0]  sn_wbe;
-  logic         sn_wr, sn_dinv, sn_iinv, sn_dhit, sn_ddirty, sn_ihit;
+  logic         sn_wr, sn_dinv, sn_iinv, sn_dhit, sn_ddirty, sn_ihit, sn_rd;
 
   logic         ipend, rsto;
 
@@ -145,7 +145,7 @@ module rd68041_top #(
       .ipl_n(ipl_n_i), .ipend(ipend), .rsto(rsto),
       .sn_addr(sn_addr), .sn_dhit(sn_dhit), .sn_ddirty(sn_ddirty), .sn_ihit(sn_ihit),
       .sn_rdata(sn_rdata), .sn_wr(sn_wr), .sn_wbe(sn_wbe), .sn_wdata(sn_wdata),
-      .sn_dinv(sn_dinv), .sn_iinv(sn_iinv),
+      .sn_dinv(sn_dinv), .sn_iinv(sn_iinv), .sn_rd(sn_rd),
       .retire(retire), .retire_pc(retire_pc), .retire_npc(retire_npc),
       .halted(halted), .sr(sr));
 
@@ -223,7 +223,8 @@ module rd68041_top #(
       .sn_wbe    (sn_wbe),
       .sn_wdata  (sn_wdata),
       .sn_dinv   (sn_dinv),
-      .sn_iinv   (sn_iinv)
+      .sn_iinv   (sn_iinv),
+      .sn_rd     (sn_rd)
   );
 
   // TS shares the address group's enable (specification 38 names it with

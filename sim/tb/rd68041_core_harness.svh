@@ -94,6 +94,10 @@ logic [31:0] dep_a [0:7];
 logic [15:0] dep_sr = 16'h2700;
 logic [31:0] dep_usp = 0, dep_isp = 0, dep_msp = 0, dep_vbr = 0, dep_cacr = 0;
 logic  [2:0] dep_sfc = 0, dep_dfc = 0;
+// +cache=1: the caches on (CACR's DE and IE), write-through; +cache=2: and
+// DTT0 copyback over everything. The sweeps' tests then run through the caches.
+int          dep_cache = 0;
+initial if (!$value$plusargs("cache=%d", dep_cache)) dep_cache = 0;
 
 task automatic deposit();
   int t;
@@ -108,7 +112,8 @@ task automatic deposit();
   dut.u_core.vbr    = dep_vbr;
   dut.u_core.sfc    = dep_sfc;
   dut.u_core.dfc    = dep_dfc;
-  dut.u_core.cacr   = dep_cacr & 32'h8000_8000;
+  dut.u_core.cacr   = (dep_cacr | ((dep_cache != 0) ? 32'h8000_8000 : 32'h0)) & 32'h8000_8000;
+  if (dep_cache == 2) dut.u_core.dtt0 = 32'h0000_E020;
   dut.u_core.sr_sys = {dep_sr[15:12], 1'b0, dep_sr[10:8]};
   dut.u_core.ccr_x  = dep_sr[4:0];
   dut.u_core.ccr_w  = dep_sr[4:0];
@@ -165,3 +170,29 @@ always @(posedge clk)
     $display("  [%0d] xs: pc %h vec %0d ser %b  fa/imm %h ssw %h  sr %h", cyc,
              dut.u_core.w_u.pc, dut.u_core.w_xv, dut.u_core.w_u.ser,
              dut.u_core.w_u.imm, dut.u_core.w_u.tgt[15:0], dut.u_core.sr);
+
+// dc_writeback: the data cache's dirty long words into the slave's memory,
+// through the back door, as a CPUSHA would leave memory -- for a bench that
+// compares memory after a test run with the cache copyback (+cache=2). The
+// cache is left as it is.
+`define RD68041_DC_WAY(W) \
+  for (int st = 0; st < 64; st++) begin \
+    logic [21:0] tg; logic [3:0] dy; logic [63:0] h0, h1; logic [31:0] la; \
+    tg = dut.u_core.u_dmu.u_arr.g_tag[W].tag_ram[st]; \
+    dy = dut.u_core.u_dmu.u_arr.g_tag[W].g_dirty.dirty_ram[st]; \
+    h0 = dut.u_core.u_dmu.u_arr.g_data[W].u_ram.mem[2*st]; \
+    h1 = dut.u_core.u_dmu.u_arr.g_data[W].u_ram.mem[2*st + 1]; \
+    la = {tg, 6'(st), 4'h0}; \
+    if (dut.u_core.u_dmu.u_arr.v_q[W][st] && dy != 4'h0) begin \
+      if (dy[0]) u_mem.poke_long(la,      h0[63:32]); \
+      if (dy[1]) u_mem.poke_long(la + 4,  h0[31:0]); \
+      if (dy[2]) u_mem.poke_long(la + 8,  h1[63:32]); \
+      if (dy[3]) u_mem.poke_long(la + 12, h1[31:0]); \
+    end \
+  end
+task automatic dc_writeback();
+  `RD68041_DC_WAY(0)
+  `RD68041_DC_WAY(1)
+  `RD68041_DC_WAY(2)
+  `RD68041_DC_WAY(3)
+endtask

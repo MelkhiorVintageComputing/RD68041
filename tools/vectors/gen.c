@@ -1425,6 +1425,23 @@ static void g_ea(void)
     }
 }
 
+/* CINV and CPUSH ($F4xx, PRM 6): every encoding, in supervisor mode with the
+ * caches off as every test starts -- each one an instruction that does
+ * nothing visible but end, except a scope of 00, which is not CINV or CPUSH
+ * and takes the F-line exception (UM 9.4) -- and in user mode, where every
+ * one of them is a privilege violation (UM 8.2.5). The address register is
+ * whatever the test gives it: with the caches off no line can match. What
+ * the caches do with them is make cosim's (m9_icache, m9_dcache) and
+ * core_cache_tb's. */
+static void g_cinv_cpush(void)
+{
+    unsigned int op;
+    for (op = 0xF400u; op <= 0xF4FFu; op++)
+        plain(op, 1, 1);
+    for (op = 0xF408u; op <= 0xF4FFu; op += 0x11u)
+        user_mode(op, 0, 0);
+}
+
 /* ------------------------------------------------------------------ */
 /* The catalogue                                                       */
 /* ------------------------------------------------------------------ */
@@ -1462,6 +1479,7 @@ static const struct group GROUPS[] = {
     { "traps",   g_traps   },
     { "trace",   g_trace   },
     { "ea",      g_ea      },
+    { "cinv_cpush", g_cinv_cpush },
 };
 #define NGROUPS ((int)(sizeof GROUPS / sizeof GROUPS[0]))
 

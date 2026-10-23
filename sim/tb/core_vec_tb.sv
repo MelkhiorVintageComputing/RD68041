@@ -200,6 +200,13 @@ module core_vec_tb;
         if (!cap_rd[n]) restore(cap_addr[n], cap_bytes[n]);
       for (n = 0; n < npoke; n++) restore(pa[n], 4);
 
+      // With the caches forced on (+cache), MOVEC from CACR reads what the
+      // bench put there, not the test's CACR: not compared.
+      if (dep_cache != 0 && w[0][15:0] == 16'h4E7A && w[1][11:0] == 12'h002) begin
+        pending++;
+        g_pend[grp]++;
+        disable one;
+      end
       if (!built) begin
         notbuilt++;
         g_nb[grp]++;
@@ -238,7 +245,8 @@ module core_vec_tb;
         $sformat(why, "MSP is %08h, UAE040 says %08h", sp_of(2), fmsp);
       end
       if (!bad && (dut.u_core.vbr !== fvbr || {29'h0, dut.u_core.sfc} !== fsfc ||
-                   {29'h0, dut.u_core.dfc} !== fdfc || dut.u_core.cacr !== fcacr)) begin
+                   {29'h0, dut.u_core.dfc} !== fdfc ||
+                   (dep_cache == 0 && dut.u_core.cacr !== fcacr))) begin
         bad = 1'b1;
         $sformat(why, "VBR SFC DFC CACR are %08h %0h %0h %08h, UAE040 says %08h %0h %0h %08h",
                  dut.u_core.vbr, dut.u_core.sfc, dut.u_core.dfc, dut.u_core.cacr,
