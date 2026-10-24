@@ -1,0 +1,99 @@
+--- a/src/mame/mame.lst
++++ b/src/mame/mame.lst
+@@ -1424,8 +1424,10 @@
+ @source:apple/macquadra800.cpp
+ macct610
+ macct650
++macct650rd
+ macqd610
+ macqd650
++macqd650rd
+ macqd800
+ 
+ @source:apple/macquadraav.cpp
+--- a/src/mame/apple/macquadra800.cpp
++++ b/src/mame/apple/macquadra800.cpp
+@@ -33,6 +33,7 @@
+ #include "bus/nubus/nubus.h"
+ #include "bus/rs232/rs232.h"
+ #include "cpu/m68000/m68040.h"
++#include "rd68041.h"
+ #include "machine/dp83932c.h"
+ #include "machine/ncr53c90.h"
+ #include "machine/nscsi_bus.h"
+@@ -72,13 +73,15 @@
+ 	void macct650(machine_config &config);
+ 	void macqd610(machine_config &config);
+ 	void macqd650(machine_config &config);
++	void macqd650rd(machine_config &config);
++	void macct650rd(machine_config &config);
+ 
+ 	void quadra800_map(address_map &map) ATTR_COLD;
+ 
+ 	void init_macqd800();
+ 
+ private:
+-	required_device<m68000_musashi_device> m_maincpu;
++	required_device<cpu_device> m_maincpu;   // RD68041 (M14): MAME's m68040 or the core
+ 	required_device<djmemc_device> m_djmemc;
+ 	required_device<iosb_device> m_iosb;
+ 	required_device<dfac_device> m_dfac;
+@@ -338,6 +341,27 @@
+ 	m_iosb->read_pa6().set_constant(1);
+ }
+ 
++// RD68041 (M14): the Quadra 650 and the Centris 650 with the core in place of
++// MAME's m68040 and 68LC040 (sim/mame/rd68041.h; $RD68041_VLT names the
++// core's build, the MC68040's or the MC68LC040's).
++void quadra800_state::macqd650rd(machine_config &config)
++{
++	macqd650(config);
++
++	RD68041(config.replace(), m_maincpu, 33_MHz_XTAL);
++	m_maincpu->set_addrmap(AS_PROGRAM, &quadra800_state::quadra800_map);
++	m_maincpu->set_dasm_override(std::function(&mac68k_dasm_override), "mac68k_dasm_override");
++}
++
++void quadra800_state::macct650rd(machine_config &config)
++{
++	macct650(config);
++
++	RD68041(config.replace(), m_maincpu, 25_MHz_XTAL);
++	m_maincpu->set_addrmap(AS_PROGRAM, &quadra800_state::quadra800_map);
++	m_maincpu->set_dasm_override(std::function(&mac68k_dasm_override), "mac68k_dasm_override");
++}
++
+ ROM_START( macqd800 )
+ 	ROM_REGION32_BE(0x100000, "bootrom", 0)
+ 	ROM_SYSTEM_BIOS(0, "default", "Version 23F2")
+@@ -350,6 +374,8 @@
+ #define rom_macct650 rom_macqd800
+ #define rom_macqd610 rom_macqd800
+ #define rom_macqd650 rom_macqd800
++#define rom_macqd650rd rom_macqd800
++#define rom_macct650rd rom_macqd800
+ 
+ } // anonymous namespace
+ 
+@@ -358,3 +384,5 @@
+ COMP( 1993, macct650, macqd800, 0, macct650, macadb, quadra800_state, init_macqd800,  "Apple Computer", "Macintosh Centris 650", MACHINE_SUPPORTS_SAVE)
+ COMP( 1993, macqd610, macqd800, 0, macqd610, macadb, quadra800_state, init_macqd800,  "Apple Computer", "Macintosh Quadra 610", MACHINE_SUPPORTS_SAVE)
+ COMP( 1993, macqd650, macqd800, 0, macqd650, macadb, quadra800_state, init_macqd800,  "Apple Computer", "Macintosh Quadra 650", MACHINE_SUPPORTS_SAVE)
++COMP( 1993, macqd650rd, macqd800, 0, macqd650rd, macadb, quadra800_state, init_macqd800,  "Apple Computer", "Macintosh Quadra 650 (RD68041)", 0)
++COMP( 1993, macct650rd, macqd800, 0, macct650rd, macadb, quadra800_state, init_macqd800,  "Apple Computer", "Macintosh Centris 650 (RD68041 as an MC68LC040)", 0)
+--- a/src/mame/apple/iosb.cpp
++++ b/src/mame/apple/iosb.cpp
+@@ -199,10 +199,9 @@
+ 		{
+ 			musashi->set_emmu_enable(true);
+ 		}
+-		else
+-		{
+-			fatalerror("iosb.cpp: init without 68k CPU or PowerPC-to-68k bridge device\n");
+-		}
++		// RD68041 (M14): another CPU device restarts what it is told to
++		// itself (cpu_device::retry_access, RESTART_INSTRUCTION above) and
++		// needs no external MMU mode.
+ 	}
+ 
+ 	m_6015_timer = timer_alloc(FUNC(iosb_base::mac_6015_tick), this);

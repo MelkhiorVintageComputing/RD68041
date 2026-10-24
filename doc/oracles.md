@@ -12,7 +12,7 @@ counterparts, chosen in `doc/plan.md` §3:
 | 1d | Berkeley TestFloat/SoftFloat | the FPU datapath's rounding | from M11 |
 | 3 | Linux 7.2.9 (`CONFIG_M68040`) on QEMU's `virt` | validates the guest kernels rd-virt will run | M0 spike 5: **go** (below) |
 | 3 | **rd-virt**: Linux and bare programs, the RTL in lockstep with UAE040 (`doc/virt.md`) | the whole processor over a real kernel's boot and user space: the MMU's faults, the caches, interrupts, STOP, the FPSP | M13: **pass**, 0 divergences (below; `doc/m13-mismatches.md`) |
-| 4 | MAME's m68040 in a Macintosh Quadra | whole-system behaviour | M0 spike 4: **go, with caveats** (below; one more ROM needed) |
+| 4 | MAME's m68040 in a Macintosh Quadra | whole-system behaviour | M0 spike 4: **go, with caveats**; M14 phase A: the core boots the ROM to the same screen (below; one more ROM needed to go further) |
 
 This file records:
 - what each oracle is and how it is configured;
@@ -683,6 +683,39 @@ user's ROM to the desktop pattern; reaching the "?" disk and a console needs the
 firmware and OS media above.
 
 ---
+
+### The core in MAME's Quadra (M14, phase A)
+
+**How it plugs in** (`sim/mame/`, RD68031's scheme): `rd68041_device`, a `cpu_device`
+compiled into MAME beside the driver, loads the core from a shared object
+(`$RD68041_VLT`: `build/mame/vlt/rd68041_vlt.so`, or `vlt-lc/` for the MC68LC040) --
+`rd68041_top` under Verilator behind a pin-level agent that turns its transfers into
+accesses of the machine's physical address space (`rd68041_vlt.cpp`). The core
+translates and caches inside, as the part does. `sim/mame/quadra.patch` adds the
+machines `macqd650rd` (the Quadra 650, 33 MHz) and `macct650rd` (the Centris 650,
+25 MHz, the MC68LC040 build) and lets the IOSB take a CPU that is not MAME's 68000
+family: it asked for Musashi's external-MMU mode, and its SCSI pseudo-DMA has an access
+made again with `retry_access()` when the device is not ready, which the agent answers
+with a bus retry (TA with TEA, UM 7.4.6) so that the core runs the transfer again. The
+Quadra raises no bus errors. Harness choices, not the core's: a write is made one clock
+after its data is on the bus (the machine is asked before the transfer is answered),
+so writes take a wait state; interrupts are autovectored (the CPU space map).
+
+**Compared on:** the screen. With the stand-in ADB firmware MAME's m68040 and 68LC040
+run the user's ROM through its POST to the grey desktop and wait in ADB initialisation
+(the M0 spike); the core does the same and must end on the same pixels
+(`sim/mame/quadra-m68040.expect`; the hash is of the decoded pixels now, the PNG files
+carrying the machine's name):
+
+| | Machine | Instructions in 12 s | Screens (pixels) | Wall |
+|---|---|---|---|---|
+| `make quadra` | `macqd650rd`, the core as the MC68040 | 66.6 M (393 M clocks) | black from 1 s, the desktop from 7 s (MAME's m68040: 6 s); the ROM's ADB wait loop at $4080A870 | 788 s, 0.015× real time, 500 k clocks/s |
+| `make quadra-lc` | `macct650rd`, the MC68LC040 | 47.0 M (297 M clocks) | the same, the desktop from 8 s (MAME's 68LC040: 7 s) | 474 s |
+
+The core reaches each screen later than MAME's CPUs in emulated time: it takes more
+clocks per instruction than MAME counts (`doc/timing-divergences.md`). No bus retry was
+asked for (no SCSI device here). **Next (phase B):** the ADB modem's firmware, then a
+disk with Mac OS and a booter, from the user (`doc/plan.md`, M14).
 
 ## Linux on QEMU's virt (the guest kernel for rd-virt) -- M0 spike
 

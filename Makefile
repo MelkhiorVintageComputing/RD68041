@@ -70,7 +70,7 @@ IVFLAGS := -g2012 -Wall -Wno-timescale -DTB_FPU=$(FPU) $(if $(filter 0,$(FPU)),-
         lint-quartus lint-questa quartus synth impl audit sim sim-bus check \
         check-lc cosim spike ucode ucode-check print-rtl clean uae040 uae040-smoke cputest-gen \
         qemu040 cosim-qemu-smoke virt-qemu mame-quadra quadra-m68040 \
-        virt-bare virt-uae virt-linux virt-linux-solo fpsp
+        virt-bare virt-uae virt-linux virt-linux-solo fpsp quadra quadra-lc
 
 all: lint
 
@@ -128,6 +128,8 @@ help:
 	@echo "  make fpsp           Linux in lockstep, the M68040FPSP's emulated instructions"
 	@echo "                    (each with FPU=0: the MC68LC040, its FPU emulation; not fpsp)"
 	@echo "  make mame-quadra  build MAME's macquadra800.cpp driver (build/mame/; heavy, -j2, alone)"
+	@echo "  make quadra        the same ROM on the core as the Quadra 650's MC68040 in MAME,"
+	@echo "                    its last screen MAME's m68040's (M14); quadra-lc: the Centris 650"
 	@echo "  make quadra-m68040  the user's Quadra 650 ROM booted on MAME's m68040, no disk,"
 	@echo "                    to the blinking-? screen (QUADRA_SECONDS=, QUADRA_MACHINE=)"
 	@echo
@@ -911,16 +913,32 @@ fpsp: $(VIRTBIN) $(VGUEST)/vmlinux $(VGUEST)/initramfs.cpio.gz
 #                          headless with no disk for QUADRA_SECONDS emulated
 #                          seconds; passes when the last screens are stable and
 #                          listed in sim/mame/quadra-m68040.expect
+#   make quadra            the core (sim/mame/rd68041.*) as the Quadra 650's
+#                          MC68040 (macqd650rd), the same run; passes when its
+#                          last screens are stable and are the very screen
+#                          MAME's m68040 ends on (macqd650 in the .expect)
+#   make quadra-lc         ... as the Centris 650's MC68LC040 (macct650rd,
+#                          the FPU=0 build), against macct650
+#                          (QUADRA_RD_SECONDS: 12; about 400 k clocks a second)
 # ---------------------------------------------------------------------------
-MAMEB          := $(BUILD)/mame
+MAMEB          := build/mame
 MAMEQ          := $(MAMEB)/src/quadra
 MAMEQROMS      := $(MAMEB)/roms/macqd800
 QUADRA_MACHINE ?= macqd650
 QUADRA_SECONDS ?= 15
 
-$(MAMEQ): sim/mame/build.sh
+$(MAMEQ): sim/mame/build.sh sim/mame/quadra.patch sim/mame/patched.lst sim/mame/rd68041.h \
+          sim/mame/rd68041.cpp sim/mame/rd68041_vlt.h
 	@echo "  mame-quadra: building MAME's macquadra800 driver into $(MAMEB)/src (-j2, alone; 25 min from clean)"
-	@JOBS=2 bash sim/mame/build.sh $(MAMEB) | sed 's/^/  /'
+	@JOBS=2 bash sim/mame/build.sh mame $(MAMEB) | sed 's/^/  /'
+
+# The core as the shared object MAME's rd68041_device loads (M14): the
+# MC68040's build, and the MC68LC040's.
+MAMEVLT        := $(MAMEB)/vlt$(if $(filter 0,$(FPU)),-lc)/rd68041_vlt.so
+$(MAMEB)/vlt/rd68041_vlt.so $(MAMEB)/vlt-lc/rd68041_vlt.so: sim/mame/build.sh sim/mame/rd68041_vlt.cpp \
+          sim/mame/rd68041_vlt.h sim/virt/public.vlt $(RTL)
+	@echo "  quadra: building the core for MAME into $(dir $@) (Verilator, FPU=$(FPU), alone)"
+	@RTLFILES="$(RTL)" FPU=$(FPU) bash sim/mame/build.sh vlt $(dir $@) | sed 's/^/  /'
 
 $(MAMEQROMS)/f1acad13.rom: Inputs/ref/ROMs/Quadra-650.ROM Inputs/sw/ROMS.sha256
 	@sha256sum --quiet -c Inputs/sw/ROMS.sha256
@@ -947,6 +965,30 @@ quadra-m68040: $(MAMEQ) $(MAMEQROMS)/f1acad13.rom $(MAMEQROMS)/342s0440-b.bin
 	        sim/mame/quadra-m68040.expect); \
 	 if [ $$n -eq 1 ] && [ -n "$$what" ]; then echo "PASS: quadra-m68040 ($(QUADRA_MACHINE): $$what; $$D/snap/)"; \
 	 else echo "FAIL: quadra-m68040 (last screen $$last, not stable or not in sim/mame/quadra-m68040.expect; $$D/snap/)"; exit 1; fi
+
+# quadra-rd MACHINE REFERENCE VLT: the core's machine run as quadra-m68040
+# runs MAME's own, and its last screen required to be the reference's.
+QUADRA_RD_SECONDS ?= 12
+define quadra-rd
+	@RD68041_VLT=$(CURDIR)/$(3) MAMEDIR=$(CURDIR)/$(MAMEB) bash sim/mame/quadra.sh $(1) \
+	    $(CURDIR)/$(MAMEB)/run/$(1) $(QUADRA_RD_SECONDS) || { tail -5 $(MAMEB)/run/$(1)/mame.out; exit 1; }
+	@D=$(MAMEB)/run/$(1); grep -h '^rd68041:\|^emulated time\|^wall' $$D/mame.out | sed 's/^/  /'; \
+	 awk '{print "t " $$1 " pc " $$2 " sr " $$3 " screen " $$4}' $$D/samples.txt | uniq -f7 -c \
+	   | awk '{c = $$1; $$1 = ""; print "  " c " samples from" $$0}'; \
+	 last=$$(tail -1 $$D/samples.txt | cut -d' ' -f4); \
+	 n=$$(tail -3 $$D/samples.txt | cut -d' ' -f4 | sort -u | wc -l); \
+	 what=$$(awk -v m=$(2) -v h=$$last '$$1 == m && $$2 == h { $$1 = $$2 = ""; print substr($$0, 3) }' \
+	        sim/mame/quadra-m68040.expect); \
+	 if [ $$n -eq 1 ] && [ -n "$$what" ]; then echo "PASS: $@ ($(1): the screen MAME's $(2) ends on, $$what; $$D/snap/)"; \
+	 else echo "FAIL: $@ (last screen $$last, not stable or not $(2)'s in sim/mame/quadra-m68040.expect; $$D/snap/)"; exit 1; fi
+endef
+
+quadra: $(MAMEQ) $(MAMEQROMS)/f1acad13.rom $(MAMEQROMS)/342s0440-b.bin $(MAMEB)/vlt/rd68041_vlt.so
+	$(call quadra-rd,macqd650rd,macqd650,$(MAMEB)/vlt/rd68041_vlt.so)
+
+quadra-lc: $(MAMEQ) $(MAMEQROMS)/f1acad13.rom $(MAMEQROMS)/342s0440-b.bin
+	@$(MAKE) --no-print-directory $(MAMEB)/vlt-lc/rd68041_vlt.so FPU=0
+	$(call quadra-rd,macct650rd,macct650,$(MAMEB)/vlt-lc/rd68041_vlt.so)
 
 print-rtl:
 	@echo $(RTL)

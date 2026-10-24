@@ -410,3 +410,8 @@ emulation), caches on and off, 0 divergences but the decided differences
 (`doc/virt.md`, `doc/m13-mismatches.md`). Seven RTL bugs found on the way, every one
 past the cosim programs, the vectors and the cputest corpus (`doc/bugs-found.md`).
 `make impl`: 31.88 MHz; `FPU=0`: 31.56 MHz.
+
+**M14, phase A: MAME's Quadra.** The core as the Quadra 650's MC68040 and the Centris
+650's MC68LC040 in MAME (`sim/mame/`), the user's ROM through its POST to the screen
+MAME's own CPUs end on, pixel for pixel (`make quadra`, `make quadra-lc`). Going further
+waits for the ADB modem's firmware and OS media (`doc/oracles.md`).

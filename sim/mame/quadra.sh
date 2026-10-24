@@ -14,7 +14,8 @@
 # run. sim/mame/quadra.lua saves the screen every QUADRA_STEP (1) emulated
 # seconds as DIR/snap/NNNN.png and logs the PC; the sound goes to
 # DIR/sound.wav. Then:
-#   DIR/samples.txt   per sample: emulated time, PC, SR, the PNG's sha256
+#   DIR/samples.txt   per sample: emulated time, PC, SR, the sha256 of the
+#                     screen's pixels (RGB)
 #   DIR/mame.out      MAME's output
 # Environment: MAMEDIR (build/mame), MAMEARGS (more of MAME's options).
 set -u
@@ -32,9 +33,12 @@ QUADRA_SECONDS=$S QUADRA_STEP=${QUADRA_STEP:-1} \
   > mame.out 2>&1
 rc=$?
 t1=$(date +%s.%N)
+# The screen's hash is of its pixels, not of the PNG: MAME writes the
+# machine's name into the file, and the core's machines are not MAME's own.
 grep '^sample ' mame.out | while read -r _ n _ t _ pc _ sr; do
   f=$(printf 'snap/%04d.png' "$n")
-  h=$( [ -f "$f" ] && sha256sum "$f" | cut -c1-16 || echo none)
+  h=$( [ -f "$f" ] && python3 -I -c 'import sys, hashlib; from PIL import Image
+print(hashlib.sha256(Image.open(sys.argv[1]).convert("RGB").tobytes()).hexdigest()[:16])' "$f" || echo none)
   echo "$t $pc $sr $h"
 done > samples.txt
 echo "wall $(echo "$t1 - $t0" | bc) s, MAME exit $rc" >> mame.out

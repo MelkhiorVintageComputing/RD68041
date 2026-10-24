@@ -1,0 +1,3 @@
+src/mame/mame.lst
+src/mame/apple/macquadra800.cpp
+src/mame/apple/iosb.cpp
