@@ -128,10 +128,11 @@ help:
 	@echo "  make fpsp           Linux in lockstep, the M68040FPSP's emulated instructions"
 	@echo "                    (each with FPU=0: the MC68LC040, its FPU emulation; not fpsp)"
 	@echo "  make mame-quadra  build MAME's macquadra800.cpp driver (build/mame/; heavy, -j2, alone)"
-	@echo "  make quadra        the same ROM on the core as the Quadra 650's MC68040 in MAME,"
-	@echo "                    its last screen MAME's m68040's (M14); quadra-lc: the Centris 650"
-	@echo "  make quadra-m68040  the user's Quadra 650 ROM booted on MAME's m68040, no disk,"
-	@echo "                    to the blinking-? screen (QUADRA_SECONDS=, QUADRA_MACHINE=)"
+	@echo "  make quadra        the core as the Quadra 650's MC68040 in MAME, booted from the"
+	@echo "                    disk to MAME's m68040's last screen, the Finder (M14; over an"
+	@echo "                    hour, alone); quadra-lc: the Centris 650, the MC68LC040"
+	@echo "  make quadra-m68040  the user's Quadra 650 ROM and disk (QUADRA_DISK=) on MAME's"
+	@echo "                    m68040 to the Finder (QUADRA_SECONDS=, QUADRA_MACHINE=)"
 	@echo
 	@echo "  make clean        remove build/"
 	@echo
@@ -236,7 +237,7 @@ CACHE ?= 0
 
 # The directed benches that run a program (core_exc_tb, core_fault_tb) take it
 # from build/programs/.
-SIMPROGS := m8_int m8_fault m9_cache m9_snoop m10_mmu m11_fpu_c m12_lc040_b
+SIMPROGS := m8_int m8_fault m9_cache m9_snoop m10_mmu m11_fpu_c m12_lc040_b m14_serial
 
 sim: dirs $(patsubst %,build/programs/%.hex,$(SIMPROGS))
 	@rm -f $(addprefix $(BUILD)/,$(addsuffix .simres,$(TBS))); \
@@ -274,7 +275,7 @@ sim: dirs $(patsubst %,build/programs/%.hex,$(SIMPROGS))
 # directed benches' (SIMPROGS), which no oracle runs.
 # ---------------------------------------------------------------------------
 PROGS   ?= m6_basic m7_a m7_b m7_c m8_exc m9_icache m9_dcache m9_move16 \
-           m11_fpu_a m11_fpu_b m12_fpu_ind m13_move_mm m13_an_upd m13_fsave_null m13_ind_moves
+           m11_fpu_a m11_fpu_b m12_fpu_ind m13_move_mm m13_an_upd m13_fsave_null m13_ind_moves m14_duff
 
 # Keep the intermediate files: the ELF is what objdump reads when a run fails.
 .SECONDARY:
@@ -651,7 +652,7 @@ cache:
 
 # The MC68LC040 against UAE040 -L (M12): the core built with FPU=0, the
 # integer programs and m12_lc040, every FP instruction a format $4 frame.
-LCPROGS ?= m6_basic m7_a m7_b m7_c m8_exc m9_icache m9_dcache m9_move16 m10_mmu m12_lc040 m13_move_mm m13_an_upd m13_ind_moves
+LCPROGS ?= m6_basic m7_a m7_b m7_c m8_exc m9_icache m9_dcache m9_move16 m10_mmu m12_lc040 m13_move_mm m13_an_upd m13_ind_moves m14_duff
 .PHONY: cosim-lc
 cosim-lc:
 	@$(MAKE) --no-print-directory cosim FPU=0 BUILD=$(BUILD)/lc040 PROGS="$(LCPROGS)"
@@ -908,24 +909,44 @@ fpsp: $(VIRTBIN) $(VGUEST)/vmlinux $(VGUEST)/initramfs.cpio.gz
 #                           zero-filled stand-in (MAME warns, and runs)
 # Apple firmware: nothing here is committed or copied outside build/.
 #
+#   QUADRA_DISK            a SCSI disk image of the user's, by its name in
+#                          Inputs/ref/ROMs/ (default mac761, System 7.6.1, when
+#                          it is there): checked against Inputs/sw/ROMS-m14.sha256,
+#                          copied read-only into build/mame/disks; MAME's
+#                          writes go to a diff file in each run's directory,
+#                          so every run boots the same disk
 #   make quadra-m68040     QUADRA_MACHINE (macqd650: the Quadra 650, MAME's
 #                          m68040; macct650: the Centris 650, its 68LC040) run
-#                          headless with no disk for QUADRA_SECONDS emulated
-#                          seconds; passes when the last screens are stable and
-#                          listed in sim/mame/quadra-m68040.expect
+#                          headless from the disk, until the screen is one
+#                          sim/mame/quadra-m68040.expect lists for it -- the
+#                          Finder -- for three samples, or QUADRA_SECONDS
 #   make quadra            the core (sim/mame/rd68041.*) as the Quadra 650's
-#                          MC68040 (macqd650rd), the same run; passes when its
-#                          last screens are stable and are the very screen
-#                          MAME's m68040 ends on (macqd650 in the .expect)
+#                          MC68040 (macqd650rd), the same run; passes when it
+#                          ends on the very screen MAME's m68040 ends on
 #   make quadra-lc         ... as the Centris 650's MC68LC040 (macct650rd,
 #                          the FPU=0 build), against macct650
-#                          (QUADRA_RD_SECONDS: 12; about 400 k clocks a second)
+#                          (QUADRA_RD_SECONDS: 400; the core runs about 400 k
+#                          clocks a second, an hour and more to the Finder)
+# The screens are hashed with the menu bar's clock masked (sim/mame/quadra.lua):
+# MAME's RTC starts from the host's time.
 # ---------------------------------------------------------------------------
 MAMEB          := build/mame
 MAMEQ          := $(MAMEB)/src/quadra
 MAMEQROMS      := $(MAMEB)/roms/macqd800
 QUADRA_MACHINE ?= macqd650
-QUADRA_SECONDS ?= 15
+QUADRA_SECONDS ?= 200
+QUADRA_DISK    ?= $(if $(wildcard Inputs/ref/ROMs/mac761.chd),mac761)
+QUADRA_STEP    ?= 10
+MAMEDISK       := $(if $(QUADRA_DISK),$(MAMEB)/disks/$(QUADRA_DISK).chd)
+QUADRA_MEDIA    = $(if $(QUADRA_DISK),-hard $(CURDIR)/$(MAMEDISK))
+# The hashes the expect file gives a machine, for quadra.lua's QUADRA_UNTIL.
+quadra-until    = $(shell awk -v m=$(1) -v d=$(or $(QUADRA_DISK),none) '$$1 == m && $$2 == d { printf "%s%s", c, $$3; c = "," }' sim/mame/quadra-m68040.expect)
+
+$(MAMEB)/disks/%.chd: Inputs/ref/ROMs/%.chd Inputs/sw/ROMS-m14.sha256
+	@grep -q " $<$$" Inputs/sw/ROMS-m14.sha256 || { echo "quadra: $< has no hash in Inputs/sw/ROMS-m14.sha256"; exit 1; }
+	@sha256sum --quiet --ignore-missing -c Inputs/sw/ROMS-m14.sha256
+	@mkdir -p $(MAMEB)/disks
+	@rm -f $@; cp $< $@; chmod 444 $@
 
 $(MAMEQ): sim/mame/build.sh sim/mame/quadra.patch sim/mame/patched.lst sim/mame/rd68041.h \
           sim/mame/rd68041.cpp sim/mame/rd68041_vlt.h
@@ -945,50 +966,43 @@ $(MAMEQROMS)/f1acad13.rom: Inputs/ref/ROMs/Quadra-650.ROM Inputs/sw/ROMS.sha256
 	@mkdir -p $(MAMEQROMS)
 	@cp $< $@
 
-$(MAMEQROMS)/342s0440-b.bin:
+$(MAMEQROMS)/342s0440-b.bin: $(wildcard Inputs/ref/ROMs/342s0440-b.bin)
 	@mkdir -p $(MAMEQROMS)
-	@if [ -f Inputs/ref/ROMs/342s0440-b.bin ]; then cp Inputs/ref/ROMs/342s0440-b.bin $@; \
+	@if [ -f Inputs/ref/ROMs/342s0440-b.bin ]; then sha256sum --quiet --ignore-missing -c Inputs/sw/ROMS-m14.sha256 \
+	      && cp Inputs/ref/ROMs/342s0440-b.bin $@; \
 	 else echo "  quadra: no 342s0440-b.bin (the ADB modem's firmware): a zero-filled stand-in"; \
 	      head -c 1024 /dev/zero > $@; fi
 
 mame-quadra: $(MAMEQ)
 
-quadra-m68040: $(MAMEQ) $(MAMEQROMS)/f1acad13.rom $(MAMEQROMS)/342s0440-b.bin
-	@MAMEDIR=$(CURDIR)/$(MAMEB) bash sim/mame/quadra.sh $(QUADRA_MACHINE) $(CURDIR)/$(MAMEB)/run/$(QUADRA_MACHINE) \
-	    $(QUADRA_SECONDS) || { tail -5 $(MAMEB)/run/$(QUADRA_MACHINE)/mame.out; exit 1; }
-	@D=$(MAMEB)/run/$(QUADRA_MACHINE); grep -h '^emulated time\|^Average speed\|^wall' $$D/mame.out | sed 's/^/  /'; \
-	 awk '{print "t " $$1 " pc " $$2 " sr " $$3 " screen " $$4}' $$D/samples.txt | uniq -f7 -c \
-	   | awk '{c = $$1; $$1 = ""; print "  " c " samples from" $$0}'; \
-	 last=$$(tail -1 $$D/samples.txt | cut -d' ' -f4); \
-	 n=$$(tail -3 $$D/samples.txt | cut -d' ' -f4 | sort -u | wc -l); \
-	 what=$$(awk -v m=$(QUADRA_MACHINE) -v h=$$last '$$1 == m && $$2 == h { $$1 = $$2 = ""; print substr($$0, 3) }' \
-	        sim/mame/quadra-m68040.expect); \
-	 if [ $$n -eq 1 ] && [ -n "$$what" ]; then echo "PASS: quadra-m68040 ($(QUADRA_MACHINE): $$what; $$D/snap/)"; \
-	 else echo "FAIL: quadra-m68040 (last screen $$last, not stable or not in sim/mame/quadra-m68040.expect; $$D/snap/)"; exit 1; fi
+quadra-m68040: $(MAMEQ) $(MAMEQROMS)/f1acad13.rom $(MAMEQROMS)/342s0440-b.bin $(MAMEDISK)
+	$(call quadra-run,$(QUADRA_MACHINE),$(QUADRA_MACHINE),,$(QUADRA_SECONDS))
 
-# quadra-rd MACHINE REFERENCE VLT: the core's machine run as quadra-m68040
-# runs MAME's own, and its last screen required to be the reference's.
-QUADRA_RD_SECONDS ?= 12
-define quadra-rd
-	@RD68041_VLT=$(CURDIR)/$(3) MAMEDIR=$(CURDIR)/$(MAMEB) bash sim/mame/quadra.sh $(1) \
-	    $(CURDIR)/$(MAMEB)/run/$(1) $(QUADRA_RD_SECONDS) || { tail -5 $(MAMEB)/run/$(1)/mame.out; exit 1; }
+# quadra-run MACHINE REFERENCE VLT SECONDS: MACHINE booted from the disk until
+# it holds one of the screens the expect file gives REFERENCE (or SECONDS),
+# with the core's shared object VLT when it is one of the core's machines.
+QUADRA_RD_SECONDS ?= 400
+define quadra-run
+	@$(if $(3),RD68041_VLT=$(CURDIR)/$(3)) QUADRA_STEP=$(QUADRA_STEP) QUADRA_UNTIL=$(call quadra-until,$(2)) \
+	    MAMEARGS="$(QUADRA_MEDIA)" MAMEDIR=$(CURDIR)/$(MAMEB) bash sim/mame/quadra.sh $(1) \
+	    $(CURDIR)/$(MAMEB)/run/$(1) $(4) || { tail -5 $(MAMEB)/run/$(1)/mame.out; exit 1; }
 	@D=$(MAMEB)/run/$(1); grep -h '^rd68041:\|^emulated time\|^wall' $$D/mame.out | sed 's/^/  /'; \
 	 awk '{print "t " $$1 " pc " $$2 " sr " $$3 " screen " $$4}' $$D/samples.txt | uniq -f7 -c \
 	   | awk '{c = $$1; $$1 = ""; print "  " c " samples from" $$0}'; \
 	 last=$$(tail -1 $$D/samples.txt | cut -d' ' -f4); \
 	 n=$$(tail -3 $$D/samples.txt | cut -d' ' -f4 | sort -u | wc -l); \
-	 what=$$(awk -v m=$(2) -v h=$$last '$$1 == m && $$2 == h { $$1 = $$2 = ""; print substr($$0, 3) }' \
+	 what=$$(awk -v m=$(2) -v d=$(or $(QUADRA_DISK),none) -v h=$$last '$$1 == m && $$2 == d && $$3 == h { $$1 = $$2 = $$3 = ""; print substr($$0, 4) }' \
 	        sim/mame/quadra-m68040.expect); \
-	 if [ $$n -eq 1 ] && [ -n "$$what" ]; then echo "PASS: $@ ($(1): the screen MAME's $(2) ends on, $$what; $$D/snap/)"; \
+	 if [ $$n -eq 1 ] && [ -n "$$what" ]; then echo "PASS: $@ ($(1), disk $(or $(QUADRA_DISK),none): $$what, the screen MAME's $(2) ends on; $$D/snap/)"; \
 	 else echo "FAIL: $@ (last screen $$last, not stable or not $(2)'s in sim/mame/quadra-m68040.expect; $$D/snap/)"; exit 1; fi
 endef
 
-quadra: $(MAMEQ) $(MAMEQROMS)/f1acad13.rom $(MAMEQROMS)/342s0440-b.bin $(MAMEB)/vlt/rd68041_vlt.so
-	$(call quadra-rd,macqd650rd,macqd650,$(MAMEB)/vlt/rd68041_vlt.so)
+quadra: $(MAMEQ) $(MAMEQROMS)/f1acad13.rom $(MAMEQROMS)/342s0440-b.bin $(MAMEB)/vlt/rd68041_vlt.so $(MAMEDISK)
+	$(call quadra-run,macqd650rd,macqd650,$(MAMEB)/vlt/rd68041_vlt.so,$(QUADRA_RD_SECONDS))
 
-quadra-lc: $(MAMEQ) $(MAMEQROMS)/f1acad13.rom $(MAMEQROMS)/342s0440-b.bin
+quadra-lc: $(MAMEQ) $(MAMEQROMS)/f1acad13.rom $(MAMEQROMS)/342s0440-b.bin $(MAMEDISK)
 	@$(MAKE) --no-print-directory $(MAMEB)/vlt-lc/rd68041_vlt.so FPU=0
-	$(call quadra-rd,macct650rd,macct650,$(MAMEB)/vlt-lc/rd68041_vlt.so)
+	$(call quadra-run,macct650rd,macct650,$(MAMEB)/vlt-lc/rd68041_vlt.so,$(QUADRA_RD_SECONDS))
 
 print-rtl:
 	@echo $(RTL)

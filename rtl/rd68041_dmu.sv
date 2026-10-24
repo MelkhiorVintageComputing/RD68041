@@ -97,6 +97,8 @@ module rd68041_dmu (
     input  logic          ld_m16,      // MOVE16's read: the line, into the MOVE16 buffer
     input  logic          ld_wr,       // checked as a write (a read-modify-write's read)
     input  logic          ld_probe,    // a write's translation, checked in <ea> fetch: no data
+    input  logic          ld_oldest,   // nothing older than the read's instruction is left in
+                                       // the pipeline: a serialised or locked read may go
     output logic          ld_atc,      // ld_err was an ATC fault, not a bus error
     output logic          ld_ma,       // ... on the second page of an access that spans two
 
@@ -627,7 +629,18 @@ module rd68041_dmu (
   // (A probe has no data: the writes before it need not go first.)
   // (Nor while the queue is frozen by a write that faulted: its writes will
   // not be made, and the instruction the read is for will not complete.)
-  wire        ld_req = ld_valid && !ld_done && !ld_cancel &&
+  // UM 4.3.2: a serialised page's read (and a locked one, "implicitly
+  // serialized") happens once, its instruction not to be interrupted after
+  // it -- so not while an older instruction can still take an interrupt at
+  // its boundary, or still be a branch that sends this one away: it does not
+  // start until the instructions ahead have completed (ld_oldest). So does a
+  // nonserialised cache-inhibited one (CM 11), which the manual does not
+  // promise: the Quadra's Mac OS maps its SCSI pseudo-DMA register so and
+  // reads it as if it did (doc/divergences.md). Waiting here, in the rest,
+  // leaves the state machine to the write queue, which those instructions
+  // may be waiting on (doc/bugs-found.md M14).
+  wire        ld_ser_wait = !ld_probe && !ld_oldest && (ld_lock || (tr_ok && tr_cm[1]));
+  wire        ld_req = ld_valid && !ld_done && !ld_cancel && !ld_ser_wait &&
                        (ld_probe || wf_pend ||
                         (!(hit0 || hit1 || hit2) && !(tr_cm == 2'b10 && qn != 2'd0)));
   // The fast read: in the state machine's rest, its tags on port 0.
@@ -1133,6 +1146,12 @@ module rd68041_dmu (
             end
           end else if (xm16) begin
             x <= xld ? X_M16L : X_M16I;
+          end else if (xld && !xprb && tr_cm[1] && !ld_oldest) begin
+            // A cache-inhibited page's read that started before its
+            // translation was in the ATC (ld_ser_wait, below, could not
+            // know): put back, to start again from the rest when it may.
+            xcancel <= 1'b0;
+            x <= X_IDLE;
           end else if (!(x_cach || x_byp)) begin
             x <= X_BUS;
           end else if (!sn_b) begin

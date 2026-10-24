@@ -42,6 +42,7 @@
 
 #define CORE(x) top->rootp->rd68041_top__DOT__u_core__DOT__##x
 #define RF(x) top->rootp->rd68041_top__DOT__u_core__DOT__u_rf__DOT__##x
+#define DMU(x) top->rootp->rd68041_top__DOT__u_core__DOT__u_dmu__DOT__##x
 
 namespace {
 
@@ -57,6 +58,12 @@ class Agent : public rd68041_vlt {
     top->cdis_n_i = 1; top->mdis_n_i = 1; top->ipl_n_i = 7; top->avec_n_i = 1;
     top->tck_i = 0; top->tms_i = 0; top->tdi_i = 0; top->trst_n_i = 1;
     top->eval();
+    // RD68041_TRACE=<lo>-<hi> (hex): print every transfer to that range, its
+    // start, each long word made and how it was answered (a debugging aid).
+    if (const char *t = getenv("RD68041_TRACE")) {
+      trace = true;
+      sscanf(t, "%x-%x", &tlo, &thi);
+    }
   }
   ~Agent() override { top->final(); delete top; }
 
@@ -72,8 +79,24 @@ class Agent : public rd68041_vlt {
 
   bool clock() override {
     fall();
+    if (tail_c > 0) {
+      tail_c--;
+      fprintf(stderr, "vlt %llu clk ret %d wend %d wint %d xflush %d redir %d xs %d oldest %d ldcancel %d ipl %d"
+              " | dmu x %d xld %d xcancel %d ldv %d ldreq %d serwait %d ldaddr %08x\n",
+              (unsigned long long)nclk, int(CORE(retire)), int(CORE(w_end)), int(CORE(w_int)),
+              int(CORE(x_flush)), int(CORE(redirect)), int(CORE(xs)), int(CORE(of_oldest)),
+              int(CORE(ld_cancel)), int(~top->ipl_n_i & 7), int(DMU(x)), int(DMU(xld)), int(DMU(xcancel)),
+              int(DMU(ld_valid)), int(DMU(ld_req)), int(DMU(ld_ser_wait)), unsigned(DMU(ld_addr)));
+    }
     bool b = CORE(retire);
-    if (b) last_pc = CORE(retire_npc);
+    if (b) {
+      last_pc = CORE(retire_npc);
+      if (tail_b > 0) {
+        tail_b--;
+        fprintf(stderr, "vlt %llu boundary npc %08x sr %04x ipl %d\n", (unsigned long long)nclk,
+                last_pc, unsigned(CORE(sr)), int(~top->ipl_n_i & 7));
+      }
+    }
     rise();
     if (bool(!top->rsto_n_o) != rsto) { rsto = !top->rsto_n_o; bus->reset_out(rsto); }
     return b;
@@ -104,6 +127,11 @@ class Agent : public rd68041_vlt {
   Vrd68041_top *top;
   rd68041_vlt_bus *bus;
   uint64_t nclk = 0;
+  bool trace = false;
+  unsigned tlo = 0, thi = 0;
+  bool traced() const { return trace && addr >= tlo && addr <= thi; }
+  int tail_b = 0;          // boundaries still to print after a traced transfer
+  int tail_c = 0;          // ... and clocks
   uint32_t last_pc = 0;   // the next PC at the last boundary
   int waits = 0;
   bool rsto = false;
@@ -135,6 +163,12 @@ class Agent : public rd68041_vlt {
     line = siz == 3; beat = 0; made = false; retry = false;
     kind = top->tt_o == 3 ? (addr == 0xFFFFFFFFu ? IACK : BKPT) : MEM;
     wait = waits + ((kind == MEM && !rd) ? 1 : 0);
+    if (traced()) {
+      fprintf(stderr, "vlt %llu TS %08x %s tt%d tm%d siz%d pc %08x\n", (unsigned long long)nclk, addr,
+              rd ? "R" : "W", int(top->tt_o), tm, siz, last_pc);
+      tail_b = 6;
+      tail_c = 60;
+    }
   }
 
   // The agent's rising edge, on the pins as they are before it.
@@ -151,6 +185,9 @@ class Agent : public rd68041_vlt {
     if (busy && kind == MEM && rd && !made) {
       data = bus->read(beat_addr(), tm, mask(), &retry);
       made = true;
+      if (traced())
+        fprintf(stderr, "vlt %llu read %08x = %08x%s\n", (unsigned long long)nclk, beat_addr(), data,
+                retry ? " retry" : "");
     }
     if (busy && wait > 0) {
       wait--;
@@ -177,6 +214,9 @@ class Agent : public rd68041_vlt {
           break;
       }
     }
+    if (busy && traced() && (nta || ntea))
+      fprintf(stderr, "vlt %llu answer %s\n", (unsigned long long)nclk,
+              nta && ntea ? "retry" : ntea ? "TEA" : "TA");
     ta = nta; tea = ntea; avec = navec; dout = nd; doe = ndoe;
   }
 

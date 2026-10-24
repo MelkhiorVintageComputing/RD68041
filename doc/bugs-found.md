@@ -10,6 +10,33 @@ synchroniser) are in RD68031's `doc/bugs-found.md`.*
 
 ---
 
+## M14: found by MAME's Quadra
+
+1. **A serialised page's read could be made twice.** The core makes an instruction's
+   operand read in \<ea\> fetch while older instructions are still in EX and W; an
+   interrupt taken at an older one's boundary -- or a branch resolved against the
+   prediction -- discarded the younger instruction after its read, and ran it again.
+   UM 4.3.2 forbids exactly that on a serialised page: "Serialization forces operand
+   read accesses for an instruction to occur only once by preventing the instruction
+   from being interrupted after the operand fetch stage". The Quadra ROM reads its
+   SCSI controller's FIFO with four `MOVE.L (A1),(A2)+`, the I/O space serialised by
+   DTT1; an interrupt between two of them made the core read five long words, the
+   FIFO ran dry on the fifth and the boot from the disk stopped for good (MAME's
+   pseudo-DMA asking for the access again, 7.8 M bus retries). A read of a serialised
+   page, or a locked one, now does not start until nothing older is left in EX or W
+   (`rd68041_dmu`'s `ld_ser_wait`, the core's `of_oldest`). Nothing before reached it:
+   no bench, oracle or program interrupted a run of reads of a side-effect register,
+   and rd-virt's devices have none on read. Once Mac OS had its MMU on, the boot stopped
+   the same way again, past the happy Mac: Mac OS maps the pseudo-DMA register's page
+   noncachable but *not* serialised (CM 11), for which the manual makes no such
+   promise, and an interrupt taken at the boundary of the `MOVE` before -- arriving
+   while MAME held a transfer with a retry -- discarded a read already made. Found with
+   the agent's trace (`RD68041_TRACE`, the pipeline's state each clock) and a walk of
+   Mac OS's page tables; every cache-inhibited read is held the same way now
+   (`doc/divergences.md`). `core_ser_tb` (`m14_serial`): four reads a pass of a page
+   serialised, then CM 11, with interrupts every 17-23 clocks and a bus retry every 37
+   -- 944 reads for 800 executed without the fix.
+
 ## M13: found by rd-virt, Linux in lockstep with UAE040
 
 Every one of these passed the cosim programs, the vector sweeps and the cputest corpus;

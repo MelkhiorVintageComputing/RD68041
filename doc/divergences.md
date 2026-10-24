@@ -242,3 +242,23 @@ does otherwise (`doc/oracles.md`, "The MC68LC040 against UAE040 -L"):
 | | a privileged one (FSAVE, FRESTORE) in user mode | a privilege violation, vector 8, first |
 
 **Checked by:** `make cosim-lc`, `make vectors OP=lc040 FPU=0` and `core_lc040_tb`.
+
+## A nonserialised cache-inhibited read is made once, as a serialised one is
+
+**UM 4.3.2:** "If the CM field indicates serialized, then the sequence of read and write
+accesses to the page is guaranteed to match the sequence of the instruction order ...
+Serialization forces operand read accesses for an instruction to occur only once by
+preventing the instruction from being interrupted after the operand fetch stage.
+Otherwise, the instruction is aborted, and the operand is accessed when the instruction
+is restarted."
+
+**What this design does.** A read of a cache-inhibited page -- serialised (CM 10) or
+not (CM 11) -- or a locked one does not start until the instructions before it have
+completed, so no interrupt and no mispredicted branch can discard its instruction after
+the read; it is made once. The manual promises that for CM 10 only. Mac OS 7.6.1 on the
+Quadra maps its SCSI pseudo-DMA register (`$50F50000`) CM 11 and reads it, a FIFO,
+four or thirty-two long words at a time with interrupts enabled: a read made twice loses
+a word of the disk and the boot stops (M14, `doc/bugs-found.md`). What it costs is a
+cache-inhibited read's overlap with the instructions before it -- I/O reads only.
+Reads may still pass queued writes on a CM 11 page, as UM 7.7 allows. **Checked by:**
+`core_ser_tb`, `make quadra`.

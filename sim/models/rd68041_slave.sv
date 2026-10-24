@@ -98,6 +98,8 @@ module rd68041_slave #(
 
   // Log of what it saw, for the testbenches.
   int          n_starts;       // TS recognised
+  logic [31:0] watch_a;        // reads that start at this long word (M14) ...
+  int          watch_reads;    // ... counted (set_watch)
   logic [31:0] last_a;
   logic  [1:0] last_siz, last_tt;
   logic  [2:0] last_tm;
@@ -133,7 +135,7 @@ module rd68041_slave #(
   endfunction
 
   initial begin
-    busy = 0; n_starts = 0;
+    busy = 0; n_starts = 0; watch_a = 32'hFFFF_FFFC; watch_reads = 0;
     ta_n = 1; tea_n = 1; tbi_n = 1; tci_n = 1; avec_n = 1; d_oe = 0; d_out = '0;
   end
 
@@ -184,6 +186,7 @@ module rd68041_slave #(
       x_tbi    = 0;
       n_starts = n_starts + 1;
       last_a   = a; last_siz = siz; last_tt = tt; last_tm = tm; last_rw = rw;
+      if (rw && tt != 2'b11 && {a[31:2], 2'b00} == watch_a) watch_reads = watch_reads + 1;
     end else if (busy && x_wait > 0) begin
       x_wait = x_wait - 1;
     end
@@ -232,6 +235,12 @@ module rd68041_slave #(
                             input int berr_beat, input int retries);
     r_base[i] = base; r_mask[i] = mask; r_wait[i] = waits; r_tbi[i] = tbi;
     r_tci[i] = tci; r_berr[i] = berr_beat; r_retry[i] = retries; r_on[i] = 1;
+  endtask
+
+  // Count the reads that start at the long word holding `addr`.
+  task automatic set_watch(input logic [31:0] addr);
+    watch_a = {addr[31:2], 2'b00};
+    watch_reads = 0;
   endtask
 
   task automatic clear_regions();

@@ -12,7 +12,7 @@ counterparts, chosen in `doc/plan.md` §3:
 | 1d | Berkeley TestFloat/SoftFloat | the FPU datapath's rounding | from M11 |
 | 3 | Linux 7.2.9 (`CONFIG_M68040`) on QEMU's `virt` | validates the guest kernels rd-virt will run | M0 spike 5: **go** (below) |
 | 3 | **rd-virt**: Linux and bare programs, the RTL in lockstep with UAE040 (`doc/virt.md`) | the whole processor over a real kernel's boot and user space: the MMU's faults, the caches, interrupts, STOP, the FPSP | M13: **pass**, 0 divergences (below; `doc/m13-mismatches.md`) |
-| 4 | MAME's m68040 in a Macintosh Quadra | whole-system behaviour | M0 spike 4: **go, with caveats**; M14 phase A: the core boots the ROM to the same screen (below; one more ROM needed to go further) |
+| 4 | MAME's m68040 in a Macintosh Quadra | whole-system behaviour | M0 spike 4: **go, with caveats**; M14: the core boots System 7.6.1 from the user's disk to the Finder, pixel for pixel MAME's own m68040's screen, as the MC68040 and the MC68LC040 (below) |
 
 This file records:
 - what each oracle is and how it is configured;
@@ -716,6 +716,51 @@ The core reaches each screen later than MAME's CPUs in emulated time: it takes m
 clocks per instruction than MAME counts (`doc/timing-divergences.md`). No bus retry was
 asked for (no SCSI device here). **Next (phase B):** the ADB modem's firmware, then a
 disk with Mac OS and a booter, from the user (`doc/plan.md`, M14).
+
+### The core in MAME's Quadra (M14, phase B): System 7.6.1 to the Finder
+
+**The media**, the user's, git-ignored and checked against `Inputs/sw/ROMS-m14.sha256`:
+`342s0440-b.bin`, the ADB modem's firmware (CRC cffb33eb, MAME's), and `mac761.chd`, a
+SCSI disk with System 7.6.1. The disk is copied read-only into `build/mame/disks/`, and
+MAME writes a diff file into each run's directory, so every run boots the same disk.
+
+**The check.** The screen is hashed every 10 emulated seconds (`QUADRA_STEP`), in
+`quadra.lua` now: an FNV-1a of the pixels, the menu bar's clock masked (x >= 448, y < 20)
+because MAME's RTC starts from the host's time. MAME is otherwise deterministic. A run
+stops once the screen has been one of the reference machine's screens in
+`sim/mame/quadra-m68040.expect` for three samples (`QUADRA_UNTIL`), and passes when that
+screen is the reference's last. The Finder -- the disk's window, the menu bar, the
+Control Strip -- is `2078a196` on both machines.
+
+| | Machine | Screens (every 10 s) | Finder from | Instructions, clocks | Retries | Wall |
+|---|---|---|---|---|---|---|
+| `make quadra-m68040` | `macqd650`, MAME's m68040 | the happy Mac (30 s), the extensions (40-60 s), the Finder | 70 s | | | 75 s for 200 s |
+| `make quadra-m68040 QUADRA_MACHINE=macct650` | `macct650`, MAME's 68LC040 | the same, the extensions to 70 s | 80 s | | | |
+| `make quadra` | `macqd650rd`, the core as the MC68040 | the same screens: 30 s `d5613dc5` and 40 s `3ad8a1c1` as MAME's; 50 s MAME's 60 s screen | **60 s** | 443.2 M boundaries, 2,601 M clocks to 78.8 s | 1,787 | 5,545 s (92 min), 469 k clocks/s |
+| `make quadra-lc` | `macct650rd`, the core as the MC68LC040 | the desktop (10 s), `3d31be56` (20 s), the happy Mac and `3ad8a1c1` (40 s) as MAME's, the extensions | **70 s** | 375.7 M boundaries, 2,222 M clocks to 88.9 s | 3 | 3,698 s (62 min), 601 k clocks/s |
+
+**PASS on both**: the core ends on the very pixels MAME's CPU ends on. It gets there
+sooner in emulated time (60 s against 70 s, 70 s against 80 s), although it takes more
+clocks an instruction (5.9 on average here). Most of the boot is spent waiting on the disk
+and the timers, and the two CPUs meet the SCSI device differently: MAME's m68040 has an
+access made again inside MAME, the core runs a bus retry. Where the 10 s go was not
+investigated; the emulated time to a screen is not a performance measure.
+
+**What it found** (`doc/bugs-found.md`, M14): a read of a serialised page could be made
+twice when an interrupt or a mispredicted branch discarded the instruction after its
+read (UM 4.3.2); the ROM's SCSI FIFO reads lost a word and the boot from the disk stopped
+for good. Mac OS then maps the same register noncachable but not serialised (CM 11), and
+the core now holds every cache-inhibited read until the instructions before it are done
+(`doc/divergences.md`). `core_ser_tb` keeps both cases.
+
+**Debugging aids** (`rd68041_vlt.cpp`): `RD68041_TRACE=lo-hi` prints every transfer in
+that address range with its answer, then the pipeline's state for 6 boundaries and 60
+clocks (retire, the stages' valid bits and PCs, the interrupt, the DMU's read state). The
+PC the device reports is the core's retired one.
+
+**Not done yet** (M14's later parts): NetBSD/mac68k and Linux/m68k start from a Mac OS
+application (the NetBSD Booter, Penguin) and want their own media; a serial console on
+the SCC through MAME's `null_modem` would then compare their output byte for byte.
 
 ## Linux on QEMU's virt (the guest kernel for rd-virt) -- M0 spike
 

@@ -223,7 +223,11 @@ copies the line into the push buffer and writes it with TM 000, a long word if o
 word is dirty, the line otherwise, and invalidates it; it is done before the fill that
 needs the way, where the part does it after (`doc/divergences.md`). The writes queued
 from write-back drain through the same machine, a read going first unless it touches
-one of them or its page is serialised.
+one of them or its page is serialised. A cache-inhibited read (CM 10 or 11) or a locked
+one waits, before it starts, until no older instruction is left in execute or
+write-back (`of_oldest`), so that no interrupt or mispredicted branch discards it once
+made (UM 4.3.2; for CM 11 a divergence, `doc/divergences.md`); a read started before its
+translation was known is put back when the translation turns out cache-inhibited.
 
 **The snooper** has the data cache's port B, its tags and its dirty bits first in the
 clocks it uses them; the state machine waits, and a write that hits waits out any clock
@@ -411,7 +415,10 @@ emulation), caches on and off, 0 divergences but the decided differences
 past the cosim programs, the vectors and the cputest corpus (`doc/bugs-found.md`).
 `make impl`: 31.88 MHz; `FPU=0`: 31.56 MHz.
 
-**M14, phase A: MAME's Quadra.** The core as the Quadra 650's MC68040 and the Centris
-650's MC68LC040 in MAME (`sim/mame/`), the user's ROM through its POST to the screen
-MAME's own CPUs end on, pixel for pixel (`make quadra`, `make quadra-lc`). Going further
-waits for the ADB modem's firmware and OS media (`doc/oracles.md`).
+**M14: MAME's Quadra.** The core as the Quadra 650's MC68040 and the Centris 650's
+MC68LC040 in MAME (`sim/mame/`): the user's ROM through its POST (phase A), then, with
+the ADB modem's firmware and a System 7.6.1 disk from the user, Mac OS to the Finder --
+the screen MAME's own CPUs end on, pixel for pixel (`make quadra`, `make quadra-lc`;
+`doc/oracles.md`). One RTL bug found on the way: a serialised read made twice
+(`doc/bugs-found.md`).
+`make impl`: 30.44 MHz; `FPU=0`: 30.58 MHz.

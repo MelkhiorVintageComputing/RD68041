@@ -1,0 +1,6 @@
+# The user's media for M14, phase B, by sha256 (in Inputs/ref/ROMs/, git-ignored):
+# the ADB modem's PIC firmware and a SCSI disk with System 7.6.1. Apple firmware
+# and software: never committed. Added beside ROMS.sha256, which Inputs/ keeps
+# frozen; the MAME flows check both with `sha256sum -c`.
+22466ae8e4c11509dcc862e85c65239efcc780d23eda9fd4c69bb8041cb1318e  Inputs/ref/ROMs/342s0440-b.bin
+3b7c6f2fb5d493dc9e69e158e4b76b2dd435f489399702fb98c65e7dfb90ee3d  Inputs/ref/ROMs/mac761.chd

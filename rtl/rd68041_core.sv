@@ -631,6 +631,14 @@ module rd68041_core #(
   assign ld_addr  = (rs == R_SSP) ? 32'h0 : (rs == R_PC) ? 32'h4 : of_ea;
   assign ld_sz    = (rs == R_RUN) ? of_u.sz : rd68041_pkg::SZ_L;
 
+  // Nothing older than <ea> fetch's instruction is left in EX or W -- the
+  // uops there, if any, are its own (one instruction's share its address) --
+  // so no interrupt can be taken, and no branch resolved, between its read
+  // and its end: what a cache-inhibited read needs (rd68041_dmu; UM 4.3.2).
+  // Exception processing's reads and the reset's go at once.
+  wire of_oldest = (rs != R_RUN) || of_u.xs ||
+                   ((!ex_u.valid || ex_u.pc == of_u.pc) && (!w_u.valid || w_u.pc == of_u.pc));
+
   wire of_ready = !of_mem || of_got || ld_done;
   assign of_stall = ex_stall || (of_u.valid && !of_ready);
 
@@ -1501,7 +1509,7 @@ module rd68041_core #(
       .ld_ack(of_u.ack && rs == R_RUN), .ld_tm(of_u.fn[2:0]), .ld_avec(ld_avec),
       .ld_noalloc(of_u.xs || rs != R_RUN), .ld_m16(of_u.m16 && of_u.ld && rs == R_RUN),
       .ld_wr((of_u.lk || (of_u.ld && of_u.st)) && rs == R_RUN),
-      .ld_probe(of_prb && rs == R_RUN), .ld_atc(ld_atc), .ld_ma(ld_ma),
+      .ld_probe(of_prb && rs == R_RUN), .ld_oldest(of_oldest), .ld_atc(ld_atc), .ld_ma(ld_ma),
       .st_valid(w_st && running && !w_u.halt && !w_drain), .st_addr(w_ea),
       .st_sz(w_u.sz), .st_data(w_std), .st_lock(w_u.lk), .st_locke(w_u.lke),
       .st_alt(w_u.alt), .st_noalloc(w_u.xs), .st_m16(w_u.m16),
