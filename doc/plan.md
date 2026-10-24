@@ -130,7 +130,7 @@ The FPSP (`make fpsp`) runs on the core in rd-virt as Linux's own FPSP, and on b
 | M10 | MMU: ATCs, walker, PTEST/PFLUSH, $7 faults with write-backs | `core_mmu_tb`, `make cosim-mmu` |
 | M11 | FPU datapath standalone, then integrated: frames, deferred exceptions, FSAVE/FRESTORE | `make testfloat`, cputest with FPU, `core_fpu_tb`, FP cosim programs (see the note below) |
 | M12 | The LC040 build | `make check FPU=0`, format $4 vectors (`make vectors OP=lc040 FPU=0`), `make cosim-lc`, `core_lc040_tb` |
-| M13 | rd-virt lockstep: bare metal, then Linux (FPU=1, and FPU=0 with emulation) | `make virt-bare virt-linux`, `make fpsp` |
+| M13 | rd-virt lockstep: bare metal, then Linux (FPU=1, and FPU=0 with emulation) | `make virt-bare virt-linux`, `make fpsp`; each also with `FPU=0` (but `fpsp`) and with `VIRT_CACHES=off` |
 | M14 | MAME Quadra: PROM/ROM to the Finder or console; then NetBSD/mac68k and Linux | `make quadra`, `quadra-lc` |
 | M15 | Performance and FPGA (Vivado and Quartus), `make cycles` against UM §10 | `doc/implementation.md` |
 

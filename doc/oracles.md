@@ -11,6 +11,7 @@ counterparts, chosen in `doc/plan.md` §3:
 | 1c | QEMU `-cpu m68040` | a third opinion on integer instructions; weak on frames, no caches, MMU and FPU only roughly | M0 spike 3: **go, with caveats** (below) |
 | 1d | Berkeley TestFloat/SoftFloat | the FPU datapath's rounding | from M11 |
 | 3 | Linux 7.2.9 (`CONFIG_M68040`) on QEMU's `virt` | validates the guest kernels rd-virt will run | M0 spike 5: **go** (below) |
+| 3 | **rd-virt**: Linux and bare programs, the RTL in lockstep with UAE040 (`doc/virt.md`) | the whole processor over a real kernel's boot and user space: the MMU's faults, the caches, interrupts, STOP, the FPSP | M13: **pass**, 0 divergences (below; `doc/m13-mismatches.md`) |
 | 4 | MAME's m68040 in a Macintosh Quadra | whole-system behaviour | M0 spike 4: **go, with caveats** (below; one more ROM needed) |
 
 This file records:
@@ -205,7 +206,8 @@ fixes (59 checks and 48, all passing). It found, against the UM:
   calculated effective address" without saying which for a predecrement. An open question
   for M12.
 - **Clock counts** (`cpu_cycle_exact` is not used).
-- **Interrupts** are not wired (M13).
+- **Interrupts** were not wired until M13: rd-virt takes them through
+  `uae040_interrupt`, at the boundary the RTL took them at (below).
 - **The data cache when the MMU is off.** UM 3.1.2 gives such accesses the default
   attributes cachable, write-through; the spike did not test copyback through a TTR with
   TC.E clear.
@@ -410,6 +412,33 @@ core against the manual:
 **Not authoritative for:** anything the MC68040 and the MC68LC040 share (the sections
 above), or where the format $4 exception falls among the access errors of the writes
 before it (UM A.5.1, step 2): UAE040 has no store buffer, and neither program faults.
+
+### UAE040 in rd-virt (M13)
+
+The harness gained devices behind the RAM, interrupts taken at a hook boundary, STOP's
+state, writes through the core's own path and an integer-register setter that leaves the
+caches alone (`doc/virt.md`). Linux 7.2.9 boots on it alone in rd-virt to the shell, runs
+`commands.script` and powers off -- 88.4 M steps in 86 s, the M68040FPSP emulating awk's
+transcendental functions to the host's digits (`make virt-uae`, `make fpsp`'s script).
+In lockstep with the core, 0 divergences but the decided ones, and six RTL bugs found
+(`doc/m13-mismatches.md`). Against the manual, what the lockstep met in the oracle:
+
+- **A write's ATC fault** (M10, above): completed, and the write left in WB3, on every
+  page fault of a user write -- 399 in the boot. The lockstep gives the oracle the
+  core's frame (m13-c1).
+- **An instruction fetch fault's SIZE and FA** (M10, above): word, and the instruction
+  word's address -- 436 in the boot (m13-c2).
+- **The EA field of an access error frame** is filled in with no continuation bit set,
+  where UM 8.4.6.1 makes it meaningful only with one (m13-c3).
+- **The unimplemented-instruction frame's E1** is clear for a register source -- as the
+  FPSP needs, and against UM Table 9-16 (`doc/manual-contradictions.md` 9). **UAE040
+  right**; the core followed the table until M13.
+- **The FPSR at an unimplemented FP instruction's trap**: condition codes and EXC
+  cleared, where the core leaves them, as the FPSP's "D25B fix" says the part did
+  (m13-c6).
+- **FMOVE to an integer of a NaN**, which takes the nonmaskable operand error: the
+  oracle leaves the NaN's top bits in the destination before the handler runs, the core
+  zero (m13-c5); the manual leaves it open.
 
 ## cputest: WinUAE's instruction tester, for the MC68040 -- M0 spike
 

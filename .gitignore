@@ -48,3 +48,4 @@ __pycache__/
 # Macintosh Quadra ROM images: supplied by the user, never committed; hashes in
 # Inputs/sw/ROMS.sha256 (M0 spike 4, M14)
 /Inputs/ref/ROMs/
+rdvirt-divergence.txt

@@ -201,21 +201,29 @@ module rd68041_dmu (
   function automatic logic [2:0] nbytes(input logic [1:0] sz);
     nbytes = (sz == rd68041_pkg::SZ_B) ? 3'd1 : (sz == rd68041_pkg::SZ_W) ? 3'd2 : 3'd4;
   endfunction
-  function automatic logic overlap(input logic [31:0] a0, input logic [1:0] s0,
-                                   input logic [31:0] a1, input logic [1:0] s1);
-    logic [31:2] e0, e1;
-    // The last long word each touches; the two overlap if they touch a common
-    // long word.
-    e0 = a0[31:2] + {29'h0, ({1'b0, a0[1:0]} + nbytes(s0)) > 3'd4};
-    e1 = a1[31:2] + {29'h0, ({1'b0, a1[1:0]} + nbytes(s1)) > 3'd4};
-    overlap = !((e0 < a1[31:2]) || (e1 < a0[31:2]));
+  // Whether two accesses may touch a common long word. The addresses are
+  // logical and the writes are translated only when they leave the queue,
+  // so the test is on the page offset, which every logical address of a
+  // physical byte shares (UM 3.2: 4 KB or 8 KB pages): two mappings of one
+  // page are caught, at the cost of now and then ordering two accesses to
+  // different pages (doc/bugs-found.md M13). Each touches one long word or
+  // two, the second the next one in the page (wrapping, for an access that
+  // crosses into the next page).
+  function automatic logic overlap(input logic [11:0] a0, input logic [1:0] s0,
+                                   input logic [11:0] a1, input logic [1:0] s1);
+    logic [11:2] b0, b1, e0, e1;
+    b0 = a0[11:2];
+    b1 = a1[11:2];
+    e0 = b0 + {9'h0, ({1'b0, a0[1:0]} + nbytes(s0)) > 3'd4};
+    e1 = b1 + {9'h0, ({1'b0, a1[1:0]} + nbytes(s1)) > 3'd4};
+    overlap = (b0 == b1) || (b0 == e1) || (e0 == b1) || (e0 == e1);
   endfunction
 
   // A MOVE16 write covers its line.
-  function automatic logic q_hit(input logic [31:0] a, input logic [1:0] sz,
-                                 input logic [31:0] qa_i, input logic [1:0] qs_i,
+  function automatic logic q_hit(input logic [11:0] a, input logic [1:0] sz,
+                                 input logic [11:0] qa_i, input logic [1:0] qs_i,
                                  input logic m);
-    q_hit = m ? (a[31:4] == qa_i[31:4]) : overlap(a, sz, qa_i, qs_i);
+    q_hit = m ? (a[11:4] == qa_i[11:4]) : overlap(a, sz, qa_i, qs_i);
   endfunction
   // MOVES (UM 3.2.5, Table 3-2): an alternate space of data or program is a
   // data access in the user's or supervisor's space, translated like any
@@ -224,9 +232,9 @@ module rd68041_dmu (
     alt_phys = (fc == 3'd0) || (fc == 3'd3) || (fc == 3'd4) || (fc == 3'd7);
   endfunction
 
-  wire hit0 = (qn > 2'd0) && q_hit(ld_addr, ld_sz, qa[0], qs[0], qf[0][4]);
-  wire hit1 = (qn > 2'd1) && q_hit(ld_addr, ld_sz, qa[1], qs[1], qf[1][4]);
-  wire hit2 = (qn > 2'd2) && q_hit(ld_addr, ld_sz, qa[2], qs[2], qf[2][4]);
+  wire hit0 = (qn > 2'd0) && q_hit(ld_addr[11:0], ld_sz, qa[0][11:0], qs[0], qf[0][4]);
+  wire hit1 = (qn > 2'd1) && q_hit(ld_addr[11:0], ld_sz, qa[1][11:0], qs[1], qf[1][4]);
+  wire hit2 = (qn > 2'd2) && q_hit(ld_addr[11:0], ld_sz, qa[2][11:0], qs[2], qf[2][4]);
 
   // A write's SIZE, TT and TM, as the SSW and the write-back status words
   // hold them (UM 8.4.6.2, 8.4.6.3): a MOVES's space of data or program is
@@ -877,6 +885,7 @@ module rd68041_dmu (
                          (qn > 2'd2) ? qd[2] : 32'h0, (qn > 2'd2) ? qa[2] : 32'h0,
                          qa[0], wf_wb2s, wf_wb1s, wf_ssw, wf_wb3s};
   wire [1:0] q_in = qn - {1'b0, q_out};
+  wire [4:0] st_f = {st_m16, st_lock, st_locke, st_alt, st_noalloc};
   assign st_empty = (qn == 2'd0) && !(x != X_IDLE && x != X_CMO && !xld);
 
   // A snoop on the line a push is waiting with: a sink is copied into the push
@@ -1504,15 +1513,23 @@ module rd68041_dmu (
         if (sn_wbe[0]) pb[32*int'(sn_addr[3:2])      +: 8] <= sn_wdata[7:0];
       end
 
-      // The oldest write is done: the queue moves up.
-      if (q_out) begin
+      // The oldest write is done: the queue moves up; and a new write joins
+      // the queue behind those still there. Each entry is assigned once a
+      // clock, the new write or its successor: Verilator 5.032 can let a
+      // constant-index nonblocking assignment to an element win over a later
+      // variable-index one (doc/coding-standard.md, doc/bugs-found.md M13).
+      if (st_ready && q_in == 2'd0) begin
+        qa[0] <= st_addr; qs[0] <= st_sz; qd[0] <= st_data; qf[0] <= st_f;
+      end else if (q_out) begin
         qa[0] <= qa[1]; qs[0] <= qs[1]; qd[0] <= qd[1]; qf[0] <= qf[1];
+      end
+      if (st_ready && q_in == 2'd1) begin
+        qa[1] <= st_addr; qs[1] <= st_sz; qd[1] <= st_data; qf[1] <= st_f;
+      end else if (q_out) begin
         qa[1] <= qa[2]; qs[1] <= qs[2]; qd[1] <= qd[2]; qf[1] <= qf[2];
       end
-      // A new write joins the queue behind those still there.
-      if (st_ready) begin
-        qa[q_in] <= st_addr; qs[q_in] <= st_sz; qd[q_in] <= st_data;
-        qf[q_in] <= {st_m16, st_lock, st_locke, st_alt, st_noalloc};
+      if (st_ready && q_in == 2'd2) begin
+        qa[2] <= st_addr; qs[2] <= st_sz; qd[2] <= st_data; qf[2] <= st_f;
       end
       qn <= qn - {1'b0, q_out} + {1'b0, st_ready};
       // The core has the frozen writes in the frame: they go.

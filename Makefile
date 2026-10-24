@@ -69,7 +69,8 @@ IVFLAGS := -g2012 -Wall -Wno-timescale -DTB_FPU=$(FPU) $(if $(filter 0,$(FPU)),-
 .PHONY: all help dirs lint lint-source lint-iverilog lint-verilator lint-yosys \
         lint-quartus lint-questa quartus synth impl audit sim sim-bus check \
         check-lc cosim spike ucode ucode-check print-rtl clean uae040 uae040-smoke cputest-gen \
-        qemu040 cosim-qemu-smoke virt-qemu mame-quadra quadra-m68040
+        qemu040 cosim-qemu-smoke virt-qemu mame-quadra quadra-m68040 \
+        virt-bare virt-uae virt-linux virt-linux-solo fpsp
 
 all: lint
 
@@ -119,6 +120,13 @@ help:
 	@echo "                    UAE040's; every known difference confirmed"
 	@echo "  make virt-qemu    Linux 7.2.9 (CONFIG_M68040) to a shell on QEMU's virt board,"
 	@echo "                    a command set typed, powered off (guest build: heavy, alone)"
+	@echo "rd-virt, the deterministic m68k virt machine (M13; heavy builds, run alone):"
+	@echo "  make virt-uae       Linux to the shell and a command set on UAE040 alone"
+	@echo "  make virt-bare      bare-metal programs (console, timer, MMU and caches), in lockstep"
+	@echo "  make virt-linux-solo  Linux on the RTL alone"
+	@echo "  make virt-linux     Linux in lockstep with UAE040 (VIRT_CACHES=off, VIRT_OPTS=...)"
+	@echo "  make fpsp           Linux in lockstep, the M68040FPSP's emulated instructions"
+	@echo "                    (each with FPU=0: the MC68LC040, its FPU emulation; not fpsp)"
 	@echo "  make mame-quadra  build MAME's macquadra800.cpp driver (build/mame/; heavy, -j2, alone)"
 	@echo "  make quadra-m68040  the user's Quadra 650 ROM booted on MAME's m68040, no disk,"
 	@echo "                    to the blinking-? screen (QUADRA_SECONDS=, QUADRA_MACHINE=)"
@@ -264,7 +272,7 @@ sim: dirs $(patsubst %,build/programs/%.hex,$(SIMPROGS))
 # directed benches' (SIMPROGS), which no oracle runs.
 # ---------------------------------------------------------------------------
 PROGS   ?= m6_basic m7_a m7_b m7_c m8_exc m9_icache m9_dcache m9_move16 \
-           m11_fpu_a m11_fpu_b m12_fpu_ind
+           m11_fpu_a m11_fpu_b m12_fpu_ind m13_move_mm m13_an_upd m13_fsave_null m13_ind_moves
 
 # Keep the intermediate files: the ELF is what objdump reads when a run fails.
 .SECONDARY:
@@ -641,7 +649,7 @@ cache:
 
 # The MC68LC040 against UAE040 -L (M12): the core built with FPU=0, the
 # integer programs and m12_lc040, every FP instruction a format $4 frame.
-LCPROGS ?= m6_basic m7_a m7_b m7_c m8_exc m9_icache m9_dcache m9_move16 m10_mmu m12_lc040
+LCPROGS ?= m6_basic m7_a m7_b m7_c m8_exc m9_icache m9_dcache m9_move16 m10_mmu m12_lc040 m13_move_mm m13_an_upd m13_ind_moves
 .PHONY: cosim-lc
 cosim-lc:
 	@$(MAKE) --no-print-directory cosim FPU=0 BUILD=$(BUILD)/lc040 PROGS="$(LCPROGS)"
@@ -781,6 +789,109 @@ virt-qemu: $(Q040PLUG) $(VGUEST040)/vmlinux $(VGUEST040)/initramfs.cpio.gz
 	 rc=$${PIPESTATUS[0]}; sed 's/^/  /' $(VGUEST040)/qemu.insns; \
 	 if [ $$rc -eq 0 ]; then echo "PASS: virt-qemu (console in $(VGUEST040)/qemu.console)"; \
 	 else echo "FAIL: virt-qemu (console in $(VGUEST040)/qemu.console)"; exit 1; fi
+
+# ---------------------------------------------------------------------------
+# rd-virt (M13): the deterministic m68k `virt` machine, with the RTL, UAE040,
+# or both in lockstep. doc/virt.md has the machine, the lockstep and its
+# options; doc/m13-mismatches.md what it found. RD68031's rd-virt, for the
+# MC68040 and, with FPU=0, the MC68LC040 (its own RTL build, guest kernel --
+# the FPU emulation -- and command set; UAE040 -L).
+#
+#   make virt-uae          Linux to the shell and the command set on UAE040
+#                          alone -- validates the machine, fast
+#   make virt-bare         the bare-metal programs, in lockstep, with three
+#                          bus and cache set-ups each
+#   make virt-linux-solo   Linux on the RTL alone
+#   make virt-linux        Linux in lockstep: no divergence and the expected
+#                          console is the pass (VIRT_CACHES=off: TCI on every
+#                          line the RTL reads, so its caches stay empty, and
+#                          no data cache in the oracle)
+#   make fpsp              Linux in lockstep running the M68040FPSP's
+#                          emulated instructions (commands-fpsp.script; FPU=1)
+#
+#   VIRT_OPTS=...          more rdvirt options (--tbi, --ram-waits 2, ...)
+#
+# The RTL build (Verilator) and the guest builds (Linux, BusyBox) are heavy
+# jobs: each runs once, alone, at JOBS=4 at most, and is reused (CLAUDE.md).
+# None of these is in `make check`.
+# ---------------------------------------------------------------------------
+VIRTTOP     := build/virt
+VIRT        := $(VIRTTOP)$(if $(filter 0,$(FPU)),/lc)
+VIRTBIN     := $(VIRT)/obj/rdvirt
+VIRTUAE     := $(VIRTTOP)/rdvirt-uae
+VGUEST      := $(if $(filter 0,$(FPU)),$(VIRTTOP)/guest-lc,$(VGUEST040))
+VIRT_CMDLINE ?= console=ttyGF0 lpj=250000 rdvirt.shell
+VIRT_SCRIPT ?= sim/virt/linux/commands$(if $(filter 0,$(FPU)),-lc).script
+VIRT_OPTS   ?=
+VIRT_CACHES ?= on
+VIRT_MAXSTEPS ?= 400000000
+VIRTNOFPU   := $(if $(filter 0,$(FPU)),--no-fpu)
+VIRTPROGS   := virt_hello virt_timer virt_mmu
+VIRTSRC     := $(wildcard sim/virt/*.cpp sim/virt/*.h) sim/virt/build.sh
+VIRTLINUX    = --kernel $(VGUEST)/vmlinux --initrd $(VGUEST)/initramfs.cpio.gz \
+               --cmdline "$(VIRT_CMDLINE)" --expect done $(VIRTNOFPU) \
+               --progress 10000000 --max-steps $(VIRT_MAXSTEPS)
+ifeq ($(VIRT_CACHES),off)
+VIRTCACHE   := --tci --no-dcache
+endif
+
+$(VIRTUAE): $(VIRTSRC) $(O40BUILD)/libuae040.a
+	@sh sim/virt/build.sh uae $(VIRTTOP) > /dev/null
+
+$(VIRTBIN): $(VIRTSRC) sim/virt/public.vlt $(O40BUILD)/libuae040.a $(RTL)
+	@echo "  virt: building the RTL machine into $(VIRT)/obj (Verilator, FPU=$(FPU), alone)"
+	@RTLFILES="$(RTL)" FPU=$(FPU) sh sim/virt/build.sh rtl $(VIRT) > /dev/null
+
+$(VIRTTOP)/guest-lc/vmlinux $(VIRTTOP)/guest-lc/initramfs.cpio.gz: sim/virt/linux/build.sh \
+            sim/virt/linux/rd-virt-lc.config sim/virt/linux/init sim/virt/linux/cpio.list
+	@echo "  virt: building the MC68LC040 guest into $(VIRTTOP)/guest-lc (Linux and BusyBox, -j4, alone)"
+	@CONFIG=rd-virt-lc.config JOBS=4 sh sim/virt/linux/build.sh $(VIRTTOP)/guest-lc | sed 's/^/  /'
+
+build/programs/virt_%.elf: sim/programs/virt_%.S sim/programs/virt.inc sim/programs/virt.ld
+	@mkdir -p build/programs
+	@$(CROSS)gcc -mcpu=68040 -Isim/programs -c -o build/programs/virt_$*.o $<
+	@$(CROSS)gcc -nostdlib -nostartfiles -Wl,--build-id=none -T sim/programs/virt.ld \
+	    -o $@ build/programs/virt_$*.o
+
+virt-bare: $(VIRTBIN) $(patsubst %,build/programs/%.elf,$(VIRTPROGS))
+	@ok=1; for p in $(VIRTPROGS); do for m in "" "--tbi --ram-waits 1" "--tci --no-dcache"; do \
+	  $(VIRTBIN) --cpu lockstep --bare build/programs/$$p.elf --quiet --progress 0 $(VIRTNOFPU) \
+	      --expect "PASS: $$p" --dump $(VIRT)/$$p.div $$m $(VIRT_OPTS) \
+	      > $(VIRT)/$$p.log 2>&1; \
+	  if grep -q '^PASS' $(VIRT)/$$p.log; then echo "  PASS: $$p $$m -- $$(grep -o '[0-9]* steps' $(VIRT)/$$p.log | tail -1)"; \
+	  else echo "  FAIL: $$p $$m"; tail -5 $(VIRT)/$$p.log; ok=0; fi; done; done; \
+	test $$ok -eq 1 && echo "PASS: virt-bare"
+
+virt-uae: $(VIRTUAE) $(VGUEST)/vmlinux $(VGUEST)/initramfs.cpio.gz
+	@$(VIRTUAE) --cpu uae $(VIRTLINUX) --script $(VIRT_SCRIPT) --quiet --console-log $(VIRT)/uae.console \
+	    $(VIRT_OPTS) > $(VIRT)/uae.log 2>&1; \
+	 grep -E '^\[uae040\] end' $(VIRT)/uae.log | sed 's/^/  /'; \
+	 grep -q '^PASS' $(VIRT)/uae.log || { tail -12 $(VIRT)/uae.log; exit 1; }
+	@echo "PASS: virt-uae (console in $(VIRT)/uae.console)"
+
+virt-linux-solo: $(VIRTBIN) $(VGUEST)/vmlinux $(VGUEST)/initramfs.cpio.gz
+	@$(VIRTBIN) --cpu rtl $(VIRTLINUX) --script $(VIRT_SCRIPT) $(VIRTCACHE) --quiet \
+	    --console-log $(VIRT)/solo.console $(VIRT_OPTS) > $(VIRT)/solo.log 2>&1; \
+	 grep -E '^\[rtl\] end' $(VIRT)/solo.log | sed 's/^/  /'; \
+	 grep -q '^PASS' $(VIRT)/solo.log || { tail -12 $(VIRT)/solo.log; exit 1; }
+	@echo "PASS: virt-linux-solo (console in $(VIRT)/solo.console)"
+
+virt-linux: $(VIRTBIN) $(VGUEST)/vmlinux $(VGUEST)/initramfs.cpio.gz
+	@$(VIRTBIN) --cpu lockstep $(VIRTLINUX) --script $(VIRT_SCRIPT) $(VIRTCACHE) --quiet \
+	    --console-log $(VIRT)/lockstep-$(VIRT_CACHES).console --dump $(VIRT)/lockstep-$(VIRT_CACHES).div \
+	    $(VIRT_OPTS) > $(VIRT)/lockstep-$(VIRT_CACHES).log 2>&1; \
+	 grep -E '^\[lockstep\] end' $(VIRT)/lockstep-$(VIRT_CACHES).log | sed 's/^/  /'; \
+	 grep -q '^PASS' $(VIRT)/lockstep-$(VIRT_CACHES).log || { grep -A12 '^DIVERGENCE' $(VIRT)/lockstep-$(VIRT_CACHES).log | head -30; tail -3 $(VIRT)/lockstep-$(VIRT_CACHES).log; exit 1; }
+	@echo "PASS: virt-linux (console in $(VIRT)/lockstep-$(VIRT_CACHES).console)"
+
+fpsp: $(VIRTBIN) $(VGUEST)/vmlinux $(VGUEST)/initramfs.cpio.gz
+	@test "$(FPU)" != 0 || { echo "fpsp: the MC68040's (FPU=1); the MC68LC040 has no FPU to emulate for"; exit 1; }
+	@$(VIRTBIN) --cpu lockstep $(VIRTLINUX) --script sim/virt/linux/commands-fpsp.script --quiet \
+	    --console-log $(VIRT)/fpsp.console --dump $(VIRT)/fpsp.div $(VIRT_OPTS) > $(VIRT)/fpsp.log 2>&1; \
+	 grep -E '^\[lockstep\] end' $(VIRT)/fpsp.log | sed 's/^/  /'; \
+	 grep '^t[1-5] ' $(VIRT)/fpsp.console | sed 's/^/  /'; \
+	 grep -q '^PASS' $(VIRT)/fpsp.log || { grep -A12 '^DIVERGENCE' $(VIRT)/fpsp.log | head -30; tail -3 $(VIRT)/fpsp.log; exit 1; }
+	@echo "PASS: fpsp (console in $(VIRT)/fpsp.console)"
 
 # ---------------------------------------------------------------------------
 # MAME's Quadra (doc/oracles.md, "MAME's Quadra"; the core goes in at M14)

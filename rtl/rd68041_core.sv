@@ -590,21 +590,27 @@ module rd68041_core #(
   function automatic logic [2:0] nb(input logic [1:0] sz);
     nb = (sz == rd68041_pkg::SZ_B) ? 3'd1 : (sz == rd68041_pkg::SZ_W) ? 3'd2 : 3'd4;
   endfunction
-  function automatic logic touches(input logic [31:0] a0, input logic [1:0] s0,
-                                   input logic [31:0] a1, input logic [1:0] s1);
-    logic [31:2] e0, e1;
-    e0 = a0[31:2] + {29'h0, ({1'b0, a0[1:0]} + nb(s0)) > 3'd4};
-    e1 = a1[31:2] + {29'h0, ({1'b0, a1[1:0]} + nb(s1)) > 3'd4};
-    touches = !((e0 < a1[31:2]) || (e1 < a0[31:2]));
+  // On the page offset, as the data memory unit compares its queue's: the
+  // addresses are logical, and two mappings of one page share it
+  // (rd68041_dmu, `overlap`; doc/bugs-found.md M13).
+  function automatic logic touches(input logic [11:0] a0, input logic [1:0] s0,
+                                   input logic [11:0] a1, input logic [1:0] s1);
+    logic [11:2] b0, b1, e0, e1;
+    b0 = a0[11:2];
+    b1 = a1[11:2];
+    e0 = b0 + {9'h0, ({1'b0, a0[1:0]} + nb(s0)) > 3'd4};
+    e1 = b1 + {9'h0, ({1'b0, a1[1:0]} + nb(s1)) > 3'd4};
+    touches = (b0 == b1) || (b0 == e1) || (e0 == b1) || (e0 == e1);
   endfunction
   // A MOVE16 write covers its whole line; a MOVE16 read waits for every write
   // (the data memory unit holds the line in between).
-  function automatic logic st_hits(input rd68041_pkg::uop_t x, input logic [31:0] x_a,
-                                   input rd68041_pkg::uop_t w, input logic [31:0] w_a);
+  function automatic logic st_hits(input rd68041_pkg::uop_t x, input logic [11:0] x_a,
+                                   input rd68041_pkg::uop_t w, input logic [11:0] w_a);
     st_hits = w.valid && w.st &&
-              (x.m16 || (w.m16 ? (x_a[31:4] == w_a[31:4]) : touches(x_a, x.sz, w_a, w.sz)));
+              (x.m16 || (w.m16 ? (x_a[11:4] == w_a[11:4]) : touches(x_a, x.sz, w_a, w.sz)));
   endfunction
-  wire st_ahead = st_hits(of_u, of_ea, ex_u, ex_ea) || st_hits(of_u, of_ea, w_u, w_ea);
+  wire st_ahead = st_hits(of_u, of_ea[11:0], ex_u, ex_ea[11:0]) ||
+                  st_hits(of_u, of_ea[11:0], w_u, w_ea[11:0]);
 
   // Exception processing's reads -- the vector -- wait for every write before
   // them, the frame's: UM 8.1 fetches the vector last, and a double bus fault
@@ -720,12 +726,24 @@ module rd68041_core #(
     endcase
   end
 
-  wire [31:0] b_reg_v = ex_reg(ex_u.b_reg, qd, w_u, !w_nowr, w_an, w_res, w_res2);
-  wire [31:0] a_raw = pick(ex_u.a_sel, ex_reg(ex_u.a_reg, qc, w_u, !w_nowr, w_an, w_res, w_res2),
+  // A register the micro-operation's own (An)+ or -(An) updates reads as
+  // updated -- ADDA.L (A7)+,A7 adds to A7 + 4: PRM 2.2.4-2.2.5, the address
+  // "is used" and then moved -- unless the micro-operation stores it, as
+  // MOVE An,(An)+ does, which stores An as it was (doc/bugs-found.md M13).
+  function automatic logic [31:0] ex_own(input rd68041_pkg::uop_t x, input logic [31:0] x_an,
+                                         input logic [4:0] r, input logic [31:0] v);
+    ex_own = (!x.st && upd_of(x, r)) ? x_an : v;
+  endfunction
+  wire [31:0] b_reg_v = ex_own(ex_u, ex_an, ex_u.b_reg,
+                               ex_reg(ex_u.b_reg, qd, w_u, !w_nowr, w_an, w_res, w_res2));
+  wire [31:0] a_raw = pick(ex_u.a_sel,
+                           ex_own(ex_u, ex_an, ex_u.a_reg,
+                                  ex_reg(ex_u.a_reg, qc, w_u, !w_nowr, w_an, w_res, w_res2)),
                            ex_u.imm, ex_md, ex_ea);
   wire [31:0] b_raw = ex_u.crr ? cr_val(ex_u.cr, w_u, w_res, cr_cur)
                                : pick(ex_u.b_sel, b_reg_v, ex_u.imm, ex_md, ex_ea);
-  wire [31:0] c_v   = ex_reg(ex_u.wr2_reg, qe, w_u, !w_nowr, w_an, w_res, w_res2);
+  wire [31:0] c_v   = ex_own(ex_u, ex_an, ex_u.wr2_reg,
+                             ex_reg(ex_u.wr2_reg, qe, w_u, !w_nowr, w_an, w_res, w_res2));
   wire [31:0] av = ex_u.a_sxw ? {{16{a_raw[15]}}, a_raw[15:0]} : a_raw;
   wire [31:0] bv = ex_u.b_sxw ? {{16{b_raw[15]}}, b_raw[15:0]} : b_raw;
 

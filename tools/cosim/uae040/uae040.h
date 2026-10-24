@@ -10,7 +10,8 @@
  * Memory is flat physical RAM from 0. Everything above it answers with a bus
  * error, unless uae040_set_alias() folds a window of the address space onto
  * the RAM, or uae040_add_region() puts another memory in front of it. No
- * chipset, no interrupts (they arrive with M13's rd-virt).
+ * chipset; the devices and interrupts of M13's rd-virt come through the
+ * calls at the end.
  *
  * One run per process: uae040_run() enters the core once and stays there
  * until the instruction hook asks to stop. A front-end that needs many short
@@ -143,6 +144,36 @@ typedef void (*uae040_setup_fn)(int i, uae040_state *st, void *user);
 typedef void (*uae040_result_fn)(int i, const uae040_state *st, void *user);
 int uae040_run_each(int ntests, uae040_setup_fn setup, uae040_result_fn result,
 		    void *user, int *done);
+/* M13 (sim/virt): a machine with devices.
+ *
+ * uae040_set_ext_bus: every physical access that no region and no RAM
+ * claims goes to these instead of answering with a bus error; read returns
+ * nonzero for a bus error (and fills *v otherwise), write likewise. size is
+ * 1, 2 or 4, the address the access's own. (Cachability is the MMU's on the
+ * 68040 -- TTRs, page descriptors, the defaults -- so there is no CIIN.)
+ * uae040_interrupt: from inside the instruction hook only -- take the
+ * interrupt exception for `level` (autovectored) now, at this boundary, as
+ * the processor would between two instructions; the next boundary is the
+ * handler's first instruction.
+ * uae040_stopped: nonzero while STOP holds the processor.
+ * uae040_last_opcode: the operation word of the instruction that ran last,
+ * from inside the instruction hook (after a fault, the faulted one's).
+ * uae040_poke: from inside the instruction hook, a write (size 1, 2 or 4) at
+ * a supervisor data address through the core's own path -- translation,
+ * data cache and bus hook included. */
+typedef int (*uae040_ext_read)(uint32_t pa, int size, uint32_t *v, void *user);
+typedef int (*uae040_ext_write)(uint32_t pa, int size, uint32_t v, void *user);
+void uae040_set_ext_bus(uae040_ext_read rd, uae040_ext_write wr, void *user);
+void uae040_interrupt(int level);
+int uae040_stopped(void);
+uint16_t uae040_last_opcode(void);
+void uae040_poke(uint32_t addr, int size, uint32_t v);
+/* From inside the instruction hook: D0-D7, A0-A6, the three stack pointers
+ * and the condition codes (SR's low byte) from *s, and nothing else -- the
+ * caches, the PC, the prefetch and the system byte are left as they are
+ * (uae040_set_state invalidates the caches). */
+void uae040_set_regs(const uae040_state *s);
+
 /* Reset (SSP and PC from physical 0 and 4) and run until the instruction
  * hook asks to stop or the processor halts (double fault). Returns 0 on a
  * hook stop, 1 on a halt. */

@@ -151,3 +151,20 @@ specified address". The single-register FMOVE's tables, whose opcode "is the sam
 both modes both ways too ("all addressing modes" from memory, "alterable" to it). The
 decoder followed the sentences until the cputest corpus ran FMOVE FPSR,(A7)+; it follows
 the tables now (`rd68041_decode.sv`, opclasses 100 and 101).
+
+## 9. E1 in the unimplemented-instruction frame: always, or for a packed source
+
+**Followed: the field's definition, as the FPSP reads it -- E1 set only for a packed
+source.**
+
+UM Table 9-16, "Unimplemented Instruction Exceptions (For Opclass 000 and 010)": "E1 --
+Always 1". UM 9.8, the field definitions two pages before it: "E1 -- ... For the
+unimplemented instruction state frame, the source operand's unsupported data type is
+packed if the E1 bit is set." The FPSP, which CLAUDE.md makes the definition of the
+frames' internal fields, reads it the second way: `get_op.S`, on the unimplemented
+instruction's path, `btstb #E1,E_BYTE(%a6) | if set, there is a packed operand`, and
+then unpacks FPTEMP_LO and ETEMP as a packed number. With E1 always set, a register
+FSIN or FATAN is emulated on garbage; Linux's awk printed nothing right. M11 followed the
+table and `core_fpu_tb` checked it; M13's rd-virt lockstep found it, the FPSP taking
+`pack_source` on the core and not on UAE040 (which sets E1 clear;
+`doc/m13-mismatches.md`). `rd68041_fpu.sv`, the frame of an unimplemented instruction.

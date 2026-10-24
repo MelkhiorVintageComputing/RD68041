@@ -37,7 +37,10 @@ that the measurement has something to explain:
   SR is executed"); the drain of the pipeline in front of it is this design's.
 - **An interrupt is taken at the boundary after the one where it became pending** when
   an SR write is what lowered the mask, since the SR changes only after the serialising
-  instruction has left write-back (UM 7.5.1: "within one instruction boundary").
+  instruction has left write-back (UM 7.5.1: "within one instruction boundary"). It is
+  never taken at the end of a serialising instruction, so an SR write followed by a NOP
+  -- RD68031's `virt_timer` had one -- takes it at the end of the instruction after the
+  NOP, two boundaries late (M13; the program waits in a DBRA loop now).
 
 ## The caches (M9)
 

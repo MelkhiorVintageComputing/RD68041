@@ -11,6 +11,8 @@
 # the same byte for byte from one build to the next.
 #
 #   sim/virt/linux/build.sh [OUT]          (default build/virt/guest)
+#   CONFIG=rd-virt-lc.config sim/virt/linux/build.sh OUT
+#                                           the MC68LC040's: the FPU emulation (M13)
 #
 # The sources are the ones Inputs/sw/MANIFEST pins, fetched into OUT/dl (or
 # copied from RD68031's download directories when they are there) and checked
@@ -24,6 +26,7 @@ mkdir -p "$OUT/dl" "$OUT/src"
 OUT=$(cd "$OUT" && pwd)
 JOBS=${JOBS:-4}
 CROSS=m68k-linux-gnu-
+CONFIG=$HERE/${CONFIG:-rd-virt.config}
 
 # 1. sources
 grep -v '^#' "$TOP/Inputs/sw/MANIFEST" | while read -r sum file url; do
@@ -46,9 +49,9 @@ done
 export KBUILD_BUILD_TIMESTAMP="2026-01-01 00:00:00 UTC" KBUILD_BUILD_USER=rd68041 \
 	KBUILD_BUILD_HOST=rd-virt KBUILD_BUILD_VERSION=1
 K="make -s -C $OUT/src/linux-7.2.9 O=$OUT/linux-build ARCH=m68k CROSS_COMPILE=$CROSS"
-if [ ! -f "$OUT/linux-build/vmlinux" ] || [ "$HERE/rd-virt.config" -nt "$OUT/linux-build/vmlinux" ]; then
+if [ ! -f "$OUT/linux-build/vmlinux" ] || [ "$CONFIG" -nt "$OUT/linux-build/vmlinux" ]; then
 	mkdir -p "$OUT/linux-build"
-	KCONFIG_ALLCONFIG="$HERE/rd-virt.config" $K allnoconfig > "$OUT/kernel-config.log" 2>&1
+	KCONFIG_ALLCONFIG="$CONFIG" $K allnoconfig > "$OUT/kernel-config.log" 2>&1
 	grep -q '^CONFIG_M68040=y' "$OUT/linux-build/.config" \
 		&& ! grep -q '^CONFIG_M68030=y' "$OUT/linux-build/.config" \
 		|| { echo "build.sh: rd-virt.config was not applied" >&2; exit 1; }

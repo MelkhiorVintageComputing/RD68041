@@ -402,3 +402,11 @@ UAE040 `-L`, `make vectors-all FPU=0` every group with the `lc040` one (1,610 ve
 added, and `core_lc040_tb` checks against the manual what UAE040 `-L` stacks otherwise
 (`m12_lc040_b`). `make impl FPU=0`: 30.96 MHz, 23,887 LUTs; the MC68040 30.05 MHz
 (`doc/size-and-speed.md`).
+
+**M13: rd-virt.** Linux 7.2.9 boots to its shell, runs a command set and powers off on
+the core in lockstep with UAE040 -- 88.4 M instructions with the MC68040 (its FPSP
+emulating the transcendental functions), 89.1 M with the MC68LC040 (the kernel's FPU
+emulation), caches on and off, 0 divergences but the decided differences
+(`doc/virt.md`, `doc/m13-mismatches.md`). Seven RTL bugs found on the way, every one
+past the cosim programs, the vectors and the cputest corpus (`doc/bugs-found.md`).
+`make impl`: 31.88 MHz; `FPU=0`: 31.56 MHz.

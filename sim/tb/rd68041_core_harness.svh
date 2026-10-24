@@ -59,6 +59,13 @@ endfunction
 int cyc = 0;
 always @(posedge clk) cyc <= cyc + 1;
 
+// +vcd=FILE: the core's signals, for debugging (no gtkwave here: a text tool).
+string vcd_file;
+initial if ($value$plusargs("vcd=%s", vcd_file)) begin
+  $dumpfile(vcd_file);
+  $dumpvars(0, dut.u_core);
+end
+
 task automatic boot(input string image);
   u_mem.load_hex(image);
   u_mem.set_region(0, 32'h0000_0000, 32'h0000_0000, 0, 0, 0, -1, 0);

@@ -10,6 +10,68 @@ synchroniser) are in RD68031's `doc/bugs-found.md`.*
 
 ---
 
+## M13: found by rd-virt, Linux in lockstep with UAE040
+
+Every one of these passed the cosim programs, the vector sweeps and the cputest corpus;
+Linux's boot reached each. `doc/m13-mismatches.md` has the step each appeared at.
+
+1. **A write left the data unit's queue with the data of the write behind it.** When
+   the queue's oldest write finished in the clock a new one joined, with one write in
+   the queue, the new write's address went into the slot and the old second slot's data
+   stayed: `rd68041_dmu` moved the queue up with constant-index nonblocking assignments
+   and added the new write with a variable-index one, and Verilator 5.032 let the
+   constant-index one win for the data (not the address) -- against the language, which
+   iverilog follows. `MOVEM.L D0-D1/A0-A1,-(SP)` in the kernel's early console pushed
+   D0's value where A1's belonged (step 278). Each slot is assigned once a clock now;
+   the trap is in `doc/coding-standard.md`. Caught by the lockstep's first run; every
+   iverilog bench had passed it.
+2. **A memory-to-memory MOVE with an indexed destination took the next instruction's
+   words.** Its second micro-operation read the destination's extension word at w[0],
+   as it should, but computed how many words to pop from the word after the source's,
+   which by then was past the destination's: when the next instruction's first word
+   had bit 8 set (a full-format extension word, to `ea_len`) and was already in the
+   queue, the move popped it and the next two, and the instruction after the move never
+   ran. `MOVE.L 8(A3),4(A0,D0.L*8)` in `setup_arch` (step 287,455). `m13_move_mm`, in
+   `make cosim`; the cputest corpus runs one instruction at a time, with nothing after
+   it in the queue.
+3. **`ADDA.L (A7)+,A7` added to A7 as it was before the increment.** An instruction
+   whose source is (An)+ or -(An) and whose other operand is that An used the register
+   file's value, not the one its own update leaves (PRM 2.2.4-2.2.5: the address is
+   used, then moved). Linux's `RESTORE_ALL` pops its stack adjustment this way (step
+   5,313,808). EX now reads a register its own micro-operation updates as updated
+   unless it stores it (MOVE An,(An)+ stores An as it was). `m13_an_upd`, in `make
+   cosim`; the cputest corpus has no such pairs.
+4. **FMOVEM, FMOVE and the control registers read out left the FPU in its null state.**
+   Only an operation or a write into the FPU moved it to idle, so FSAVE stacked a null
+   frame after BusyBox's `setjmp` (`FMOVEM.X FP0-FP7,60(A0)`) where UM 9.8 says idle:
+   "until the first nonconditional floating-point instruction is executed" (step
+   69,788,038, the first `copy_thread` after it). `m13_fsave_null`, in `make cosim`.
+5. **The unimplemented-instruction frame always had E1 set.** M11 followed UM Table
+   9-16 ("E1 -- Always 1"); the field's definition says E1 there means a packed source,
+   and the FPSP reads it so (`get_op.S`) -- with E1 set every FSIN, FATAN and FETOX was
+   emulated on its operand unpacked as decimal (step 77,647,625, awk's `atan2`). E1 is
+   the packed flag now; `doc/manual-contradictions.md` 9; `core_fpu_tb` checks it.
+6. **A read through one mapping of a page passed a queued write through another.** A
+   read waits for a queued write it overlaps, and the test compared logical addresses:
+   two mappings of one physical page did not match, and the read returned memory's
+   value under the write. `virt_mmu`, a write through `$40000010` read back at
+   `$300010`, the same physical long word. The test is on the page offset now, which
+   every mapping of a byte shares, in the data unit and for the writes still in EX or
+   W; `make virt-bare`.
+7. **A memory indirect operand's pointer was read in MOVES's space, and sign-extended
+   as MOVES's operand.** M12's fix (1 below) cleared the prelude's FP kind and
+   exception; it still kept the instruction's other modifiers -- MOVES's alternate
+   space and its sign extension of a word going to An, a lock, a bit field's sizing,
+   an SR write. The MC68LC040 guest's FPU emulation reads a user instruction's word
+   with `MOVES.W ([$32,SP],0),A1`, its pointer on the kernel stack: the core read the
+   pointer in user data space and took an access error; with that fixed, it
+   sign-extended the pointer's low word, `$80001AA8` becoming `$00001AA8`, and took
+   another (step 69,713,638 of the MC68LC040's boot; UAE040 read the user word). The
+   prelude is a plain long-word read now. `virt_mmu` has both, the pointer on a
+   supervisor-only page and its bit 15 set (`make virt-bare`); `m13_ind_moves` (`make
+   cosim`) the values of MOVES, TAS, CAS and the bit fields with memory indirect
+   operands.
+
 ## M12: found while building the MC68LC040
 
 1. **A memory indirect mode's prelude carried the instruction's first micro-operation.**

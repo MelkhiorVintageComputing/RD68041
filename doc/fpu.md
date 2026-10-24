@@ -165,7 +165,7 @@ format word (the FPSP's "the last 10 words of a busy frame are the same").
 |---|---|---|
 | null | $00000000 | after reset, or FRESTORE of a null frame, until the first FP instruction that is not a conditional (UM 9.8) |
 | idle | $41000000 | nothing pending |
-| unimplemented | $4130 and 12 long words | after an unimplemented instruction (E1 and U set), or an E1 arithmetic exception (E1, U clear; the FPSP's `x_snan.S` expands it to a busy frame) |
+| unimplemented | $4130 and 12 long words | after an unimplemented instruction (U set; E1 for a packed source only, `doc/manual-contradictions.md` 9 -- M13), or an E1 arithmetic exception (E1, U clear; the FPSP's `x_snan.S` expands it to a busy frame) |
 | busy | $4160 and 24 long words | after an unsupported data type, an E3 arithmetic exception or an FMOVE out's, or FRESTORE of one |
 
 FSAVE waits for the FPU, writes the frame and leaves the FPU idle (the pending exception
@@ -182,7 +182,7 @@ The fields the hardware writes, per exception (UM Table 9-16):
 
 | Exception | Fields |
 |---|---|
-| unimplemented instruction | CMDREG1B; ETEMP the source, converted (a packed one's 96 bits as they are, FPTEMP 31-0 and ETEMP); STAG; FPTEMP the destination register; DTAG; E1; U |
+| unimplemented instruction | CMDREG1B; ETEMP the source, converted (a packed one's 96 bits as they are, FPTEMP 31-0 and ETEMP); STAG; FPTEMP the destination register; DTAG; E1 if the source is packed; U |
 | unsupported type, opclass 000/010 | CMDREG1B; ETEMP the source (a denormalised one as stored, a single or double in Figure 9-9's form); STAG 100 or 101; FPTEMP, DTAG; E1 |
 | unsupported type, opclass 011 | CMDREG1B; ETEMP the source register; STAG; E1; T |
 | SNAN, OPERR, DZ, opclass 000/010 | CMDREG1B; ETEMP, STAG; FPTEMP, DTAG; E1 |

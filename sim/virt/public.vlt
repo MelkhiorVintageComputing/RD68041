@@ -1,0 +1,48 @@
+`verilator_config
+
+// SPDX-License-Identifier: CERN-OHL-S-2.0
+// Copyright 2026 Romain Dolbeau
+// Source location: https://github.com/MelkhiorVintageComputing/RD68041
+
+// For rd-virt only (sim/virt/cpu_rtl.cpp): the programmer's model the
+// lockstep compares at every boundary, the signals that say where a boundary
+// is (the testbenches' `retire`), and the data unit's write port, whose
+// writes the lockstep compares. Read-only: nothing in the RTL depends on this
+// file.
+public_flat_rd -module "rd68041_core" -var "retire"
+public_flat_rd -module "rd68041_core" -var "retire_npc"
+public_flat_rd -module "rd68041_core" -var "halted"
+public_flat_rd -module "rd68041_core" -var "xs"
+public_flat_rd -module "rd68041_core" -var "x_vec"
+public_flat_rd -module "rd68041_core" -var "x_npc"
+public_flat_rd -module "rd68041_core" -var "sr"
+public_flat_rd -module "rd68041_core" -var "usp"
+public_flat_rd -module "rd68041_core" -var "isp"
+public_flat_rd -module "rd68041_core" -var "msp"
+public_flat_rd -module "rd68041_core" -var "vbr"
+public_flat_rd -module "rd68041_core" -var "sfc"
+public_flat_rd -module "rd68041_core" -var "dfc"
+public_flat_rd -module "rd68041_core" -var "cacr"
+public_flat_rd -module "rd68041_core" -var "tc"
+public_flat_rd -module "rd68041_core" -var "urp"
+public_flat_rd -module "rd68041_core" -var "srp"
+public_flat_rd -module "rd68041_core" -var "itt0"
+public_flat_rd -module "rd68041_core" -var "itt1"
+public_flat_rd -module "rd68041_core" -var "dtt0"
+public_flat_rd -module "rd68041_core" -var "dtt1"
+public_flat_rd -module "rd68041_core" -var "mmusr"
+public_flat_rd -module "rd68041_regfile" -var "r"
+public_flat_rd -module "rd68041_dmu" -var "st_ready"
+public_flat_rd -module "rd68041_dmu" -var "st_addr"
+public_flat_rd -module "rd68041_dmu" -var "st_sz"
+public_flat_rd -module "rd68041_dmu" -var "st_data"
+public_flat_rd -module "rd68041_dmu" -var "st_m16"
+public_flat_rd -module "rd68041_dmu" -var "mb"
+public_flat_rd -module "rd68041_fpu" -var "fpr"
+public_flat_rd -module "rd68041_fpu" -var "fpcr"
+public_flat_rd -module "rd68041_fpu" -var "fpsr"
+public_flat_rd -module "rd68041_fpu" -var "fpiar"
+public_flat_rd -module "rd68041_core" -var "rs"
+public_flat_rd -module "rd68041_core" -var "w_end"
+public_flat_rd -module "rd68041_core" -var "w_int"
+public_flat_rd -module "rd68041_core" -var "w_npc"

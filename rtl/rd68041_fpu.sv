@@ -569,9 +569,20 @@ module rd68041_fpu
           rd68041_fpu_pkg::FK_OUT: begin
             // FMOVE out's exception, taken after its last long word: an E1
             // one, saved in the unimplemented-instruction frame's size (below).
+            // Without one it is a nonconditional instruction executed: null
+            // to idle (UM 9.8), as for every one but FSAVE and FRESTORE.
             if (x_last && p_pend) begin
               rec_v <= 1'b1; rc_st_we <= 1'b1; rc_st_v <= rd68041_fpu_pkg::ST_UNIM; rc_pend_v <= 1'b1;
+            end else begin
+              rec_v <= 1'b1; rc_null <= 1'b1;
             end
+          end
+          // FMOVEM out, and the control registers read: null to idle too
+          // (UM 9.8: "until the first nonconditional floating-point
+          // instruction is executed"; doc/bugs-found.md M13).
+          rd68041_fpu_pkg::FK_RGR,
+          rd68041_fpu_pkg::FK_CRR: begin
+            rec_v <= 1'b1; rc_null <= 1'b1;
           end
           rd68041_fpu_pkg::FK_REND: begin
             if (!rs_go) begin
@@ -609,7 +620,10 @@ module rd68041_fpu
                 fr[10] <= x_pc;                                         // FPIARCU
                 fr[2]  <= 32'h0;                                        // CU_SAVEPC
                 fr[14] <= {8'h0, 3'b000, !op_unim, 4'h0, 16'h0};        // NMCEXC unsup
-                fr[18] <= {5'h0, 1'b1, 2'b00, 2'b00, op_unim, out_uns, 4'h0, 16'h0};
+                // E1: in the unimplemented-instruction frame, a packed source
+                // (UM 9.8's E1, as the FPSP's get_op reads it; not Table
+                // 9-16's "always 1": doc/manual-contradictions.md 9).
+                fr[18] <= {5'h0, !op_unim || pk_src, 2'b00, 2'b00, op_unim, out_uns, 4'h0, 16'h0};
                 if (out_uns) begin
                   fr[15] <= {tag_of(outn), 5'h0, 24'h0};
                   fr[22] <= {fpr[dstr][79:64], 16'h0};

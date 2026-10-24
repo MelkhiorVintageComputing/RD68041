@@ -9,7 +9,8 @@
 //   UM 9.8          the null and idle frames; FRESTORE of a null frame
 //   UM 9.2.1, 9.2.2 FP0-FP7 NaN and FPCR zero after it
 //   UM 9.6.1        an unimplemented instruction: vector 11, format $2, the
-//                   unimplemented frame, E1 and U set, CMDREG1B
+//                   unimplemented frame, U set, E1 clear (a register source:
+//                   doc/manual-contradictions.md 9), CMDREG1B
 //   UM 9.6.2        an unsupported data type in opclass 010: vector 55, format
 //                   $0, the PC the next instruction's; the busy frame, E1,
 //                   CMDREG1B, ETEMP, STAG, NMCEXC (Table 9-16)
@@ -19,7 +20,7 @@
 //                   CU_SAVEPC $FE resumes CMDREG1B on ETEMP and FPTEMP
 //                   (res_func.S), the FPU idle after
 //
-// UAE040 stacks format $3 for (e) and sets neither E1 nor U for (d), and its
+// UAE040 stacks format $3 for (e) and sets no U for (d), and its
 // FSAVE frames are its own (doc/oracles.md): this bench is the check.
 
 `timescale 1ns / 1ps
@@ -85,7 +86,7 @@ module core_fpu_tb;
     f = FRM;
     check("(d) the frame's format long word", rdl(f), 32'h4130_0000);
     check("(d) CMDREG1B", rdl(f + 4*4), 32'h008E_0000);
-    check("(d) E1, E3, U", rdl(f + 4*6) & 32'h0620_0000, 32'h0420_0000);
+    check("(d) E1, E3, U", rdl(f + 4*6) & 32'h0620_0000, 32'h0020_0000);
     // (e) FADD.X of a denormal: the busy frame.
     exc(1, "(e) FADD.X of a denormal", 16'h00DC, a_after, a_fadd);
     f = FRM + 32'h70;

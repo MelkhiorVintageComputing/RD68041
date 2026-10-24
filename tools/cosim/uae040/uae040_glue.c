@@ -443,9 +443,21 @@ static inline uint8_t *map_ptr(uint32_t a, int size)
 	return NULL;
 }
 
+/* M13: devices behind the RAM (uae040_set_ext_bus). */
+static uae040_ext_read ext_rd;
+static uae040_ext_write ext_wr;
+static void *ext_user;
+
 static uint32_t phys_read(uint32_t a, int size)
 {
 	uint8_t *p = map_ptr(a, size);
+	if (!p && ext_rd) {
+		uint32_t v = 0;
+		if (!ext_rd(a, size, &v, ext_user)) {
+			bus_report(a, size, 0, v, 0);
+			return v;
+		}
+	}
 	if (!p) {
 		bool ins = bus_ifetch != 0;
 		bus_report(a, size, 0, 0, 1);
@@ -463,6 +475,10 @@ static uint32_t phys_read(uint32_t a, int size)
 static void phys_write(uint32_t a, int size, uint32_t v)
 {
 	uint8_t *p = map_ptr(a, size);
+	if (!p && ext_wr && !ext_wr(a, size, v, ext_user)) {
+		bus_report(a, size, 1, v, 0);
+		return;
+	}
 	if (!p) {
 		bus_report(a, size, 1, v, 1);
 		clear_flags();
@@ -691,6 +707,55 @@ void uae040_set_hooks(uae040_insn_hook ih, uae040_bus_hook bh, void *user)
 }
 
 void uae040_set_op_hook(uae040_op_hook oh) { op_hook = oh; }
+
+void uae040_set_ext_bus(uae040_ext_read rd, uae040_ext_write wr, void *user)
+{
+	ext_rd = rd;
+	ext_wr = wr;
+	ext_user = user;
+}
+
+void uae040_interrupt(int level)
+{
+	op_flush();
+	clear_flags();
+	Exception(24 + level);
+}
+
+int uae040_stopped(void) { return regs.stopped != 0; }
+
+void uae040_set_regs(const uae040_state *s)
+{
+	SET_XFLG((s->sr >> 4) & 1);
+	SET_NFLG((s->sr >> 3) & 1);
+	SET_ZFLG((s->sr >> 2) & 1);
+	SET_VFLG((s->sr >> 1) & 1);
+	SET_CFLG(s->sr & 1);
+	for (int i = 0; i < 8; i++)
+		m68k_dreg(regs, i) = s->d[i];
+	for (int i = 0; i < 7; i++)
+		m68k_areg(regs, i) = s->a[i];
+	if (regs.s) {
+		regs.usp = s->usp;
+		m68k_areg(regs, 7) = regs.m ? s->msp : s->isp;
+		if (regs.m) regs.isp = s->isp; else regs.msp = s->msp;
+	} else {
+		m68k_areg(regs, 7) = s->usp;
+		regs.isp = s->isp;
+		regs.msp = s->msp;
+	}
+}
+uint16_t uae040_last_opcode(void) { return regs.opcode; }
+
+void uae040_poke(uint32_t addr, int size, uint32_t v)
+{
+	if (size == 4)
+		x_put_long(addr, v);
+	else if (size == 2)
+		x_put_word(addr, v & 0xffff);
+	else
+		x_put_byte(addr, v & 0xff);
+}
 void uae040_set_exc_hook(uae040_exc_hook eh) { exc_hook = eh; }
 
 void uae040_get_state(uae040_state *s)

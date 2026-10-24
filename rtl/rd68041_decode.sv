@@ -22,6 +22,10 @@
 // prelude reads the pointer into T3, and the instruction then addresses from
 // T3. The prelude comes first, before the instruction's own micro-operations,
 // or -- for MOVE's destination -- before the micro-operation that needs it.
+// It is a plain read of the program's data space whatever the instruction
+// is: MOVES's space (SFC, DFC) and its sign extension to An, a lock, a bit
+// field's sizing, an SR write or an exception are the operand's, not the
+// pointer's (DEC_IND; doc/bugs-found.md M12, M13).
 //
 //   MOVE <mem>,<mem>   load the source into T0; store T0 at the destination
 //   PEA <ea>           T0 = <ea>; push T0
@@ -437,6 +441,22 @@ module rd68041_decode #(
     u.xnext  = 1'b0; \
     u.fpk    = rd68041_fpu_pkg::FK_NONE; \
     u.fchk   = 1'b0; \
+    u.lk     = 1'b0; \
+    u.lke    = 1'b0; \
+    u.alt    = 1'b0; \
+    u.cx     = 1'b0; \
+    u.bfa    = 2'd0; \
+    u.ser    = 1'b0; \
+    u.srw    = 1'b0; \
+    u.stp    = 1'b0; \
+    u.rsto   = 1'b0; \
+    u.ack    = 1'b0; \
+    u.cof    = 1'b0; \
+    u.cmo    = 1'b0; \
+    u.m16    = 1'b0; \
+    u.crr    = 1'b0; \
+    u.a_sxw  = 1'b0; \
+    u.b_sxw  = 1'b0; \
   end
 `define DEC_SRC(SZ, TO_A) begin \
     if (sm <= 3'd1) begin \
@@ -769,12 +789,16 @@ module rd68041_decode #(
         uses_ea = 1'b0;                          // MOVE handles its own preludes
         sz = (op[13:12] == 2'b01) ? rd68041_pkg::SZ_B :
              (op[13:12] == 2'b11) ? rd68041_pkg::SZ_W : rd68041_pkg::SZ_L;
+        mm    = (sm >= 3'd2) && !is_imm(sm, sr) && (dm >= 3'd2);
         n_src = ea_len(sm, sr, sz, ew(w, 0));
-        n_dst = ea_len(dm, dr, sz, ew(w, int'(n_src)));
+        // After the first micro-operation of a memory-to-memory move the
+        // source's words are gone and the destination's are at w[0] (kd): its
+        // length is read there, not past them -- from the next instruction
+        // (doc/bugs-found.md M13).
+        n_dst = ea_len(dm, dr, sz, ew(w, (mm && seq != 5'd0) ? 0 : int'(n_src)));
         need  = n_src + n_dst;
         u.sz  = sz;
         u.len = 5'(2 + 2*need);
-        mm    = (sm >= 3'd2) && !is_imm(sm, sr) && (dm >= 3'd2);
         if (!ok_mode(sm, sr) || (sm == 3'd1 && sz == rd68041_pkg::SZ_B)) bad = 1'b1;
         if (dm >= 3'd2 && !dalt(dm, dr)) bad = 1'b1;
         if (dm == 3'd1 && sz == rd68041_pkg::SZ_B) bad = 1'b1;

@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: CERN-OHL-S-2.0
+# Copyright 2026 Romain Dolbeau
+# Source location: https://github.com/MelkhiorVintageComputing/RD68041
+#
+# `make fpsp` (M13; doc/virt.md, doc/fpu.md): the M68040FPSP, which Linux links
+# into the kernel for the MC68040, run on the core under rd-virt. The awk lines
+# use the instructions the MC68040 does not implement (UM Table 9-10) -- FSIN,
+# FCOS, FATAN, FETOX, FLOGN, FINTRZ, FMOD -- each an unimplemented-instruction
+# exception the FPSP emulates from the frame the core saves, and FSQRT, which
+# the core does itself. The expected digits are the host's libm's (ten
+# decimals, well inside the FPSP's accuracy). Escapes: \\n is a backslash and
+# an n for awk, \n a newline typed.
+expect awk float: 3.141593
+expect rd-virt: shell
+expect # 
+send awk 'BEGIN{printf "t1 %.10f %.10f %.10f\\n", sin(0.5), cos(0.5), sin(-2.75)}'\n
+expect t1 0.4794255386 0.8775825619 -0.3816609921
+send awk 'BEGIN{printf "t2 %.10f %.10f %.10f\\n", atan2(1,2), atan2(-3,0.25), atan2(0,-1)}'\n
+expect t2 0.4636476090 -1.4876550949 3.1415926536
+send awk 'BEGIN{printf "t3 %.10f %.10f %.10f\\n", exp(1.5), log(7), exp(-20)*1e9}'\n
+expect t3 4.4816890703 1.9459101491 2.0611536224
+send awk 'BEGIN{printf "t4 %d %d %.10f\\n", int(7.9), int(-7.9), sqrt(2)}'\n
+expect t4 7 -7 1.4142135624
+send awk 'BEGIN{printf "t5 %.10f %.10f\\n", 17.5 % 4, -17.5 % 4}'\n
+expect t5 1.5000000000 -1.5000000000
+send echo done\n
+expect done
+send poweroff -f\n
