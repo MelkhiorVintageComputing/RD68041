@@ -1,0 +1,11 @@
+# NetBSD/virt68k 11.0 (the first release with the port), for QEMU's virt machine
+# (M14, part 3; doc/qvirt.md): the kernel, the install ramdisk it boots with as
+# its initrd, and the sets installed on the disk. Fetched into build/netbsd/dl/
+# and checked against the hash here, as Inputs/sw/MANIFEST; the release's own
+# SHA512 lists agreed when this was recorded. One line each:
+#   <sha256>  <file name>  <URL>
+6dc6935f4d862abfb9bafea6d4c7ae00e43e6162a7377346cac812203407f368  netbsd-GENERIC.gz  https://cdn.netbsd.org/pub/NetBSD/NetBSD-11.0/virt68k/binary/kernel/netbsd-GENERIC.gz
+860ffb96660283400185f3c31240dac782d0a7e9f616a369cfeb1e02cfb72010  inst-ramdisk.fs  https://cdn.netbsd.org/pub/NetBSD/NetBSD-11.0/virt68k/installation/ramdisks/inst-ramdisk.fs
+c71e0158bb84f8228a7c97bc30a09d890c0033fbbc0f1299a5d9000b82fd62e2  base.tgz  https://cdn.netbsd.org/pub/NetBSD/NetBSD-11.0/virt68k/binary/sets/base.tgz
+672784b77c54c7cefdb11aac18bee17b13a19b0ceaea0adc0fd1e27b083b09c1  etc.tgz  https://cdn.netbsd.org/pub/NetBSD/NetBSD-11.0/virt68k/binary/sets/etc.tgz
+c600319ffebfa248ed3b53b8cfb676d481ce9b5d309ac5dd8da88ac163cdd623  kern-GENERIC.tgz  https://cdn.netbsd.org/pub/NetBSD/NetBSD-11.0/virt68k/binary/sets/kern-GENERIC.tgz

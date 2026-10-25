@@ -46,7 +46,7 @@ At the start, the repo holds only `Inputs/doc/MC68030_Doc_More_Readable` (with `
 
 **Hard rules, word for word from RD68031.** Inputs are immutable, no initialisation outside reset (`make audit`), split `_i/_o/_oe` pins, portable SV for all six tools, and the host's memory limits. The oracle ban now covers WinUAE/Hatari, MAME, QEMU, and the Linux/NetBSD trees except the FPSP interface exception above. CLAUDE.md gets a documentation map for `MC68040UM_split/` (§2 IU, §3 MMU, §4 caches, §5 signals, §7 bus, §8 exceptions, §9 FPU, §10 timings, App. A LC040), and PRM with the MC68040 column of `instructions-by-cpu.csv`.
 
-**Submodules under `Inputs/ref/`, pinned:** winuae, hatari, mame, qemu (source, built into `build/`). Under `Inputs/third_party/`: berkeley softfloat-3 and testfloat-3, as in RD68884. Software goes in `Inputs/sw/MANIFEST*`: the Linux tarball, busybox, NetBSD/mac68k sets. The Quadra ROMs are git-ignored and hash-checked, as `PROMS.sha256` is.
+**Submodules under `Inputs/ref/`, pinned:** winuae, hatari, mame, qemu (source, built into `build/`). Under `Inputs/third_party/`: berkeley softfloat-3 and testfloat-3, as in RD68884. Software goes in `Inputs/sw/MANIFEST*`: the Linux tarball, busybox; NetBSD/virt68k's kernel, install ramdisk and sets (`MANIFEST-netbsd`, M14). The Quadra ROMs are git-ignored and hash-checked, as `PROMS.sha256` is.
 
 **M0 spikes:**
 1. A UAE040 harness (`tools/cosim/uae040/`, from `uae030_glue.c` with `cpu_model`/`mmu_model`/`fpu_model` = 68040). New hooks on `cpummu.c`, the 040 data cache and `fpp.c`. The trace carries TC, URP, SRP, ITT0/1, DTT0/1, MMUSR, CACR and the FP registers.
@@ -109,7 +109,8 @@ At the start, the repo holds only `Inputs/doc/MC68030_Doc_More_Readable` (with `
 | 1d | **TestFloat/SoftFloat** | `make testfloat` on a standalone `fpu_tb` (extF80 with rounding precision) |
 | 2 | slave models from UM §7 + the QuadraFPGA witness; random alternate-master snoop bench with an architectural memory checker | `bus_*_tb`, `snoop_tb` (replaces AP68030, as no second 040 RTL exists) |
 | 3 | **rd-virt**: bootinfo CPU/MMU/FPU_68040 (FPU 0 for the LC040), new pin agent, lockstep against UAE040 | `make virt-bare virt-linux(-solo)`; QEMU `virt` validates kernels |
-| 4 | **MAME Quadra**: `rd68041_device` against MAME's m68040 | serial console byte for byte (NetBSD/mac68k, Linux/mac); framebuffer hashes for Mac OS; `quadra` and `quadra-lc` |
+| 4 | **MAME Quadra**: `rd68041_device` against MAME's m68040 | framebuffer hashes for Mac OS; `quadra` and `quadra-lc` |
+| 4b | **rd-qvirt** (from M14): the core as the processor of QEMU's `virt`, unmodified, under qtest | console byte for byte against QEMU's m68040: Linux, NetBSD/virt68k; `qvirt-*`, `netbsd-*` (`doc/qvirt.md`) |
 
 The FPSP (`make fpsp`) runs on the core in rd-virt as Linux's own FPSP, and on bare metal.
 
@@ -131,7 +132,7 @@ The FPSP (`make fpsp`) runs on the core in rd-virt as Linux's own FPSP, and on b
 | M11 | FPU datapath standalone, then integrated: frames, deferred exceptions, FSAVE/FRESTORE | `make testfloat`, cputest with FPU, `core_fpu_tb`, FP cosim programs (see the note below) |
 | M12 | The LC040 build | `make check FPU=0`, format $4 vectors (`make vectors OP=lc040 FPU=0`), `make cosim-lc`, `core_lc040_tb` |
 | M13 | rd-virt lockstep: bare metal, then Linux (FPU=1, and FPU=0 with emulation) | `make virt-bare virt-linux`, `make fpsp`; each also with `FPU=0` (but `fpsp`) and with `VIRT_CACHES=off` |
-| M14 | MAME Quadra: PROM/ROM to the Finder or console; then NetBSD/mac68k and Linux | `make quadra`, `quadra-lc` (phase A, the ROM to the desktop with the stand-in ADB firmware: done; phase B, System 7.6.1 from the user's disk to the Finder, the same pixels as MAME's m68040 and 68LC040: done; NetBSD/mac68k and Linux wait for their media) |
+| M14 | MAME Quadra: PROM/ROM to the Finder; then NetBSD and Linux (decided at M14: on QEMU's virt, not on the Quadra) | `make quadra`, `quadra-lc` (phase A, the ROM to the desktop with the stand-in ADB firmware: done; phase B, System 7.6.1 from the user's disk to the Finder, the same pixels as MAME's m68040 and 68LC040: done); then NetBSD/virt68k and Linux on QEMU's virt with the core as its processor, consoles against QEMU's m68040: `make qvirt-bare qvirt-linux netbsd-qvirt` (section 7 of the plan; `doc/qvirt.md`): done, Linux on both builds and NetBSD multi-user on the MC68040, consoles identical |
 | M15 | Performance and FPGA (Vivado and Quartus), `make cycles` against UM §10 | `doc/implementation.md` |
 
 **M11's gate, as changed at M11.** `vectors OP=fpu` is replaced by the cputest FPU corpus:

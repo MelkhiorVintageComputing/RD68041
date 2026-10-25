@@ -38,12 +38,12 @@ Everything under `Inputs/ref/` exists **only** to be run and compared against:
 
 - `winuae/` and `hatari/` — the WinUAE MC68040 core (MMU, caches, FPU) and its `cputest`;
 - `mame/` — MAME's m68040 and its Macintosh Quadra machines;
-- `qemu/` — QEMU's m68040;
+- `qemu/` — QEMU's m68040, and its `virt` board, whose devices rd-qvirt drives with the core (`doc/qvirt.md`);
 - the Linux and NetBSD trees fetched into `build/` by `Inputs/sw/MANIFEST*`.
 
 You may **not** read them to work out how to write our RTL. Anyone (human or agent)
 writing code in `rtl/` must not open a file in those directories. Harness code in
-`tools/cosim/`, `sim/virt/` and `sim/mame/` is written against the oracles' *interfaces*
+`tools/cosim/`, `sim/virt/`, `sim/qvirt/` and `sim/mame/` is written against the oracles' *interfaces*
 (a CPU core's API, an emulator's device interface), which is what running them needs.
 
 Two exceptions, decided with the user:
@@ -117,6 +117,7 @@ testbenches, the oracle runs) may run up to **4 at a time** in parallel, using a
 | `sim/programs/` | real code, built by the cross-compiler and run on the core |
 | `sim/virt/` | rd-virt, the deterministic lockstep platform (from M13) |
 | `sim/mame/` | the core as a MAME CPU device in a Macintosh Quadra (from M14) |
+| `sim/qvirt/` | rd-qvirt, the core as the processor of QEMU's `virt` machine, driven over qtest (M14) |
 | `scripts/` | Vivado and Quartus synthesis, implementation and timing scripts |
 | `doc/` | plan, pinout, coding standard, oracles, checkpoint, divergence and implementation reports |
 | `Inputs/doc/` | Motorola manuals, split by section, with machine-readable AC specs |

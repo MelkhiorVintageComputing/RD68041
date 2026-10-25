@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: CERN-OHL-S-2.0
+# Copyright 2026 Romain Dolbeau
+# Source location: https://github.com/MelkhiorVintageComputing/RD68041
+#
+# NetBSD/virt68k 11.0 booted from build/netbsd/netbsd.img to multi-user, root
+# logged in, a command set typed, and powered off (make netbsd-qemu on QEMU's
+# m68040, make netbsd-qvirt on the core; doc/qvirt.md). GENERIC asks where its
+# root is: ld0a, no dump device.
+expect root device:
+send ld0a\n
+expect dump device
+send none\n
+expect file system
+send \n
+expect init path
+send \n
+expect login:
+send root\n
+expect #
+send echo sum $((6*7)) product $((123*457))\n
+expect sum 42 product 56211
+expect #
+send uname -s -r -m -p\n
+expect NetBSD 11.0 virt68k m68k
+expect #
+send sysctl hw.model hw.ncpu\n
+expect hw.ncpu
+expect #
+send dmesg | grep -c ld0\n
+expect #
+send awk 'BEGIN{printf "fp %.6f %.5f\\n",atan2(1,1)*4,exp(1)*log(10)}'\n
+expect fp 3.14
+expect #
+send seq 1 20000 > /tmp/seq && md5 /tmp/seq && wc -l /tmp/seq\n
+expect 20000 /tmp/seq
+expect #
+send cp /tmp/seq /root/s; sync; cmp /tmp/seq /root/s && echo read-back\n
+expect read-back
+expect #
+send ls -l /netbsd /sbin/init | awk '{print $1, $5, $NF}'\n
+expect /sbin/init
+expect #
+send echo done\n
+expect done
+expect #
+send shutdown -p now\n

@@ -50,7 +50,7 @@
 #include "verilated_vcd_c.h"
 #endif
 
-#include "machine.h"
+#include "bus_if.h"
 
 #ifndef RDVIRT_FPU
 #define RDVIRT_FPU 1
@@ -88,11 +88,29 @@ struct RtlModel {
   // What the last step saw.
   int iack = 0;
   uint64_t step = 0;
+  bool booted = false;    // the reset exception is over (reset_pc's vectors)
 
-  Machine *m;
+  // The DMA master (bus_if.h): the bus taken from the core around a device
+  // command, snooped transfers of what the device reads and writes.
+  bool grant = true;                        // BG to the core
+  enum MState { MS_IDLE, MS_WAIT, MS_PRE, MS_POST, MS_END } ms = MS_IDLE;
+  struct MX { uint32_t a; int siz; bool write; int sc; };  // siz as SIZ1-0
+  std::deque<MX> mq;
+  bool mx_on = false;
+  MX mx{};
+  int mx_phase = 0, mx_beat = 0;
+  bool m_own = false, m_ts = false, m_bb = false;
+  // The core's write the retry held off, made by the master, and answered
+  // when the core runs it again.
+  bool held_done = false;
+  uint32_t held_a = 0, held_v = 0;
+  int held_n = 0;
+  uint64_t dma_cmds = 0, dma_xfers = 0, dma_sourced = 0, wait_clocks = 0;
+
+  BusIf *m;
   RtlOptions o;
   std::vector<OpWrite> *writes = nullptr;
-  RtlModel(Machine *mm, const RtlOptions &oo) : m(mm), o(oo) {
+  RtlModel(BusIf *mm, const RtlOptions &oo) : m(mm), o(oo) {
     top = new Vrd68041_top{&ctx};
   }
   ~RtlModel() {
@@ -113,7 +131,7 @@ struct RtlModel {
     return 'D';
   }
 
-  void log(uint32_t a, int size, bool write, uint32_t data, bool berr) {
+  void log(uint32_t a, int size, bool write, uint32_t data, bool berr, char k = 0) {
     BusRec r;
     r.step = step;
     r.addr = a;
@@ -122,11 +140,12 @@ struct RtlModel {
     r.write = write;
     r.tm = uint8_t(tm);
     r.berr = berr;
-    r.kind = kind();
+    r.kind = k ? k : kind();
     m->log(r);
   }
 
   uint32_t ram_long(uint32_t a) const {
+    if (o.reset_pc >= 0 && !booted && a < 8) return uint32_t(a & 4 ? o.reset_pc : o.reset_ssp);
     if (a >= m->ram_size) return 0;
     const uint8_t *p = m->ram + (a & ~3u);
     return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3];
@@ -155,14 +174,34 @@ struct RtlModel {
       return;
     }
     switch (m->classify(addr)) {
-      case Machine::Region::Ram: tgt = RAM; wait = o.ram_waits; break;
-      case Machine::Region::Io: tgt = IO; wait = o.io_waits; break;
+      case BusIf::Region::Ram: tgt = RAM; wait = o.ram_waits; break;
+      case BusIf::Region::Io: tgt = IO; wait = o.io_waits; break;
       default: tgt = HOLE; wait = 0;
     }
   }
 
+  // A single write's bytes, right-justified, as the device sees them.
+  void write_value(uint32_t d, uint32_t &v, int &n) const {
+    unsigned off = addr & 3u;
+    n = bytes();
+    if (n > int(4 - off)) n = 4 - off;
+    v = 0;
+    for (int j = 0; j < n; j++) v = (v << 8) | uint8_t(d >> (8 * (3 - (off + j))));
+  }
+
   void do_write() {
     uint32_t d = top->d_o;
+    if (!line && tgt == IO && held_done) {
+      uint32_t v;
+      int n;
+      write_value(d, v, n);
+      if (addr == held_a && n == held_n && v == held_v) {
+        // the write the master made for it, before the DMA it started
+        held_done = false;
+        log(addr, n, true, v, false);
+        return;
+      }
+    }
     if (line) {
       uint32_t a = beat_addr() & ~3u;
       if (tgt == RAM && a + 4 <= m->ram_size)
@@ -187,8 +226,97 @@ struct RtlModel {
     log(addr, n, true, v, false);
   }
 
+  // The DMA master's plans: what the device reads, as snooped line reads
+  // (SC 01: a dirty line is sourced, UM 7.9.3, and memory takes the data, as
+  // UM 4.5 has a memory controller do); what it wrote, as snooped writes of
+  // the data now in RAM -- whole lines with SC 10 (the line replaced, so
+  // invalidated), the rest as long words and bytes with SC 01, sunk into a
+  // dirty line or else invalidating it (UM 4.4.4, Table 4-4; core_snoop_tb's
+  // rules).
+  void plan_reads(const std::vector<BusIf::Dma> &r) {
+    for (const BusIf::Dma &x : r)
+      for (uint32_t a = x.a & ~15u; a < x.a + x.n && a + 16 <= m->ram_size; a += 16)
+        mq.push_back({a, 3, false, 1});
+  }
+  void plan_writes(const std::vector<BusIf::Dma> &r) {
+    for (const BusIf::Dma &x : r) {
+      uint32_t a = x.a, e = x.a + x.n;
+      while (a < e && a < m->ram_size) {
+        if ((a & 15) == 0 && a + 16 <= e) { mq.push_back({a, 3, true, 2}); a += 16; }
+        else if ((a & 3) == 0 && a + 4 <= e) { mq.push_back({a, 0, true, 1}); a += 4; }
+        else { mq.push_back({a, 1, true, 1}); a += 1; }
+      }
+    }
+  }
+  uint32_t mx_addr() const {
+    return mx.siz == 3 ? (mx.a & ~15u) | ((((mx.a >> 2) + mx_beat) & 3u) << 2) : mx.a;
+  }
+
+  // The master's rising edge: one transfer at a time (rd68041_altmaster's
+  // protocol, UM 7.4) -- TS for a clock with the address, SIZ, TT normal, R/W
+  // and SC held to the end, the write data from the clock after -- answered
+  // by memory once the snooper negates MI, or by the core when it intervenes.
+  void master_edge() {
+    bool core_ta = top->ta_oe && !top->ta_n_o;
+    bool nta = false, ndoe = false;
+    uint32_t nd = 0;
+    if (mx_on && mx_phase == 2 && (ta || core_ta)) {
+      uint32_t ba = mx_addr() & ~3u;
+      if (!mx.write && core_ta) {
+        uint32_t d = top->d_o;
+        for (int j = 0; j < 4; j++) m->ram[ba + j] = uint8_t(d >> (24 - 8 * j));
+        dma_sourced++;
+      }
+      log(ba, mx.siz == 1 ? 1 : 4, mx.write, ram_long(ba), false, 'S');
+      mx_beat++;
+      if (mx.siz != 3 || mx_beat == 4) { mx_on = false; mx_phase = 3; }
+    }
+    if (mx_on && mx_phase == 1) mx_phase = 2;
+    if (mx_on && mx_phase == 0) mx_phase = 1;
+    if (!mx_on) {
+      if (mx_phase == 3) {
+        mx_phase = 4;                      // an idle clock between transfers
+      } else if (!mq.empty()) {
+        mx = mq.front();
+        mq.pop_front();
+        mx_on = true;
+        mx_phase = 0;
+        mx_beat = 0;
+        dma_xfers++;
+      } else if (ms == MS_PRE) {
+        std::vector<BusIf::Dma> r = m->dma_reads();
+        if (!r.empty()) {
+          plan_reads(r);
+        } else {
+          m->io_write(held_a, held_n, held_v);   // the command, and its DMA
+          held_done = true;
+          plan_writes(m->dma_writes());
+          ms = MS_POST;
+        }
+      } else if (ms == MS_POST) {
+        ms = MS_END;                       // BB negated for a clock, then released
+        m_bb = false;
+      } else if (ms == MS_END) {
+        m_own = false;
+        grant = true;
+        ms = MS_IDLE;
+        top->ipl_n_i = ~m->ipl() & 7;
+      }
+    }
+    m_ts = mx_on && mx_phase == 1;
+    if (mx_on && mx_phase == 2) {
+      if (mx.write) { nd = ram_long(mx_addr()); ndoe = true; }
+      if (top->mi_n_o) {
+        nta = true;                        // memory answers this beat
+        if (!mx.write) { nd = ram_long(mx_addr()); ndoe = true; }
+      }
+    }
+    ta = nta; tea = false; tbi = false; tci = false; avec = false; dout = nd; doe = ndoe;
+  }
+
   // The agent's rising edge, on the pins as they are before it.
   void posedge() {
+    if (ms == MS_PRE || ms == MS_POST || ms == MS_END) { master_edge(); return; }
     bool acked = ta || tea;
     if (busy && ta && !tea && !rd && (tgt == RAM || tgt == IO)) do_write();
     bool nta = false, ntea = false, ntbi = false, ntci = false, navec = false, ndoe = false;
@@ -236,11 +364,39 @@ struct RtlModel {
             uint32_t a = (line ? beat_addr() : addr) & ~3u;
             if (m->io_read(a, 4, nd)) { nta = false; ntea = true; nd = 0; }
             else { ndoe = true; log(a, 4, false, nd, false); }
+          } else if (!line) {
+            // A command that starts DMA: held off with a retry (TA with TEA,
+            // UM 7.4.6) and the bus taken; the master makes it (master_edge).
+            uint32_t v;
+            int n;
+            write_value(top->d_o, v, n);
+            bool again = held_done && addr == held_a && n == held_n && v == held_v;
+            if (!again && m->dma_hold(addr, n, v)) {
+              ntea = true;
+              held_a = addr; held_n = n; held_v = v;
+              grant = false;
+              ms = MS_WAIT;
+              wait_clocks = 0;
+              dma_cmds++;
+            }
           }
           break;
       }
     }
     ta = nta; tea = ntea; tbi = ntbi; tci = ntci; avec = navec; dout = nd; doe = ndoe;
+    // The core leaves the bus once it has seen the retry and lost BG.
+    if (ms == MS_WAIT) {
+      if (!busy && !nta && !ntea && !top->bb_oe && !top->tip_oe && !top->ts_oe) {
+        ms = MS_PRE;
+        m_own = true;
+        m_bb = true;
+        mx_on = false;
+        mx_phase = 4;
+        plan_reads(m->dma_reads());
+      } else if (++wait_clocks == 1000000) {
+        fprintf(stderr, "rtl: the core has not left the bus in a million clocks after a DMA retry\n");
+      }
+    }
   }
 
   void drive() {
@@ -250,12 +406,24 @@ struct RtlModel {
     top->tci_n_i = !tci;
     top->avec_n_i = !avec;
     top->d_i = top->d_oe ? top->d_o : (doe ? dout : 0);
-    top->ts_n_i = top->ts_oe ? top->ts_n_o : 1;
-    top->bb_n_i = top->bb_oe ? top->bb_n_o : 1;
-    top->a_i = top->a_o;
-    top->tt_i = top->tt_o;
-    top->rw_i = top->rw_o;
-    top->siz_i = top->siz_o;
+    if (m_own) {
+      top->ts_n_i = !m_ts;
+      top->bb_n_i = !m_bb;
+      top->a_i = mx.a;
+      top->tt_i = 0;
+      top->rw_i = !mx.write;
+      top->siz_i = mx.siz;
+      top->sc_i = mx.sc;
+    } else {
+      top->ts_n_i = top->ts_oe ? top->ts_n_o : 1;
+      top->bb_n_i = top->bb_oe ? top->bb_n_o : 1;
+      top->a_i = top->a_o;
+      top->tt_i = top->tt_o;
+      top->rw_i = top->rw_o;
+      top->siz_i = top->siz_o;
+      top->sc_i = 0;
+    }
+    top->bg_n_i = grant ? 0 : 1;
   }
 
   // The writes the data unit's queue takes this clock (before the edge).
@@ -300,7 +468,7 @@ struct RtlModel {
   void clock() { fall(); rise(); }
 };
 
-RtlCpu::RtlCpu(Machine *m, const RtlOptions &o) : m_(m), o_(o) {
+RtlCpu::RtlCpu(BusIf *m, const RtlOptions &o) : m_(m), o_(o) {
   v_.reset(new RtlModel(m, o));
   Vrd68041_top *top = v_->top;
   top->clk = 0;
@@ -335,6 +503,12 @@ RtlCpu::RtlCpu(Machine *m, const RtlOptions &o) : m_(m), o_(o) {
 RtlCpu::~RtlCpu() {}
 
 uint64_t RtlCpu::clocks() const { return v_->clocks; }
+
+void RtlCpu::dma_stats(uint64_t &cmds, uint64_t &xfers, uint64_t &sourced) const {
+  cmds = v_->dma_cmds;
+  xfers = v_->dma_xfers;
+  sourced = v_->dma_sourced;
+}
 
 void RtlCpu::snapshot(uint32_t pc) {
   Vrd68041_top *top = v_->top;
@@ -395,6 +569,7 @@ StepResult RtlCpu::reset() {
   retired_ = 0;
   writes.clear();
   snapshot(v.ram_long(4));
+  v.booted = true;
   for (BusRec &b : m_->ring) b.step = 0;
   return StepResult::Boundary;
 }

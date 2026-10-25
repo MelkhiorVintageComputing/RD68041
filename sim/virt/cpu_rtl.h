@@ -21,14 +21,18 @@ struct RtlOptions {
   uint64_t watchdog = 2000000;  // clocks without a boundary before giving up
   std::string vcd;
   uint64_t vcd_from = 0;
+  // The reset exception's two vector reads ($0, $4) answered with these
+  // instead of RAM's, when reset_pc >= 0: the state QEMU's virt machine starts
+  // its own CPU in (rd-qvirt). Every other read of $0-$7 is RAM's.
+  int64_t reset_ssp = -1, reset_pc = -1;
 };
 
-class Machine;
+class BusIf;
 struct RtlModel;
 
 class RtlCpu : public CpuIf {
  public:
-  RtlCpu(Machine *m, const RtlOptions &o);
+  RtlCpu(BusIf *m, const RtlOptions &o);
   ~RtlCpu() override;
   const char *name() const override { return "rtl"; }
   StepResult reset() override;
@@ -41,9 +45,11 @@ class RtlCpu : public CpuIf {
   void inject_interrupt(int) override {}
   void set_undefined(const CpuRegs &) override {}
   uint64_t clocks() const;
+  // The DMA master's commands, snooped transfers, and lines the core sourced.
+  void dma_stats(uint64_t &cmds, uint64_t &xfers, uint64_t &sourced) const;
 
  private:
-  Machine *m_;
+  BusIf *m_;
   RtlOptions o_;
   std::unique_ptr<RtlModel> v_;
   CpuRegs regs_;

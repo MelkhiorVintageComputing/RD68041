@@ -47,7 +47,8 @@ struct BusRec {
   uint8_t  size;                   // bytes moved (a line: four records of 4)
   uint8_t  write, tm, berr;
   char     kind;                   // D operand, T table search, F fetch, I iack,
-                                   // P push, L line fill, M MOVE16
+                                   // P push, L line fill, M MOVE16, S an alternate
+                                   // master's transfer the core snooped (rd-qvirt)
 };
 
 // One operand write: what an instruction, or exception processing, wrote,

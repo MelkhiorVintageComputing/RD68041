@@ -32,6 +32,7 @@
 #include "cpu_if.h"
 #include "cpu_uae.h"
 #include "machine.h"
+#include "script.h"
 #ifdef RDVIRT_RTL
 #include "cpu_rtl.h"
 #endif
@@ -64,55 +65,6 @@ double wall() {
   gettimeofday(&tv, nullptr);
   return tv.tv_sec + tv.tv_usec * 1e-6;
 }
-
-// ---------------------------------------------------------------------------
-// The console script: `expect <text>` waits for the text to appear in the
-// console after the last match, `send <text>` types it (\n, \r, \t escapes).
-// ---------------------------------------------------------------------------
-struct Script {
-  struct Item { bool send; std::string text; };
-  std::vector<Item> items;
-  size_t pos = 0, seen = 0;
-  bool load(const std::string &path) {
-    FILE *f = fopen(path.c_str(), "r");
-    if (!f) return false;
-    char line[4096];
-    while (fgets(line, sizeof line, f)) {
-      std::string l(line);
-      while (!l.empty() && (l.back() == '\n' || l.back() == '\r')) l.pop_back();
-      if (l.empty() || l[0] == '#') continue;
-      bool send = l.compare(0, 5, "send ") == 0;
-      bool exp = l.compare(0, 7, "expect ") == 0;
-      if (!send && !exp) continue;
-      std::string t = l.substr(send ? 5 : 7), u;
-      for (size_t i = 0; i < t.size(); i++) {
-        if (t[i] == '\\' && i + 1 < t.size()) {
-          char c = t[++i];
-          u.push_back(c == 'n' ? '\n' : c == 'r' ? '\r' : c == 't' ? '\t' : c);
-        } else {
-          u.push_back(t[i]);
-        }
-      }
-      items.push_back({send, u});
-    }
-    fclose(f);
-    return true;
-  }
-  // What to type now, given the console so far.
-  std::string poll(const std::string &cons) {
-    std::string out;
-    while (pos < items.size()) {
-      Item &it = items[pos];
-      if (it.send) { out += it.text; pos++; continue; }
-      size_t at = cons.find(it.text, seen);
-      if (at == std::string::npos) break;
-      seen = at + it.text.size();
-      pos++;
-    }
-    return out;
-  }
-  bool done() const { return pos >= items.size(); }
-};
 
 std::string fmt_regs(const CpuRegs &r) {
   char b[2048];

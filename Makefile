@@ -70,6 +70,7 @@ IVFLAGS := -g2012 -Wall -Wno-timescale -DTB_FPU=$(FPU) $(if $(filter 0,$(FPU)),-
         lint-quartus lint-questa quartus synth impl audit sim sim-bus check \
         check-lc cosim spike ucode ucode-check print-rtl clean uae040 uae040-smoke cputest-gen \
         qemu040 cosim-qemu-smoke virt-qemu mame-quadra quadra-m68040 \
+        qvirt qvirt-bare qvirt-linux qvirt-linux-qemu netbsd-disk netbsd-qemu netbsd-qvirt \
         virt-bare virt-uae virt-linux virt-linux-solo fpsp quadra quadra-lc
 
 all: lint
@@ -895,6 +896,107 @@ fpsp: $(VIRTBIN) $(VGUEST)/vmlinux $(VGUEST)/initramfs.cpio.gz
 	 grep '^t[1-5] ' $(VIRT)/fpsp.console | sed 's/^/  /'; \
 	 grep -q '^PASS' $(VIRT)/fpsp.log || { grep -A12 '^DIVERGENCE' $(VIRT)/fpsp.log | head -30; tail -3 $(VIRT)/fpsp.log; exit 1; }
 	@echo "PASS: fpsp (console in $(VIRT)/fpsp.console)"
+
+# ---------------------------------------------------------------------------
+# rd-qvirt: the core as the processor of QEMU's virt machine (doc/qvirt.md;
+# doc/plan.md section 7, M14). QEMU 11.1.2 ($(QEMU)) runs unmodified under
+# qtest; sim/qvirt/qvirt drives its devices with the core, and the console is
+# compared with QEMU's own m68040's on the same machine.
+#
+#   make qvirt             the harness and the core (Verilator: heavy, alone)
+#   make qvirt-bare        the bare-metal programs on QEMU's devices
+#   make qvirt-linux       rd-virt's Linux guest and command set on the core
+#   make qvirt-linux-qemu  ... on QEMU's m68040, the reference; then
+#                          qvirt-linux's console is compared with it
+#
+# FPU=0 is the MC68LC040: its own build, the FPU-emulating guest, the
+# bootinfo's FPU record cleared on both sides. QVIRT_OPTS adds qvirt options.
+# ---------------------------------------------------------------------------
+QVIRTTOP    := build/qvirt
+QVIRT       := $(QVIRTTOP)$(if $(filter 0,$(FPU)),/lc)
+QVIRTBIN    := $(QVIRT)/obj/qvirt
+QVIRTSRC    := $(wildcard sim/qvirt/*.cpp sim/qvirt/*.h) sim/qvirt/build.sh \
+               sim/virt/cpu_rtl.cpp sim/virt/cpu_rtl.h sim/virt/bus_if.h sim/virt/script.h \
+               sim/virt/cpu_if.h sim/virt/public.vlt
+QVIRT_OPTS  ?=
+QVIRTNOFPU  := $(if $(filter 0,$(FPU)),--no-fpu)
+QVIRTRUN     = $(QVIRTBIN) --qemu $(CURDIR)/$(QEMU) $(QVIRTNOFPU) --quiet $(QVIRT_OPTS)
+QVIRTREF     = python3 sim/qvirt/qemu-ref.py --qemu $(QEMU) $(QVIRTNOFPU)
+
+$(QVIRTBIN): $(QVIRTSRC) $(RTL)
+	@echo "  qvirt: building the core for QEMU's virt into $(QVIRT)/obj (Verilator, FPU=$(FPU), alone)"
+	@RTLFILES="$(RTL)" FPU=$(FPU) sh sim/qvirt/build.sh $(QVIRT) > /dev/null
+
+qvirt: $(QVIRTBIN)
+
+qvirt-bare: $(QVIRTBIN) $(QEMU) $(patsubst %,build/programs/%.elf,$(VIRTPROGS))
+	@ok=1; for p in $(VIRTPROGS); do D=$(QVIRT)/bare-$$p; mkdir -p $$D; \
+	  $(QVIRTRUN) --dir $$D --kernel build/programs/$$p.elf --step-ns 20 --progress 0 --expect "PASS: $$p" \
+	      --console-log $$D/console > $$D/log 2>&1; \
+	  if grep -q '^PASS' $$D/log; then echo "  PASS: $$p -- $$(grep -o '[0-9]* steps, [0-9]* clocks' $$D/log)"; \
+	  else echo "  FAIL: $$p"; tail -8 $$D/log; ok=0; fi; done; \
+	test $$ok -eq 1 && echo "PASS: qvirt-bare"
+
+qvirt-linux: $(QVIRTBIN) $(QEMU) $(VGUEST)/vmlinux $(VGUEST)/initramfs.cpio.gz
+	@D=$(QVIRT)/linux; mkdir -p $$D; \
+	 $(QVIRTRUN) --dir $$D --kernel $(VGUEST)/vmlinux --initrd $(VGUEST)/initramfs.cpio.gz \
+	    --cmdline "$(VIRT_CMDLINE)" --script $(VIRT_SCRIPT) --expect done \
+	    --console-log $$D/console > $$D/log 2>&1; \
+	 grep -E '^\[qvirt\] end' $$D/log | sed 's/^/  /'; \
+	 grep -q '^PASS' $$D/log || { tail -12 $$D/log; exit 1; }; \
+	 if [ -f $(QVIRT)/linux-qemu/console ]; then \
+	   python3 sim/qvirt/console-diff.py $(QVIRT)/linux-qemu/console $$D/console \
+	       --mask sim/qvirt/linux$(if $(filter 0,$(FPU)),-lc).mask || exit 1; \
+	 else echo "  (no reference console yet: make qvirt-linux-qemu)"; fi
+	@echo "PASS: qvirt-linux (console in $(QVIRT)/linux/console)"
+
+qvirt-linux-qemu: $(QEMU) $(VGUEST)/vmlinux $(VGUEST)/initramfs.cpio.gz
+	@D=$(QVIRT)/linux-qemu; mkdir -p $$D; \
+	 $(QVIRTREF) --dir $$D --kernel $(VGUEST)/vmlinux --initrd $(VGUEST)/initramfs.cpio.gz \
+	    --cmdline "$(VIRT_CMDLINE)" --script $(VIRT_SCRIPT) --expect done --log $$D/console \
+	    > $$D/log 2>&1 || { tail -8 $$D/log; exit 1; }
+	@echo "PASS: qvirt-linux-qemu (console in $(QVIRT)/linux-qemu/console)"
+
+# NetBSD/virt68k 11.0 (doc/qvirt.md), the media of Inputs/sw/MANIFEST-netbsd:
+#
+#   make netbsd-disk       fetched and installed on QEMU's m68040 onto
+#                          build/netbsd/netbsd.img (a minute; once)
+#   make netbsd-qemu       booted on QEMU's m68040 to multi-user, root logged
+#                          in, sim/qvirt/netbsd-boot.script typed, powered off:
+#                          the reference
+#   make netbsd-qvirt      ... on the core, its console compared with the
+#                          reference's (sim/qvirt/netbsd.mask) to the typed
+#                          shutdown (FPU=1 only: GENERIC has no FPU emulation)
+NETBSD      := build/netbsd
+NBKERNEL    := $(NETBSD)/netbsd-GENERIC
+NBDISK      := $(NETBSD)/netbsd.img
+
+$(NBKERNEL): Inputs/sw/MANIFEST-netbsd sim/qvirt/netbsd.sh sim/qvirt/nbpatch.py
+	@bash sim/qvirt/netbsd.sh fetch $(NETBSD)
+
+$(NBDISK): $(NBKERNEL) $(QEMU) sim/qvirt/netbsd-install.script sim/qvirt/mksets.py sim/qvirt/qemu-ref.py
+	@bash sim/qvirt/netbsd.sh disk $(NETBSD) $(QEMU)
+
+netbsd-disk: $(NBDISK)
+
+netbsd-qemu: $(NBDISK) $(QEMU)
+	@D=$(QVIRTTOP)/netbsd-qemu; mkdir -p $$D; \
+	 $(QVIRTREF) --dir $$D --kernel $(NBKERNEL) --disk $(NBDISK) --script sim/qvirt/netbsd-boot.script \
+	    --expect done --log $$D/console > $$D/log 2>&1 || { tail -8 $$D/log; exit 1; }
+	@echo "PASS: netbsd-qemu (console in $(QVIRTTOP)/netbsd-qemu/console)"
+
+netbsd-qvirt: $(QVIRTBIN) $(QEMU) $(NBDISK)
+	@test "$(FPU)" != 0 || { echo "netbsd-qvirt: the MC68040's (FPU=1); NetBSD/virt68k's GENERIC has no FPU emulation"; exit 1; }
+	@D=$(QVIRT)/netbsd; mkdir -p $$D; \
+	 $(QVIRTRUN) --dir $$D --kernel $(NBKERNEL) --disk $(NBDISK) --script sim/qvirt/netbsd-boot.script \
+	    --expect done --expect halted --console-log $$D/console > $$D/log 2>&1; \
+	 grep -E '^\[qvirt\] end' $$D/log | sed 's/^/  /'; \
+	 grep -q '^PASS' $$D/log || { tail -12 $$D/log; exit 1; }; \
+	 if [ -f $(QVIRTTOP)/netbsd-qemu/console ]; then \
+	   python3 sim/qvirt/console-diff.py $(QVIRTTOP)/netbsd-qemu/console $$D/console \
+	       --mask sim/qvirt/netbsd.mask --until "shutdown -p now" || exit 1; \
+	 else echo "  (no reference console yet: make netbsd-qemu)"; fi
+	@echo "PASS: netbsd-qvirt (console in $(QVIRT)/netbsd/console)"
 
 # ---------------------------------------------------------------------------
 # MAME's Quadra (doc/oracles.md, "MAME's Quadra"; the core goes in at M14)

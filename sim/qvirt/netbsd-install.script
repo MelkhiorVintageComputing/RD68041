@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: CERN-OHL-S-2.0
+# Copyright 2026 Romain Dolbeau
+# Source location: https://github.com/MelkhiorVintageComputing/RD68041
+#
+# The install of NetBSD/virt68k 11.0 onto build/netbsd/netbsd.img, typed into
+# the install ramdisk's shell on QEMU's m68040 (sim/qvirt/netbsd.sh install;
+# doc/qvirt.md). sysinst is left for its shell; the target is ld0 (the
+# default label's a, the whole disk), the sets are the raw tar on ld1
+# (sim/qvirt/mksets.py). Nothing is started that is not needed: no network
+# services, no mail, no cron; root has no password.
+expect Installation messages in English
+send \n
+expect Exit Install System
+send x\n
+expect #
+send echo DISKS; sysctl hw.disknames; disklabel ld0 | grep 'total sectors'; disklabel ld1 | grep 'total sectors'; echo LISTED\n
+expect LISTED
+expect #
+send newfs -O 2 /dev/rld0a > /tmp/newfs.log && echo NEWFS-OK\n
+expect NEWFS-OK
+expect #
+send mount /dev/ld0a /mnt && cd /mnt && tar -xpf /dev/rld1c && echo TAR-OK\n
+expect TAR-OK
+expect #
+send echo '/dev/ld0a / ffs rw 1 1' > /mnt/etc/fstab && echo FSTAB-OK\n
+expect FSTAB-OK
+expect #
+send for v in rc_configured=YES hostname=rdqvirt no_swap=YES postfix=NO cron=NO inetd=NO sshd=NO ntpd=NO savecore=NO virecover=NO dhcpcd=NO wscons=NO update_motd=NO makemandb=NO; do echo $v; done >> /mnt/etc/rc.conf && echo RC-OK\n
+expect RC-OK
+expect #
+send cd /mnt/dev && sh ./MAKEDEV all > /tmp/makedev.log 2>&1; echo MAKEDEV-$?\n
+expect MAKEDEV-
+expect #
+send cd / && sync && umount /mnt && echo INSTALLED\n
+expect INSTALLED
+expect #
+send halt -p\n

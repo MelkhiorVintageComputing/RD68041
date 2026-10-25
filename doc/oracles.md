@@ -12,6 +12,7 @@ counterparts, chosen in `doc/plan.md` §3:
 | 1d | Berkeley TestFloat/SoftFloat | the FPU datapath's rounding | from M11 |
 | 3 | Linux 7.2.9 (`CONFIG_M68040`) on QEMU's `virt` | validates the guest kernels rd-virt will run | M0 spike 5: **go** (below) |
 | 3 | **rd-virt**: Linux and bare programs, the RTL in lockstep with UAE040 (`doc/virt.md`) | the whole processor over a real kernel's boot and user space: the MMU's faults, the caches, interrupts, STOP, the FPSP | M13: **pass**, 0 divergences (below; `doc/m13-mismatches.md`) |
+| 4b | **rd-qvirt**: QEMU 11.1.2's `virt` with the core as its processor, against QEMU's own m68040 on the same machine (`doc/qvirt.md`) | Linux and NetBSD/virt68k, console byte for byte; QEMU's devices, DMA included, as a snooping bus master | M14: **pass** (below) |
 | 4 | MAME's m68040 in a Macintosh Quadra | whole-system behaviour | M0 spike 4: **go, with caveats**; M14: the core boots System 7.6.1 from the user's disk to the Finder, pixel for pixel MAME's own m68040's screen, as the MC68040 and the MC68LC040 (below) |
 
 This file records:
@@ -758,9 +759,60 @@ that address range with its answer, then the pipeline's state for 6 boundaries a
 clocks (retire, the stages' valid bits and PCs, the interrupt, the DMU's read state). The
 PC the device reports is the core's retired one.
 
-**Not done yet** (M14's later parts): NetBSD/mac68k and Linux/m68k start from a Mac OS
-application (the NetBSD Booter, Penguin) and want their own media; a serial console on
-the SCC through MAME's `null_modem` would then compare their output byte for byte.
+**NetBSD and Linux** were to follow on the Quadra, from a Mac OS booter (the NetBSD
+Booter, Penguin) with their own media. They run on QEMU's `virt` instead, where both
+boot from `-kernel` ("rd-qvirt", below).
+
+## rd-qvirt: the core in QEMU's virt, against QEMU's m68040 (M14)
+
+**What.** The rest of M14 after Mac OS. NetBSD and Linux could have run on MAME's
+Quadra, but only from Mac OS booters and their media; they run instead on QEMU 11.1.2's
+`virt` board, where both boot from `-kernel`. NetBSD has a port for it, virt68k, from
+11.0. QEMU runs unmodified under qtest, and the core drives its devices from a harness
+(`doc/qvirt.md`). The reference is the same guest on the same board, with QEMU's own
+m68040, the same RTC, disk and command set. The gate is the console, compared line for
+line by `sim/qvirt/console-diff.py`. Each guest's mask file leaves out only the lines
+that depend on elapsed virtual time.
+
+| | Guest | Result | Instructions (core) | Clocks | Wall | Notes |
+|---|---|---|---|---|---|---|
+| `make qvirt-bare` | `virt_hello`, `virt_timer`, `virt_mmu` | PASS | 274, 17,068, 140,919 | | seconds | `--step-ns 20`; with a one-step quantum `virt_timer` takes rd-virt's 17,023 steps exactly |
+| `make qvirt-linux` | rd-virt's Linux 7.2.9 and command set | **PASS, consoles identical** (111 lines) | 95.9 M | 324.8 M | 685 s | 479 DMA commands, 604 snooped transfers (the tty's buffers) |
+| `make qvirt-linux FPU=0` | the same, for the MC68LC040 (`commands-lc.script`) | **PASS, consoles identical** (110 lines, `linux-lc.mask`) | 96.6 M | 329.8 M | 532 s | 473 DMA commands, 601 snooped transfers |
+| `make netbsd-qvirt` | NetBSD/virt68k 11.0 GENERIC, multi-user from `ld0`, root logged in, the command set, `shutdown -p` | **PASS, consoles identical** (120 lines) | 1,762 M | 7,296 M | 4.4 h | 1,912 DMA commands, 1.97 M snooped transfers, 1,422 virtio settles; `FPU=1` only (below) |
+
+**What it found:**
+- **No RTL bug.** The core's behaviour that NetBSD tripped on is the MC68040's (below).
+- **A guest that needs coherent DMA.** QEMU's devices write guest memory behind any
+  processor, and QEMU's m68040 has no caches. A copyback-cached MC68040 needs the board
+  to make DMA coherent, which a real board does with snooping (UM 4.4, 7.9). So
+  rd-qvirt's devices are an alternate bus master: the DMA command is held off with a
+  retry, the bus is taken, and snooped transfers carry what the device reads and writes
+  (`doc/qvirt.md`). It exercises the core's snooper, retry and arbitration with real
+  traffic.
+- **A guest that relies on QEMU's synchronous MMIO.** NetBSD's polled console input,
+  `gftty_cngetc`, reads its DMA buffer two instructions after the write that starts the
+  DMA. On an MC68040 that write may still be pending (UM 7.7: *"write cycles can be
+  deferred indefinitely"*). The core read the stale byte, so every key at the
+  root-device prompt was answered with a bell. The harness's copy of the kernel gets
+  the NOP the manual prescribes in place of a redundant `clrl` (`sim/qvirt/nbpatch.py`),
+  and both processors run it. This is class (b): a harness issue, not an RTL one.
+- **The MC68LC040** runs Linux (FPU=0, the kernel's FPU emulation), not NetBSD:
+  virt68k's GENERIC has the FPSP but not `FPU_EMULATE`.
+- **QEMU's m68040 is no MC68LC040.** With the bootinfo's FPU record cleared, Linux
+  takes it to have no FPU, but QEMU still executes FP instructions. So `/init`'s
+  `awk float:` (FATAN) is right on the reference, while on the core it goes through the
+  kernel's emulation, which has no FATAN and prints a warning and its own value.
+  `linux-lc.mask` leaves those lines out. They are the same as M13's, where the
+  no-FPU UAE040 traps as the core does. Apart from the RAM size and the echoes, the
+  core's LC console equals that M13 lockstep console. This is class (c), the
+  reference's.
+- **No line was ever sourced.** Both kernels push a buffer from the data cache before
+  a device reads it, so the snooper's intervention is left to the benches.
+
+**Not authoritative for:** anything QEMU's m68040 does not model (caches, bus timing,
+the access error frames' internals, the MC68LC040's F-line trap). Console identity says the two systems computed the
+same things, not that they did so the same way.
 
 ## Linux on QEMU's virt (the guest kernel for rd-virt) -- M0 spike
 

@@ -355,25 +355,3 @@ bool Machine::io_write(uint32_t pa, int size, uint32_t v) {
   reg_write(off & ~3u, v);
   return false;
 }
-
-// ---------------------------------------------------------------------------
-// The bus record
-// ---------------------------------------------------------------------------
-void Machine::log(const BusRec &r) {
-  ring.push_back(r);
-  if (ring.size() > 4096) ring.pop_front();
-  static long watch = getenv("RDVIRT_WATCH") ? long(strtoul(getenv("RDVIRT_WATCH"), nullptr, 16)) : -1;
-  if (r.write && watch >= 0 && uint32_t(watch) - r.addr < r.size)
-    fprintf(stderr, "log %p: %c W %08x %d %08x step %llu berr %d\n", (void *)this, r.kind,
-            r.addr, r.size, r.data, (unsigned long long)r.step, r.berr);
-}
-
-void Machine::dump_ring(FILE *f, size_t n) const {
-  size_t s = ring.size() > n ? ring.size() - n : 0;
-  for (size_t i = s; i < ring.size(); i++) {
-    const BusRec &r = ring[i];
-    fprintf(f, "%10llu %c %s tm%d %08x %d %08x%s\n", (unsigned long long)r.step,
-            r.kind, r.write ? "W" : "R", r.tm, r.addr, r.size, r.data,
-            r.berr ? " BERR" : "");
-  }
-}

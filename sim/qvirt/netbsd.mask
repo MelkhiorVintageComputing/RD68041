@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: CERN-OHL-S-2.0
+# Copyright 2026 Romain Dolbeau
+# Source location: https://github.com/MelkhiorVintageComputing/RD68041
+#
+# The lines sim/qvirt/console-diff.py leaves out of the NetBSD consoles of
+# make netbsd-qvirt and its reference (doc/qvirt.md): what depends on how
+# much virtual time has passed, which the two processors spend differently.
+# /etc/rc's `date`, at the start and the end of the boot:
+^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) [ 0-9][0-9] [0-9:]{8} UTC [0-9]{4}$
+# syslogd's messages to the console (login's ROOT LOGIN): stamped, and
+# written by another process at its own pace.
+^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) [ 0-9][0-9] [0-9:]{8} rdqvirt 

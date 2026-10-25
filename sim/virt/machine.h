@@ -30,6 +30,7 @@
 #include <string>
 #include <vector>
 
+#include "bus_if.h"
 #include "cpu_if.h"
 
 struct MachineConfig {
@@ -41,7 +42,7 @@ struct MachineConfig {
   std::string console_log;                // ... and to this file
 };
 
-class Machine {
+class Machine : public BusIf {
  public:
   explicit Machine(const MachineConfig &cfg, uint8_t *ram = nullptr);
   ~Machine();
@@ -54,20 +55,12 @@ class Machine {
                   const std::string &cmdline);
   bool load_bare(const std::string &elf);
 
-  // The bus.
-  enum class Region { Ram, Io, Hole };
-  Region classify(uint32_t pa) const {
-    if (pa < ram_size) return Region::Ram;
-    if (pa >= 0xFF000000u && pa < 0xFF020000u) return Region::Io;
-    return Region::Hole;
-  }
-  // A device access: true means a bus error. size 1, 2 or 4, at any address
-  // inside one long word; the devices are long-word registers.
-  bool io_read(uint32_t pa, int size, uint32_t &v);
-  bool io_write(uint32_t pa, int size, uint32_t v);
+  // The bus (bus_if.h). The devices are long-word registers.
+  bool io_read(uint32_t pa, int size, uint32_t &v) override;
+  bool io_write(uint32_t pa, int size, uint32_t v) override;
 
   // The interrupt priority level the six PICs present.
-  int ipl() const;
+  int ipl() const override;
 
   // The clock.
   void     set_time(uint64_t ns);
@@ -82,14 +75,6 @@ class Machine {
   bool powered_off = false;
   bool panicked    = false;
   bool reset_req   = false;
-
-  // The bus record: the last 4,096 transfers.
-  void log(const BusRec &r);
-  std::deque<BusRec> ring;
-  void dump_ring(FILE *f, size_t n = 4096) const;
-
-  uint8_t *ram;
-  uint32_t ram_size;
 
  private:
   struct Pic { uint32_t pending = 0, enabled = 0; };

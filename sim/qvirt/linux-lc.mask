@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: CERN-OHL-S-2.0
+# Copyright 2026 Romain Dolbeau
+# Source location: https://github.com/MelkhiorVintageComputing/RD68041
+#
+# make qvirt-linux FPU=0 (the MC68LC040): linux.mask's lines, and the one
+# floating-point line the reference cannot give (doc/qvirt.md). QEMU's m68040
+# has no MC68LC040 mode: with the bootinfo's FPU record cleared the kernel
+# believes it has no FPU, but QEMU executes the FP instructions itself. On the
+# core they take the F-line trap to the kernel's FPU emulation, which has no
+# FATAN: /init's `awk float:` (atan2) gets the emulation's warning and value,
+# exactly as on rd-virt's UAE040 with no FPU (M13's lockstep console). The
+# command set's own FP line (commands-lc.script) is arithmetic the emulation
+# does have, and is compared.
+^Unpacking initramfs
+goldfish_timer$
+^awk float: 
+^You just hit an unimplemented fpu instruction \(f[a-z]+$
+^\)$
+^Please report this to \.\.\.\.$
