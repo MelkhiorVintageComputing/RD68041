@@ -777,9 +777,9 @@ that depend on elapsed virtual time.
 | | Guest | Result | Instructions (core) | Clocks | Wall | Notes |
 |---|---|---|---|---|---|---|
 | `make qvirt-bare` | `virt_hello`, `virt_timer`, `virt_mmu` | PASS | 274, 17,068, 140,919 | | seconds | `--step-ns 20`; with a one-step quantum `virt_timer` takes rd-virt's 17,023 steps exactly |
-| `make qvirt-linux` | rd-virt's Linux 7.2.9 and command set | **PASS, consoles identical** (111 lines) | 95.9 M | 324.8 M | 685 s | 479 DMA commands, 604 snooped transfers (the tty's buffers) |
-| `make qvirt-linux FPU=0` | the same, for the MC68LC040 (`commands-lc.script`) | **PASS, consoles identical** (110 lines, `linux-lc.mask`) | 96.6 M | 329.8 M | 532 s | 473 DMA commands, 601 snooped transfers |
-| `make netbsd-qvirt` | NetBSD/virt68k 11.0 GENERIC, multi-user from `ld0`, root logged in, the command set, `shutdown -p` | **PASS, consoles identical** (120 lines) | 1,762 M | 7,296 M | 4.4 h | 1,912 DMA commands, 1.97 M snooped transfers, 1,422 virtio settles; `FPU=1` only (below) |
+| `make qvirt-linux` | rd-virt's Linux 7.2.9 and command set | **PASS, consoles identical** (111 lines) | 95.9 M | 324.6 M | 672 s | 479 DMA commands, 604 snooped transfers (the tty's buffers) |
+| `make qvirt-linux FPU=0` | the same, for the MC68LC040 (`commands-lc.script`) | **PASS, consoles identical** (110 lines, `linux-lc.mask`) | 96.6 M | 329.8 M | 541 s | 473 DMA commands, 601 snooped transfers |
+| `make netbsd-qvirt` | NetBSD/virt68k 11.0 GENERIC, multi-user from `ld0`, root logged in, the command set, `shutdown -p` | **PASS, consoles identical** (120 lines) | 1,756 M | 7,272 M | 4.3 h | 1,930 DMA commands, 1.99 M snooped transfers, 1,440 virtio settles; `FPU=1` only (below) |
 
 **What it found:**
 - **No RTL bug.** The core's behaviour that NetBSD tripped on is the MC68040's (below).

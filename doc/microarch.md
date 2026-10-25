@@ -421,4 +421,5 @@ the ADB modem's firmware and a System 7.6.1 disk from the user, Mac OS to the Fi
 the screen MAME's own CPUs end on, pixel for pixel (`make quadra`, `make quadra-lc`;
 `doc/oracles.md`). One RTL bug found on the way: a serialised read made twice
 (`doc/bugs-found.md`).
-`make impl`: 30.44 MHz; `FPU=0`: 30.58 MHz.
+`make impl`: 30.44 MHz; `FPU=0`: 30.58 MHz. After the fetch fix that stops at an ATC fault
+(`doc/bugs-found.md`): 30.61 MHz and 31.87 MHz.

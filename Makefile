@@ -238,7 +238,7 @@ CACHE ?= 0
 
 # The directed benches that run a program (core_exc_tb, core_fault_tb) take it
 # from build/programs/.
-SIMPROGS := m8_int m8_fault m9_cache m9_snoop m10_mmu m11_fpu_c m12_lc040_b m14_serial
+SIMPROGS := m8_int m8_fault m9_cache m9_snoop m10_mmu m11_fpu_c m12_lc040_b m14_serial m14_fetch_next
 
 sim: dirs $(patsubst %,build/programs/%.hex,$(SIMPROGS))
 	@rm -f $(addprefix $(BUILD)/,$(addsuffix .simres,$(TBS))); \

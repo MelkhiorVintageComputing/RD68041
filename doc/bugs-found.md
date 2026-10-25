@@ -10,6 +10,29 @@ synchroniser) are in RD68031's `doc/bugs-found.md`.*
 
 ---
 
+## Found by litex-68k: Linux in a LiteX SoC
+
+1. **An instruction fetch went on past an ATC fault, and left an entry not
+   resident for the next page.** The fetch unit queued a faulted fetch's words
+   marked (`q_atc`) and then fetched on, so a fault near the end of a page went
+   on to the next page and searched the tables for it; that page invalid too, its
+   ATC entry was made not resident (UM 3.2.2.3). Linux's handler for the first
+   fault maps the faulting page and, by fault-around, the next ones, and flushes
+   the ATC entry of the faulting page only (a PTEST in `access_error040`): the
+   fetch after its RTE hit the stale entry for the next page and faulted again,
+   and Linux, whose PTEST now found that page resident, took the fault as a
+   protection violation and killed the process. With glibc's busybox as init the
+   first call of `fopen64`, at the end of a page, ran into the next one with a
+   `MOVE.L 12(SP),-(SP)` across the two: init died of SIGSEGV and the kernel
+   panicked. The fetch unit now stops after an ATC fault until the next redirect
+   (`xstop` in `rd68041_ifu`): the words after the fault can only be wanted after
+   the faulted ones, whose fault comes first. Nothing here reached it: no bench or
+   program made a page resident behind a fault on the page before it, and rd-virt
+   and rd-qvirt's Linux never happened to. `core_fetchnext_tb`
+   (`sim/programs/m14_fetch_next.S`) does: two faults without the fix, one with it.
+
+---
+
 ## M14: found by MAME's Quadra
 
 1. **A serialised page's read could be made twice.** The core makes an instruction's
