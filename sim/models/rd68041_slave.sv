@@ -19,9 +19,11 @@
 // The behaviour is per region, programmed by the testbench through the tasks
 // at the bottom: wait states before each TA, burst-inhibit, cache-inhibit, a
 // bus error on a given long word of a transfer, or a number of retries before
-// it is accepted. An interrupt acknowledge (TT = 3, A = $FFFFFFFF) is answered
-// with a vector, an autovector or TEA (UM 7.5.1, Table 7-4); a breakpoint
-// acknowledge (TT = 3, A = 0) with TA or TEA.
+// it is accepted. A region can also be left to another responder on the same
+// bus (set_external): the slave does not answer there at all. An interrupt
+// acknowledge (TT = 3, A = $FFFFFFFF) is answered with a vector, an
+// autovector or TEA (UM 7.5.1, Table 7-4); a breakpoint acknowledge (TT = 3,
+// A = 0) with TA or TEA.
 //
 // Every TA, TEA, TBI, TCI and AVEC is registered: driven from just after one
 // rising edge to just after the next, as a synchronous slave drives them.
@@ -61,6 +63,7 @@ module rd68041_slave #(
   bit          r_tci  [0:NREG-1];   // cache-inhibit lines
   int          r_berr [0:NREG-1];   // TEA on this long word of a transfer, -1 never
   int          r_retry[0:NREG-1];   // retries left before a transfer is accepted
+  bit          r_ext  [0:NREG-1];   // another responder answers here
   bit          r_on   [0:NREG-1];
 
   // Interrupt acknowledge, per level 1-7: 0 vector, 1 autovector, 2 TEA.
@@ -71,7 +74,7 @@ module rd68041_slave #(
   int          bkpt_kind;
 
   initial begin
-    for (int i = 0; i < NREG; i++) r_on[i] = 0;
+    for (int i = 0; i < NREG; i++) begin r_on[i] = 0; r_ext[i] = 0; end
     for (int i = 1; i <= 7; i++) begin iack_kind[i] = 1; iack_vec[i] = 8'h40 + i[7:0]; end
     iack_retry = 0;
     bkpt_kind  = 0;
@@ -187,6 +190,7 @@ module rd68041_slave #(
       n_starts = n_starts + 1;
       last_a   = a; last_siz = siz; last_tt = tt; last_tm = tm; last_rw = rw;
       if (rw && tt != 2'b11 && {a[31:2], 2'b00} == watch_a) watch_reads = watch_reads + 1;
+      if (x_reg >= 0 && r_ext[x_reg] && !x_iack && !x_bkpt) busy = 0;
     end else if (busy && x_wait > 0) begin
       x_wait = x_wait - 1;
     end
@@ -234,7 +238,17 @@ module rd68041_slave #(
                             input int waits, input bit tbi, input bit tci,
                             input int berr_beat, input int retries);
     r_base[i] = base; r_mask[i] = mask; r_wait[i] = waits; r_tbi[i] = tbi;
-    r_tci[i] = tci; r_berr[i] = berr_beat; r_retry[i] = retries; r_on[i] = 1;
+    r_tci[i] = tci; r_berr[i] = berr_beat; r_retry[i] = retries; r_on[i] = 1; r_ext[i] = 0;
+  endtask
+
+  // Leave region i to another responder on the bus (sim/models/rd68041_smpdev).
+  task automatic set_external(input int i);
+    r_ext[i] = 1;
+  endtask
+
+  // Ask for this many more retries in region i (a bench's random retries).
+  task automatic add_retries(input int i, input int n);
+    r_retry[i] = r_retry[i] + n;
   endtask
 
   // Count the reads that start at the long word holding `addr`.

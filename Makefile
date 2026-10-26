@@ -108,6 +108,8 @@ help:
 	@echo "                    default OP=$(VECGROUPS)); passed / failed / not built / pending"
 	@echo "  make vectors-all  ... every group"
 	@echo "  make ea           ... the addressing-mode sweep (OP=ea)"
+	@echo "  make smp          two processors behind UM 7.8.2.1's arbiter, corrected: core_smp_tb's"
+	@echo "                    variants, and its checks shown to catch a broken board (doc/smp.md)"
 	@echo "  make cache        the caches against the oracles: their cosims, vectors-all and"
 	@echo "                    cputest with the caches on (CACHE=1 write-through, 2 copyback),"
 	@echo "                    and core_mmu_tb with them on"
@@ -238,7 +240,7 @@ CACHE ?= 0
 
 # The directed benches that run a program (core_exc_tb, core_fault_tb) take it
 # from build/programs/.
-SIMPROGS := m8_int m8_fault m9_cache m9_snoop m10_mmu m11_fpu_c m12_lc040_b m14_serial m14_fetch_next
+SIMPROGS := m8_int m8_fault m9_cache m9_snoop m10_mmu m11_fpu_c m12_lc040_b m14_serial m14_fetch_next m14_smp
 
 sim: dirs $(patsubst %,build/programs/%.hex,$(SIMPROGS))
 	@rm -f $(addprefix $(BUILD)/,$(addsuffix .simres,$(TBS))); \
@@ -650,6 +652,38 @@ cache:
 	  $(MAKE) --no-print-directory vectors-all CACHE=$$c || exit 1; done
 	@for c in 1 2; do echo "== cputest CACHE=$$c"; \
 	  $(MAKE) --no-print-directory cputest CACHE=$$c || exit 1; done
+
+# Two processors on one bus (doc/smp.md): core_smp_tb, which `make sim` runs
+# with a few iterations, in its variants -- at length, with wait states and
+# retries (the arbiter then ignoring LOCKE, which retries make unsafe), and
+# CPU 1 let out of reset late -- and the checks shown to work: the printed
+# arbiter's handover must be caught (+gapless), and the board's MI gate, its
+# SC gate, its memory update from sourced data and the pages' U bits must each
+# be missed when taken away (the run must FAIL). Light simulations, four at a time.
+SMPDIR   = $(BUILD)/smp
+SMP_PASS = long:+iters=32 retry:+iters=12+waits=1+retry=40+nolocke late:+iters=8+rsti1=30000 \
+           gapless:+iters=4+gapless
+SMP_FAIL = nomigate:+iters=4+nomigate+timeout=60000 nosnarf:+iters=12+nosnarf \
+           nosnoop:+iters=6+umask=FFFFFCFF+timeout=200000 rawsc:+iters=12+rawsc
+.PHONY: smp
+smp: dirs build/programs/m14_smp.hex
+	@mkdir -p $(SMPDIR)
+	@iverilog $(IVFLAGS) -I sim/tb -o $(SMPDIR)/core_smp_tb.vvp -s core_smp_tb \
+	    $(RTL) $(MODELS) sim/tb/core_smp_tb.sv > $(SMPDIR)/build.log 2>&1 \
+	  || { grep -v $(NOTES) $(SMPDIR)/build.log; exit 1; }
+	@run() { n=$${1%%:*}; a=$$(echo $${1#*:} | tr '+' ' ' | sed 's/ / +/g'); \
+	  timeout 3600 vvp $(SMPDIR)/core_smp_tb.vvp $$a > $(SMPDIR)/$$n.log 2>&1; \
+	  echo "$$2 $$n: $$(grep -E '^(PASS|FAIL)' $(SMPDIR)/$$n.log | head -1)" > $(SMPDIR)/$$n.res; }; \
+	 export -f run; \
+	 { for v in $(SMP_PASS); do echo "$$v pass"; done; for v in $(SMP_FAIL); do echo "$$v fail"; done; } \
+	   | xargs -P $(SIMJOBS) -L 1 bash -c 'run $$0 $$1'; \
+	 ok=1; for v in $(SMP_PASS) $(SMP_FAIL); do n=$${v%%:*}; r=$$(cat $(SMPDIR)/$$n.res); \
+	   case "$$r" in \
+	     "pass $$n: PASS"*) echo "  $$n: $${r#* $$n: }";; \
+	     "fail $$n: FAIL"*) echo "  $$n: failed, as it must: $$(grep -m1 '  FAIL' $(SMPDIR)/$$n.log | sed 's/^ *//')";; \
+	     *) echo "  $$n: WRONG -- $$r ($(SMPDIR)/$$n.log)"; ok=0;; \
+	   esac; done; \
+	 test $$ok -eq 1 && echo "PASS: smp (FPU=$(FPU))"
 
 # The MC68LC040 against UAE040 -L (M12): the core built with FPU=0, the
 # integer programs and m12_lc040, every FP instruction a format $4 frame.

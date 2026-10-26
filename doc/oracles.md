@@ -10,6 +10,7 @@ counterparts, chosen in `doc/plan.md` §3:
 | 1b | **cputest**, WinUAE's tester, `cpu=68040`, integer and `fpu=68040` | bulk single-instruction vectors, integer and FPU, checked against real processors by its author | M0 spike 2: **go, with caveats** (below) |
 | 1c | QEMU `-cpu m68040` | a third opinion on integer instructions; weak on frames, no caches, MMU and FPU only roughly | M0 spike 3: **go, with caveats** (below) |
 | 1d | Berkeley TestFloat/SoftFloat | the FPU datapath's rounding | from M11 |
+| 2 | (no oracle) **two RD68041s on one bus** behind UM 7.8.2.1's arbiter, corrected (`core_smp_tb`, `doc/smp.md`) | arbitration, snooping between two caching masters, locked sequences under contention, interprocessor interrupts, checked against the manual's rules, the program's own checks and memory | M14: **pass**; the board needs two gates (SC with SIZ, MI until the first cycle) |
 | 3 | Linux 7.2.9 (`CONFIG_M68040`) on QEMU's `virt` | validates the guest kernels rd-virt will run | M0 spike 5: **go** (below) |
 | 3 | **rd-virt**: Linux and bare programs, the RTL in lockstep with UAE040 (`doc/virt.md`) | the whole processor over a real kernel's boot and user space: the MMU's faults, the caches, interrupts, STOP, the FPSP | M13: **pass**, 0 divergences (below; `doc/m13-mismatches.md`) |
 | 4b | **rd-qvirt**: QEMU 11.1.2's `virt` with the core as its processor, against QEMU's own m68040 on the same machine (`doc/qvirt.md`) | Linux and NetBSD/virt68k, console byte for byte; QEMU's devices, DMA included, as a snooping bus master | M14: **pass** (below) |

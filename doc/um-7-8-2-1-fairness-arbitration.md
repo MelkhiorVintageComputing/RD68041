@@ -8,6 +8,9 @@ notes the wrong section number). This file takes the first of those examples, §
 transcribes it, checks every claim and every arc against the rest of the manual, and
 proposes a corrected text and figure.
 
+The corrected arbiter runs two RD68041s in `core_smp_tb` (`doc/smp.md`), where the
+printed figure's handover (F3) is shown on the bus.
+
 The short version: the text is mostly right, and the figure is wrong in three ways.
 
 - Figure 7-35 gives its asterisk two meanings. The state outputs follow note 2, where
