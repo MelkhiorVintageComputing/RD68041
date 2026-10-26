@@ -48,6 +48,9 @@ module core_smp_tb;
   task automatic report_bus();
     $display("  bus: %0d transfers by CPU 0, %0d by CPU 1; %0d grants; %0d locked sequences; %0d snooped TAs, %0d long words sourced; %0d device accesses",
              n_ts[0], n_ts[1], n_handover, n_locked, n_snoop_ta, n_sourced, dev_n);
+    $display("  misaligned long word across two lines: %0d of CPU 1's racing reads torn (allowed); none under the lock",
+             u_mem.peek_long(CI + 32'h74));
+    if (wt_shared) $display("  policy: every shared page write-through, U 01");
     $display("  checks: contention %0d, turnaround %0d, gap %0d, owner %0d, atomicity %0d, fairness %0d, busmon %0d/%0d",
              n_contention, n_turnaround, n_gap, n_owner, n_atomic, n_fair,
              cpu[0].u_mon.errors, cpu[1].u_mon.errors);

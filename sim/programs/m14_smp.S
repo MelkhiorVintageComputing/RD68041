@@ -29,7 +29,9 @@
 |   page  9     mapped to page 10, then 11   write-through (the TLB shootdown)
 |   page 12-13  CPU 0's and CPU 1's stacks   copyback, U 00 (private)
 |
-| The bench pokes ITERS (and UMASK, ANDed into every page descriptor, to
+| The bench pokes ITERS, WTSHARED (non-zero: page 6 is write-through with U 01
+| like every other shared page -- the board without the SC gate, doc/smp.md),
+| and UMASK, ANDed into every page descriptor, to
 | show that the U bits matter) before reset. Phases, each ended by a barrier:
 |
 |   1  boot: CPU 0 builds the tables, turns on its MMU and caches, idles,
@@ -45,8 +47,10 @@
 |      2 x ITERS
 |   4  coherence: two counters in one copyback line (false sharing); a
 |      producer and a consumer in write-through memory; a CAS word in a
-|      copyback line beside each one's ordinary counter; MOVE16 of a line the
-|      other processor holds dirty
+|      copyback line beside each one's ordinary counter; a misaligned long
+|      word across two lines, read racing its writer (torn reads counted)
+|      and under a lock (never torn); MOVE16 of a line the other processor
+|      holds dirty
 |   5  the instruction cache: CPU 1 runs a routine, CPU 0 rewrites it, CPU 1
 |      runs the new one -- its line invalidated by snooping CPU 0's write
 |   6  TLB shootdown: CPU 0 remaps a page and interrupts CPU 1, whose handler
@@ -83,12 +87,15 @@
         .equ    WTTAS,     WT + 0x10
         .equ    WTTCNT,    WT + 0x14
         .equ    WTLOCK2,   WT + 0x20             | guards CBCNT
+        .equ    MISLOCK,   WT + 0x30             | guards MIS
+        .equ    MIS,       WT + 0x1FE            | a long word across two lines
         .equ    SEQ,       WT + 0x100
         .equ    DATA,      WT + 0x120
 
         .equ    CI,        0x8000                | cache-inhibited, serialised
         .equ    ITERS,     CI + 0x00
         .equ    UMASK,     CI + 0x04
+        .equ    WTSHARED,  CI + 0x08
         .equ    ARR,       CI + 0x10             | ARR + 4 x cpu: the barrier
         .equ    ERR,       CI + 0x20
         .equ    FIRST,     CI + 0x28
@@ -102,6 +109,8 @@
         .equ    CITCNT,    CI + 0x5C
         .equ    CIFREE,    CI + 0x60
         .equ    CITAS2,    CI + 0x64             | guards CBTCNT
+        .equ    MISDONE,   CI + 0x70
+        .equ    TEARS,     CI + 0x74             | torn racing reads (counted)
 
         .equ    REMAP,     0x9000                | page 9: page 10, then page 11
         .equ    PAGE_A,    0xA000
@@ -144,7 +153,7 @@ _start:
         bne.s   3f
         moveq   #8, %d5
 3:      tst.l   %d7
-        bne.s   mmu_on
+        bne.w   mmu_on
 
 | --- CPU 0 alone: the tables and the data, with the MMU and caches off -----
         move.l  UMASK, %d6
@@ -170,6 +179,12 @@ _start:
 7:      clr.l   (%a0)+
         dbf     %d0, 7b
         move.l  #PAGE_A + D_WT, PAGES + 4 * 9    | page 9 is page 10 for now
+        tst.l   WTSHARED
+        beq.s   1f
+        move.l  #0x6000 + D_WT_U01, %d2          | page 6 write-through, U 01
+        and.l   %d6, %d2
+        move.l  %d2, PAGES + 4 * 6
+1:
         move.l  #0xAAAA0000, PAGE_A
         move.l  #0xBBBB0000, PAGE_B
         move.l  #0x70014E75, ROUTINE             | moveq #1,d0; rts
@@ -347,6 +362,67 @@ mmu_on:
 73:     move.l  #0x409, %d0
         bsr     err
 74:
+        | A long word across two write-through lines ($71FE-$7201), its halves
+        | written as words by CPU 0 with the same value, read whole by CPU 1.
+        | Racing, a read can be torn -- half old, half new: the two halves are
+        | two transfers, cached or not (UM 7.3; the addendum's "misaligned
+        | reads of shared memory and snoop invalidation"). Counted, not an
+        | error. Under a lock it never is: that is checked.
+        lea     MIS, %a2
+        move.l  %d5, %d3
+        lsl.l   #2, %d3                          | 4 x ITERS
+        tst.l   %d7
+        bne.s   76f
+        moveq   #1, %d2
+75:     move.w  %d2, 2(%a2)                      | the second line's half
+        move.w  %d2, (%a2)                       | the first line's
+        addq.l  #1, %d2
+        cmp.l   %d3, %d2
+        ble.s   75b
+        move.l  #1, MISDONE
+        bra.s   78f
+76:     move.l  (%a2), %d0                       | misaligned: two lines
+        move.l  %d0, %d1
+        swap    %d1
+        cmp.w   %d0, %d1
+        beq.s   77f
+        addq.l  #1, TEARS
+77:     tst.l   MISDONE
+        beq.s   76b
+78:     move.l  #0x426, %d0
+        bsr     barrier
+        lea     MISLOCK, %a0
+        tst.l   %d7
+        bne.s   81f
+        move.l  %d3, %d2
+        add.l   %d3, %d2                         | carry on from 4 x ITERS + 1
+79:     moveq   #0, %d0
+        moveq   #1, %d1
+        cas.l   %d0, %d1, (%a0)
+        bne.s   79b
+        move.w  %d2, 2(%a2)
+        move.w  %d2, (%a2)
+        clr.l   (%a0)
+        subq.l  #1, %d2
+        cmp.l   %d3, %d2
+        bgt.s   79b
+        bra.s   84f
+81:     moveq   #0, %d0
+        moveq   #1, %d1
+        cas.l   %d0, %d1, (%a0)
+        bne.s   81b
+        move.l  (%a2), %d4
+        clr.l   (%a0)
+        move.l  %d4, %d1
+        swap    %d1
+        cmp.w   %d4, %d1
+        beq.s   82f
+        move.l  #0x40A, %d0                      | torn under the lock
+        bsr     err
+82:     subq.l  #1, %d3
+        bne.s   81b
+84:     move.l  #0x427, %d0
+        bsr     barrier
         | MOVE16 of a line CPU 0 holds dirty, copyback U 10.
         tst.l   %d7
         bne.s   32f

@@ -656,13 +656,14 @@ cache:
 # Two processors on one bus (doc/smp.md): core_smp_tb, which `make sim` runs
 # with a few iterations, in its variants -- at length, with wait states and
 # retries (the arbiter then ignoring LOCKE, which retries make unsafe), and
-# CPU 1 let out of reset late -- and the checks shown to work: the printed
+# CPU 1 let out of reset late, and the board without the SC gate or the memory
+# update, its shared pages all write-through -- and the checks shown to work: the printed
 # arbiter's handover must be caught (+gapless), and the board's MI gate, its
 # SC gate, its memory update from sourced data and the pages' U bits must each
 # be missed when taken away (the run must FAIL). Light simulations, four at a time.
 SMPDIR   = $(BUILD)/smp
 SMP_PASS = long:+iters=32 retry:+iters=12+waits=1+retry=40+nolocke late:+iters=8+rsti1=30000 \
-           gapless:+iters=4+gapless
+           straight:+iters=12+wtshared+rawsc+nosnarf gapless:+iters=4+gapless
 SMP_FAIL = nomigate:+iters=4+nomigate+timeout=60000 nosnarf:+iters=12+nosnarf \
            nosnoop:+iters=6+umask=FFFFFCFF+timeout=200000 rawsc:+iters=12+rawsc
 .PHONY: smp

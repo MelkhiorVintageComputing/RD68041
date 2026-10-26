@@ -40,7 +40,7 @@
 // ignores LOCKE), +retry=N (a retry every N clocks or so, anywhere in
 // memory), +waits=N (wait states), +rsti1=N (CPU 1's earliest release, in
 // clocks), and the bench's own breakages for checking the checks: +nomigate,
-// +nosnarf, +rawsc.
+// +nosnarf, +rawsc; and +wtshared, the program's policy (below).
 
 logic clk = 1'b0;
 always #20 clk = ~clk;
@@ -92,6 +92,7 @@ wire        rw_bus  = attr0 ? rw_o[0]  : attr1 ? rw_o[1]  : 1'b1;
 // CAS or TAS -- a long word or byte, never cached -- to a copyback page
 // invalidates the other processor's dirty line and loses the rest of it.
 bit         raw_sc  = $test$plusargs("rawsc");
+bit         wt_shared = $test$plusargs("wtshared");
 wire  [1:0] upa_bus = attr0 ? upa_o[0] : attr1 ? upa_o[1] : 2'b00;
 wire        is_line = (siz_bus == 2'b11);
 wire  [1:0] sc_bus  = raw_sc ? upa_bus :
@@ -303,11 +304,14 @@ always @(negedge clk)
   if (rst_n && retry_every > 0 && ($urandom % retry_every) == 0) u_mem.add_retries(0, 1);
 
 // Load the image, then the program's parameters into memory: ITERS at
-// $8000 and UMASK at $8004 (sim/programs/m14_smp.S).
+// $8000, UMASK at $8004, WTSHARED at $8008 (sim/programs/m14_smp.S).
+// +wtshared: every shared page write-through, U 01 -- the software policy
+// for the board without the SC gate (doc/smp.md).
 task automatic boot2(input string image, input logic [31:0] iters_v, input logic [31:0] umask_v);
   u_mem.load_hex(image);
   u_mem.poke_long(32'h0000_8000, iters_v);
   u_mem.poke_long(32'h0000_8004, umask_v);
+  u_mem.poke_long(32'h0000_8008, {31'h0, wt_shared});
   u_mem.set_region(0, 32'h0000_0000, 32'h0000_0000, waits, 0, 0, -1, 0);
   u_mem.set_region(1, 32'hFFFF_0000, 32'hFFFF_FFF0, 0, 0, 0, -1, 0);
   u_mem.set_external(1);
