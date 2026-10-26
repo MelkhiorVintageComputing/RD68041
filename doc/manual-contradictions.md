@@ -168,3 +168,58 @@ FSIN or FATAN is emulated on garbage; Linux's awk printed nothing right. M11 fol
 table and `core_fpu_tb` checked it; M13's rd-virt lockstep found it, the FPSP taking
 `pack_source` on the core and not on UAE040 (which sets E1 clear;
 `doc/m13-mismatches.md`). `rd68041_fpu.sv`, the frame of an unimplemented instruction.
+
+## 10. Figure 7-35's asterisk: asserted in the states, negated on the arcs
+
+**Followed: the text of UM 7.8.2.1 and note 2 -- "\*" is asserted; the arcs are
+corrected to it.** The core has no arbiter, so nothing in `rtl/` depends on this; it
+matters to whoever builds a dual-MC68040 board from the example.
+
+Figure 7-35 (UM p. 7-53), the dual MC68040 fairness arbiter, says in its note 2
+"\*Indicates the signal is asserted for that device", and its state outputs follow it:
+state A, "BG1\*, BG2", grants processor 1. Its ten arc conditions agree with the text
+only if "\*" means *negated*: read with note 2, the arbiter leaves A when BR2 is
+negated, goes from B to C when BB is asserted, and stays in C while BR1 is asserted --
+the opposite of the text's cases 1 to 3. Every signal name in the figure is barred over
+its whole length (measured from the PDF's strokes), so the overbars tell no literal from
+another and resolve nothing. Figure 7-30 uses "\*" = asserted on its arcs, correctly;
+Figure 7-36 has the same conflict as 7-35. Which half is the misprint cannot be told.
+Motorola's addendum lists pages 7-52 to 7-58 among its errata only as "contains many
+errors in various figures". `doc/um-7-8-2-1-fairness-arbitration.md` (F1) checks every
+arc against every input under four readings (`tools/um_figures/um_7_8_2_1.py --check`)
+and gives the corrected figure.
+
+## 11. Figure 7-35's state A self-loop lacks an asterisk
+
+**Followed: the mirror image -- state A stays put while a locked sequence has not
+asserted LOCKE.**
+
+State A's self-loop is "BR2\* V BR2 Λ LOCK Λ LOCKE"; its mirror image, state C's, is
+"BR1\* V BR1 Λ LOCK Λ LOCKE\*", and Figure 7-36's A self-loop also ends "LOCKE\*". As
+printed, under any reading of the asterisk, the A self-loop overlaps the A-to-B arc on
+one input combination and leaves another with no arc. Under the reading that makes the
+rest of the arcs agree with the text (entry 10), the uncovered one is BR2 asserted,
+LOCK asserted, LOCKE negated: a locked sequence in progress, the very case (text, case
+2) in which the arbiter must stay in A. With the asterisk added, as in C, A is complete
+and exclusive. `doc/um-7-8-2-1-fairness-arbitration.md`, F2.
+
+## 12. Figure 7-35 and its text hand the grant over with no edge between
+
+**Followed: UM p. 7-48 -- every grant negated for at least one rising edge of BCLK
+between tenures.**
+
+The text of UM 7.8.2.1 (cases 1 and 2: state B, "in which BG1 is negated and BG2 is
+asserted") and Figure 7-35's outputs (A and D "BG1\*, BG2"; B and C "BG1, BG2\*") move
+the grant from one processor to the other in a single clock: going from A to B, the BG1
+pin goes high and the BG2 pin low together, and no rising edge sees both high. UM p.
+7-48: "External bus arbiters must be designed so that all bus grants to all bus masters
+be nagated for at least one rising edge of BCLK between bus tenures", and the addendum's
+General Operation item 4 says the same. The conflict is real, not academic: from
+implicit ownership BB is already negated, so processor 2 starts driving the address
+group on the edge it sees BG2 asserted (from 9 ns, specification 20) while processor 1,
+seeing BG1 negated on that same edge, is still releasing it (to 18 ns, specification 38).
+The corrected figure asserts no grant in B and D. `rd68041_biu` behaves as the overlap
+needs (it releases on the edge it sees BG negated in implicit ownership, and starts on
+the edge it sees BG asserted with BB negated), so a board pairing two of these cores
+needs the gap. `doc/um-7-8-2-1-fairness-arbitration.md`, F3, with timing diagrams of
+both handovers.

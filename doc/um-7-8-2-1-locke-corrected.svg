@@ -1,0 +1,132 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1484 615" width="1484" height="615" font-family="'DejaVu Sans',Verdana,Arial,sans-serif" role="img" aria-label="Locked sequence ended with LOCKE, corrected arbiter">
+  <title>Locked sequence ended with LOCKE, corrected arbiter</title>
+  <style>
+    .w    { stroke:#111; stroke-width:2.4; fill:none; stroke-linejoin:round; stroke-linecap:round; }
+    .grid { stroke:#111; stroke-width:0.8; opacity:.30; }
+    .tick { stroke:#111; stroke-width:0.9; opacity:.75; }
+    .dim  { stroke:#111; stroke-width:1.2; }
+    .lbl  { fill:#111; font-size:12.5px; font-weight:700; text-anchor:end; }
+    .st   { fill:#111; font-size:12px; font-weight:700; text-anchor:middle; }
+    .num  { fill:#111; font-size:11.5px; font-weight:700; text-anchor:middle; }
+    .disc { stroke:#111; stroke-width:1.3; fill:#fff; }
+    .ah   { fill:#111; }
+    .ovl  { stroke:#111; stroke-width:1.1; fill:none; }
+    .alt  { stroke:#111; stroke-width:1.6; fill:none; stroke-dasharray:7 5; }
+    @media (prefers-color-scheme: dark) {
+      .w,.grid,.tick,.dim,.ovl,.alt { stroke:#e8e8e8; }
+      .lbl,.st,.num { fill:#e8e8e8; }
+      .disc { stroke:#e8e8e8; fill:#161616; }
+      .ah { fill:#e8e8e8; }
+    }
+    .shade { fill:#d9534f; opacity:.25; }
+    .ok    { fill:#3c8d40; opacity:.18; }
+    .an    { fill:#111; font-size:11.5px; text-anchor:middle; }
+    .anl   { fill:#111; font-size:11.5px; text-anchor:start; }
+    .sname { fill:#111; font-size:12px; font-weight:700; text-anchor:middle; }
+    .rl    { fill:#111; font-size:12.5px; font-weight:700; }
+    .ob    { stroke:#111; stroke-width:1.0; }
+    @media (prefers-color-scheme: dark) {
+      .an,.anl,.sname,.rl { fill:#e8e8e8; }
+      .ob { stroke:#e8e8e8; }
+      .shade { fill:#ff6b5b; opacity:.30; }
+      .ok    { fill:#7ccf80; opacity:.22; }
+    }
+  </style>
+  <line class="grid" x1="244.4" y1="36" x2="244.4" y2="599.0"/>
+  <line class="grid" x1="340.4" y1="36" x2="340.4" y2="599.0"/>
+  <line class="grid" x1="436.4" y1="36" x2="436.4" y2="599.0"/>
+  <line class="grid" x1="532.4" y1="36" x2="532.4" y2="599.0"/>
+  <line class="grid" x1="628.4" y1="36" x2="628.4" y2="599.0"/>
+  <line class="grid" x1="724.4" y1="36" x2="724.4" y2="599.0"/>
+  <line class="grid" x1="820.4" y1="36" x2="820.4" y2="599.0"/>
+  <line class="grid" x1="916.4" y1="36" x2="916.4" y2="599.0"/>
+  <line class="grid" x1="1012.4" y1="36" x2="1012.4" y2="599.0"/>
+  <line class="grid" x1="1108.4" y1="36" x2="1108.4" y2="599.0"/>
+  <line class="grid" x1="1204.4" y1="36" x2="1204.4" y2="599.0"/>
+  <line class="grid" x1="1300.4" y1="36" x2="1300.4" y2="599.0"/>
+  <line class="grid" x1="1396.4" y1="36" x2="1396.4" y2="599.0"/>
+  <text class="lbl" x="144.0" y="61.5"> </text>
+  <text class="lbl" x="144.0" y="102.5"> </text>
+  <text class="lbl" x="144.0" y="143.5"> </text>
+  <text class="lbl" x="144.0" y="184.5"> </text>
+  <text class="lbl" x="144.0" y="250.5"> </text>
+  <text class="lbl" x="144.0" y="291.5"> </text>
+  <text class="lbl" x="144.0" y="332.5"> </text>
+  <text class="lbl" x="144.0" y="373.5"> </text>
+  <text class="lbl" x="144.0" y="439.5"> </text>
+  <text class="lbl" x="144.0" y="480.5"> </text>
+  <text class="lbl" x="144.0" y="546.5"> </text>
+  <path class="w" d="M 158.0,70.0 L 239.9,70.0 L 248.9,44.0 L 335.9,44.0 L 344.9,70.0 L 431.9,70.0 L 440.9,44.0 L 527.9,44.0 L 536.9,70.0 L 623.9,70.0 L 632.9,44.0 L 719.9,44.0 L 728.9,70.0 L 815.9,70.0 L 824.9,44.0 L 911.9,44.0 L 920.9,70.0 L 1007.9,70.0 L 1016.9,44.0 L 1103.9,44.0 L 1112.9,70.0 L 1199.9,70.0 L 1208.9,44.0 L 1295.9,44.0 L 1304.9,70.0 L 1391.9,70.0 L 1400.9,44.0 L 1487.9,44.0 L 1496.9,70.0 L 1444.4,70.0"/>
+  <path class="w" d="M 495.3,85.0 L 504.3,111.0 M 495.3,111.0 L 504.3,85.0"/>
+  <path class="w" d="M 879.3,85.0 L 888.3,111.0 M 879.3,111.0 L 888.3,85.0"/>
+  <line class="w" x1="158.0" y1="85.0" x2="495.3" y2="85.0"/>
+  <line class="w" x1="504.3" y1="85.0" x2="879.3" y2="85.0"/>
+  <line class="w" x1="888.3" y1="85.0" x2="1444.4" y2="85.0"/>
+  <line class="w" x1="158.0" y1="111.0" x2="495.3" y2="111.0"/>
+  <line class="w" x1="504.3" y1="111.0" x2="879.3" y2="111.0"/>
+  <line class="w" x1="888.3" y1="111.0" x2="1444.4" y2="111.0"/>
+  <path class="w" d="M 158.0,126.0 L 303.3,126.0 L 312.3,152.0 L 495.3,152.0 L 504.3,126.0 L 1444.4,126.0"/>
+  <path class="w" d="M 158.0,167.0 L 495.3,167.0 L 504.3,193.0 L 687.3,193.0 L 696.3,167.0 L 1444.4,167.0"/>
+  <path class="w" d="M 158.0,259.0 L 687.3,259.0 L 696.3,233.0 L 1444.4,233.0"/>
+  <path class="w" d="M 158.0,274.0 L 303.3,274.0 L 312.3,300.0 L 687.3,300.0 L 696.3,274.0 L 1444.4,274.0"/>
+  <path class="w" d="M 158.0,341.0 L 1071.3,341.0 L 1080.3,315.0 L 1444.4,315.0"/>
+  <path class="w" d="M 158.0,382.0 L 495.3,382.0 L 504.3,356.0 L 1444.4,356.0"/>
+  <path class="w" d="M 158.0,422.0 L 879.3,422.0 L 888.3,448.0 L 1444.4,448.0"/>
+  <path class="w" d="M 158.0,489.0 L 687.3,489.0 L 696.3,463.0 L 1071.3,463.0 L 1080.3,489.0 L 1444.4,489.0"/>
+  <path class="w" d="M 158.0,529.0 L 1071.3,529.0 L 1080.3,555.0 L 1263.3,555.0 L 1272.3,529.0 L 1444.4,529.0"/>
+  <text class="st" x="340.4" y="30">C1</text>
+  <text class="st" x="532.4" y="30">C2</text>
+  <text class="st" x="724.4" y="30">C3</text>
+  <text class="st" x="916.4" y="30">C4</text>
+  <text class="st" x="1108.4" y="30">C5</text>
+  <text class="st" x="1300.4" y="30">C6</text>
+  <text class="sname" x="372.1" y="102.5">A</text>
+  <text class="sname" x="691.8" y="102.5">B</text>
+  <text class="sname" x="1164.1" y="102.5">C</text>
+  <text class="an" style="text-anchor:start" x="647.6" y="212.0" textLength="24.4" lengthAdjust="spacingAndGlyphs">last </text>
+  <text class="an" style="text-anchor:start" x="672.0" y="212.0" textLength="14.9" lengthAdjust="spacingAndGlyphs">TA</text>
+  <line class="ob" x1="672.4" y1="202.1" x2="686.5" y2="202.1"/>
+  <text class="an" style="text-anchor:start" x="686.9" y="212.0" textLength="184.9" lengthAdjust="spacingAndGlyphs">, sampled at the end of C2 with </text>
+  <text class="an" style="text-anchor:start" x="871.8" y="212.0" textLength="24.1" lengthAdjust="spacingAndGlyphs">BG1</text>
+  <line class="ob" x1="872.2" y1="202.1" x2="895.5" y2="202.1"/>
+  <text class="an" style="text-anchor:start" x="895.9" y="212.0" textLength="347.2" lengthAdjust="spacingAndGlyphs"> already negated: processor 1 gives the bus up (UM p. 7-45)</text>
+  <text class="an" style="text-anchor:start" x="513.2" y="401.0" textLength="141.2" lengthAdjust="spacingAndGlyphs">A -&gt; B at the end of C1: </text>
+  <text class="an" style="text-anchor:start" x="654.4" y="401.0" textLength="23.2" lengthAdjust="spacingAndGlyphs">BR2</text>
+  <line class="ob" x1="654.8" y1="391.1" x2="677.2" y2="391.1"/>
+  <text class="an" style="text-anchor:start" x="677.6" y="401.0" textLength="7.3" lengthAdjust="spacingAndGlyphs">, </text>
+  <text class="an" style="text-anchor:start" x="684.9" y="401.0" textLength="31.0" lengthAdjust="spacingAndGlyphs">LOCK</text>
+  <line class="ob" x1="685.3" y1="391.1" x2="715.5" y2="391.1"/>
+  <text class="an" style="text-anchor:start" x="715.9" y="401.0" textLength="28.9" lengthAdjust="spacingAndGlyphs"> and </text>
+  <text class="an" style="text-anchor:start" x="744.9" y="401.0" textLength="38.3" lengthAdjust="spacingAndGlyphs">LOCKE</text>
+  <line class="ob" x1="745.3" y1="391.1" x2="782.8" y2="391.1"/>
+  <text class="an" style="text-anchor:start" x="783.2" y="401.0" textLength="53.4" lengthAdjust="spacingAndGlyphs"> asserted</text>
+  <text class="an" style="text-anchor:start" x="839.6" y="508.0" textLength="349.0" lengthAdjust="spacingAndGlyphs">B -&gt; C at the end of C3; the ends of C2 and C3 see no grant</text>
+  <text class="an" style="text-anchor:start" x="263.6" y="574.0" textLength="18.0" lengthAdjust="spacingAndGlyphs">on </text>
+  <text class="an" style="text-anchor:start" x="281.6" y="574.0" textLength="31.0" lengthAdjust="spacingAndGlyphs">LOCK</text>
+  <line class="ob" x1="282.0" y1="564.1" x2="312.2" y2="564.1"/>
+  <text class="an" style="text-anchor:start" x="312.6" y="574.0" textLength="554.0" lengthAdjust="spacingAndGlyphs"> alone, A is left only at the end of C3, when processor 1 may already have started another cycle</text>
+  <text class="rl" style="text-anchor:start" x="108.9" y="61.5" textLength="35.1" lengthAdjust="spacingAndGlyphs">BCLK</text>
+  <text class="rl" style="text-anchor:start" x="86.0" y="96.0" textLength="58.0" lengthAdjust="spacingAndGlyphs">ARBITER</text>
+  <text class="rl" style="text-anchor:start" x="101.2" y="109.0" textLength="42.8" lengthAdjust="spacingAndGlyphs">STATE</text>
+  <text class="rl" style="text-anchor:start" x="57.6" y="143.5" textLength="16.8" lengthAdjust="spacingAndGlyphs">TS</text>
+  <line class="ob" x1="58.0" y1="132.8" x2="74.0" y2="132.8"/>
+  <text class="rl" style="text-anchor:start" x="74.4" y="143.5" textLength="69.6" lengthAdjust="spacingAndGlyphs"> (PROC. 1)</text>
+  <text class="rl" style="text-anchor:start" x="126.5" y="184.5" textLength="17.5" lengthAdjust="spacingAndGlyphs">TA</text>
+  <line class="ob" x1="126.9" y1="173.8" x2="143.6" y2="173.8"/>
+  <text class="rl" style="text-anchor:start" x="107.6" y="250.5" textLength="36.4" lengthAdjust="spacingAndGlyphs">LOCK</text>
+  <line class="ob" x1="108.0" y1="239.8" x2="143.6" y2="239.8"/>
+  <text class="rl" style="text-anchor:start" x="99.0" y="291.5" textLength="45.0" lengthAdjust="spacingAndGlyphs">LOCKE</text>
+  <line class="ob" x1="99.4" y1="280.8" x2="143.6" y2="280.8"/>
+  <text class="rl" style="text-anchor:start" x="116.8" y="332.5" textLength="27.2" lengthAdjust="spacingAndGlyphs">BR2</text>
+  <line class="ob" x1="117.2" y1="321.8" x2="143.6" y2="321.8"/>
+  <text class="rl" style="text-anchor:start" x="115.7" y="373.5" textLength="28.3" lengthAdjust="spacingAndGlyphs">BG1</text>
+  <line class="ob" x1="116.1" y1="362.8" x2="143.6" y2="362.8"/>
+  <text class="rl" style="text-anchor:start" x="115.7" y="439.5" textLength="28.3" lengthAdjust="spacingAndGlyphs">BG2</text>
+  <line class="ob" x1="116.1" y1="428.8" x2="143.6" y2="428.8"/>
+  <text class="rl" style="text-anchor:start" x="86.3" y="480.5" textLength="18.5" lengthAdjust="spacingAndGlyphs">BB</text>
+  <line class="ob" x1="86.7" y1="469.8" x2="104.4" y2="469.8"/>
+  <text class="rl" style="text-anchor:start" x="104.8" y="480.5" textLength="39.2" lengthAdjust="spacingAndGlyphs"> (line)</text>
+  <text class="rl" style="text-anchor:start" x="57.6" y="546.5" textLength="16.8" lengthAdjust="spacingAndGlyphs">TS</text>
+  <line class="ob" x1="58.0" y1="535.8" x2="74.0" y2="535.8"/>
+  <text class="rl" style="text-anchor:start" x="74.4" y="546.5" textLength="69.6" lengthAdjust="spacingAndGlyphs"> (PROC. 2)</text>
+</svg>
