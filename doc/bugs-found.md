@@ -31,6 +31,34 @@ synchroniser) are in RD68031's `doc/bugs-found.md`.*
    and rd-qvirt's Linux never happened to. `core_fetchnext_tb`
    (`sim/programs/m14_fetch_next.S`) does: two faults without the fix, one with it.
 
+2. **An instruction whose extension words were on a page not resident hung the
+   processor** -- a regression from the fix above. Decode took a faulted fetch's
+   access fault only once all of the instruction's words were in the queue (or
+   at once if its operation word was one of them). Since the fetch stops at an
+   ATC fault (`xstop`), an instruction whose operation word is the last word of a
+   resident page, and that has more extension words than the faulted long word
+   brings, never had them all: decode waited for words that would never come,
+   with nothing to redirect the fetch, and the pipeline behind it empty -- no
+   instruction, no interrupt, ever. NetBSD 11.0's install ramdisk on litex-68k
+   froze the machine as soon as `gzcat` ran: a `MOVE.L #$3F45,(4,A3)` at `$FBFFE`
+   in its zlib, page `$FC000` not yet mapped, the queue holding the operation word
+   and the two faulted words of three. litex-68k confirmed it independently with
+   the board's ILA (the instruction-side table walk for `$FC000`, its page
+   descriptor invalid, then nothing) and a user program that does only that
+   (`pagecross.c`: hangs with the next page not resident, passes with it read
+   first). Decode now takes the fault as soon as a
+   faulted word the instruction needs is in the queue (the words before it are
+   all there: the queue is in order), which is the same frame -- the PC the
+   instruction's, FA the faulted long word -- as waiting gave whenever the words
+   did come. downstream's trace pointed at the write fault taken just before (its
+   output was flushed only at a change of mode, so what came after was lost);
+   rd-qvirt found the place, with NetBSD/virt68k and the same ramdisk, by the new
+   end-of-run capture (`--vcd-from hang`, and the last boundaries). No bench put
+   an instruction across into a page not resident with more than one long word
+   on the far side: `core_fetchnext_tb`'s ran into a page made resident first.
+   `core_fetchext_tb` (`sim/programs/m14_fetch_ext.S`) does, with the instruction
+   cache off and on: it hangs without the fix.
+
 ---
 
 ## M14: found by MAME's Quadra

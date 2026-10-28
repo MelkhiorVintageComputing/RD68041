@@ -626,6 +626,16 @@ StepResult RtlCpu::run_until_retire() {
       in_stop_ = false;
       stopped = 0;
     }
+#if VM_TRACE
+    // vcd_from all ones: the last 2000 clocks before the watchdog fires, the
+    // hung core's state.
+    if (!o_.vcd.empty() && !v.vcd && o_.vcd_from == UINT64_MAX &&
+        v.clocks - start > o_.watchdog - 2000) {
+      v.vcd = new VerilatedVcdC;
+      top->trace(v.vcd, 99);
+      v.vcd->open(o_.vcd.c_str());
+    }
+#endif
     if (v.clocks - start > o_.watchdog) {
       snapshot(regs_.pc);
       fprintf(stderr, "rtl: no boundary in %llu clocks\n", (unsigned long long)o_.watchdog);

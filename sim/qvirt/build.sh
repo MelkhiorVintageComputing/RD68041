@@ -11,7 +11,7 @@
 # The Verilator build is a heavy job (CLAUDE.md): run it alone. Nothing here
 # links QEMU, which runs as a separate process. Knobs from the environment:
 # RTLFILES (the Makefile passes its RTL), FPU (1; 0 builds the MC68LC040),
-# JOBS (4).
+# TRACE (1: with VCD dumps, --vcd), JOBS (4).
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 TOP=$(cd "$HERE/../.." && pwd)
@@ -26,7 +26,9 @@ FPU=${FPU:-1}
 RTL=""
 for f in $RTLFILES; do RTL="$RTL $TOP/$f"; done
 rm -f "$OUT/obj/qvirt"
-verilator --cc --exe --build --build-jobs "$JOBS" --threads 1 -O3 \
+TRACEOPT=""
+[ "${TRACE:-0}" = 1 ] && TRACEOPT="--trace"
+verilator --cc --exe --build --build-jobs "$JOBS" --threads 1 -O3 $TRACEOPT \
 	-Wno-fatal -Wno-lint -Wno-style --top-module rd68041_top -GFPU="$FPU" \
 	--output-split 20000 --output-split-cfuncs 500 --Mdir "$OUT/obj" -o qvirt \
 	-CFLAGS "-O2 -std=c++17 -DRDVIRT_RTL -DRDVIRT_FPU=$FPU -I$HERE -I$VIRT" \

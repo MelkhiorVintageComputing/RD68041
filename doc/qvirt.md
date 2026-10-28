@@ -178,6 +178,12 @@ The masks list only what depends on elapsed time or on another process's pace:
 
 Two reference runs agree under the mask.
 
+A run that hangs ends at the core's watchdog (no boundary in 2,000,000 clocks) and
+prints the last 256 boundaries, PC, SR and registers. A model built with
+`TRACE=1 sim/qvirt/build.sh DIR` takes `--vcd F --vcd-from N`. With `--vcd-from hang`, it
+dumps the 2,000 clocks before the watchdog fires instead, which is the hung core's state
+from one run, without knowing the step it hangs at (`doc/bugs-found.md`: `gzcat`).
+
 ## The guests
 
 - **The bare-metal programs** (`make qvirt-bare`): `sim/programs/virt_*.S`, rd-virt's,

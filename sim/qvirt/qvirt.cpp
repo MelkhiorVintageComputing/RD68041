@@ -59,7 +59,9 @@ void usage() {
           "  --io-waits N        wait states on the devices (1)\n"
           "  --tbi               RAM burst-inhibits lines (TBI)\n"
           "  --tci               TCI on every line read (caches off)\n"
-          "  --trace-from N      print every boundary's PC and SR from step N\n");
+          "  --trace-from N      print every boundary's PC and SR from step N\n"
+          "  --vcd F --vcd-from N  dump a VCD from boundary N, or the 2000 clocks before a hang\n"
+          "                        (N = hang; a TRACE=1 build)\n");
 }
 
 }  // namespace
@@ -100,6 +102,11 @@ int main(int argc, char **argv) {
     else if (a == "--tbi") ro.tbi = true;
     else if (a == "--tci") ro.tci = true;
     else if (a == "--trace-from") trace_from = strtoull(next().c_str(), nullptr, 0);
+    else if (a == "--vcd") ro.vcd = next();
+    else if (a == "--vcd-from") {
+      std::string f = next();
+      ro.vcd_from = f == "hang" ? UINT64_MAX : strtoull(f.c_str(), nullptr, 0);
+    }
     else { usage(); return 2; }
   }
   if (qc.qemu.empty() || qc.dir.empty() || qc.kernel.empty()) { usage(); return 2; }
@@ -141,6 +148,8 @@ int main(int argc, char **argv) {
   double t0 = wall();
   StepResult r = cpu.reset();
   uint64_t next_prog = progress, stops = 0;
+  static const unsigned NLAST = 256;
+  static char last[NLAST][128];
   while (r != StepResult::Halted && !m.powered_off && !m.gone) {
     r = cpu.run_until_retire();
     if (r == StepResult::Halted) break;
@@ -173,6 +182,12 @@ int main(int argc, char **argv) {
         if (uint32_t(wwatch) - w.la < w.size)
           fprintf(stderr, "write %08x/%d=%0*x step %" PRIu64 " pc %08x sr %04x a7 %08x\n", w.la, w.size,
                   2 * w.size, w.data, n, cpu.regs().pc, cpu.regs().sr, cpu.regs().a[7]);
+    {
+      // The last boundaries, for the end of a run that hangs.
+      const CpuRegs &g = cpu.regs();
+      snprintf(last[n % NLAST], sizeof last[0], "%10" PRIu64 " %08x %04x d %08x %08x %08x %08x a %08x %08x %08x %08x",
+               n, g.pc, g.sr, g.d[0], g.d[1], g.d[2], g.d[3], g.a[0], g.a[1], g.a[5], g.a[7]);
+    }
     if (n >= trace_from) {
       const CpuRegs &g = cpu.regs();
       fprintf(stderr, "%10" PRIu64 " %08x %04x d %08x %08x %08x %08x a %08x %08x %08x %08x%s\n", n,
@@ -211,6 +226,9 @@ int main(int argc, char **argv) {
   if (r == StepResult::Halted || !m.powered_off) {
     const CpuRegs &g = cpu.regs();
     fprintf(stderr, "PC %08x SR %04x A7 %08x\n", g.pc, g.sr, g.a[7]);
+    uint64_t k = cpu.retired();
+    for (uint64_t i = k >= NLAST ? k - NLAST + 1 : 1; i <= k; i++)
+      fprintf(stderr, "last %s\n", last[i % NLAST]);
     m.dump_ring(stderr, getenv("RDVIRT_RING") ? atoi(getenv("RDVIRT_RING")) : 32);
   }
   bool ok = m.powered_off && !m.panicked;

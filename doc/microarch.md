@@ -422,4 +422,5 @@ the screen MAME's own CPUs end on, pixel for pixel (`make quadra`, `make quadra-
 `doc/oracles.md`). One RTL bug found on the way: a serialised read made twice
 (`doc/bugs-found.md`).
 `make impl`: 30.44 MHz; `FPU=0`: 30.58 MHz. After the fetch fix that stops at an ATC fault
-(`doc/bugs-found.md`): 30.61 MHz and 31.87 MHz.
+(`doc/bugs-found.md`): 30.61 MHz and 31.87 MHz. After decode takes a fetch fault with the
+instruction part-fetched: 30.76 MHz and 32.17 MHz.
