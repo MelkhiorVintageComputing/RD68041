@@ -110,6 +110,8 @@ help:
 	@echo "  make ea           ... the addressing-mode sweep (OP=ea)"
 	@echo "  make smp          two processors behind UM 7.8.2.1's arbiter, corrected: core_smp_tb's"
 	@echo "                    variants, and its checks shown to catch a broken board (doc/smp.md)"
+	@echo "  make cycles       integer instruction timings (BCLK) against UM section 10, the"
+	@echo "                    table in doc/timing-divergences.md (build/cycles/cycles.md)"
 	@echo "  make cache        the caches against the oracles: their cosims, vectors-all and"
 	@echo "                    cputest with the caches on (CACHE=1 write-through, 2 copyback),"
 	@echo "                    and core_mmu_tb with them on"
@@ -228,7 +230,7 @@ ucode-check: dirs
 # leaves no verdict -- killed, or crashed before writing one -- is a failure.
 # ---------------------------------------------------------------------------
 # The oracle sweeps' benches need a stream and have their own targets.
-TBS := $(filter-out core_cosim_tb core_vec_tb core_cputest_tb fpu_dp_tb,$(patsubst sim/tb/%.sv,%,$(wildcard sim/tb/*_tb.sv)))
+TBS := $(filter-out core_cosim_tb core_vec_tb core_cputest_tb core_cycles_tb fpu_dp_tb,$(patsubst sim/tb/%.sv,%,$(wildcard sim/tb/*_tb.sv)))
 # core_fpu_tb is the FPU's state frames: not the MC68LC040's, which has none.
 ifeq ($(FPU),0)
 TBS := $(filter-out core_fpu_tb,$(TBS))
@@ -685,6 +687,28 @@ smp: dirs build/programs/m14_smp.hex
 	     *) echo "  $$n: WRONG -- $$r ($(SMPDIR)/$$n.log)"; ok=0;; \
 	   esac; done; \
 	 test $$ok -eq 1 && echo "PASS: smp (FPU=$(FPU))"
+
+# Integer instruction timings (M15): tools/cycles/cycles.py's program, each
+# case's copies run until the caches are warm, core_cycles_tb's clocks between
+# the first and the last, and the table against UM section 10 that
+# doc/timing-divergences.md carries. A light simulation.
+CYCDIR = $(BUILD)/cycles$(if $(filter 0,$(FPU)),/lc)
+.PHONY: cycles
+cycles: dirs
+	@mkdir -p $(CYCDIR)
+	@python3 tools/cycles/cycles.py gen $(CYCDIR)/m15_cycles.S
+	@$(CROSS)gcc -mcpu=68040 -c -o $(CYCDIR)/m15_cycles.o $(CYCDIR)/m15_cycles.S
+	@$(CROSS)gcc -mcpu=68040 -nostdlib -nostartfiles -T sim/programs/flat.ld \
+	    -Wl,--no-warn-rwx-segments -o $(CYCDIR)/m15_cycles.elf $(CYCDIR)/m15_cycles.o 2> /dev/null
+	@$(CROSS)objcopy -O verilog --verilog-data-width=1 $(CYCDIR)/m15_cycles.elf $(CYCDIR)/m15_cycles.hex
+	@iverilog $(IVFLAGS) -I sim/tb -o $(CYCDIR)/core_cycles_tb.vvp -s core_cycles_tb \
+	    $(RTL) $(MODELS) sim/tb/core_cycles_tb.sv > $(CYCDIR)/build.log 2>&1 \
+	  || { grep -v $(NOTES) $(CYCDIR)/build.log; exit 1; }
+	@vvp $(CYCDIR)/core_cycles_tb.vvp +image=$(CYCDIR)/m15_cycles.hex > $(CYCDIR)/cycles.log 2>&1
+	@grep -q '^PASS' $(CYCDIR)/cycles.log || { tail -3 $(CYCDIR)/cycles.log; exit 1; }
+	@python3 tools/cycles/cycles.py report $(CYCDIR)/cycles.log > $(CYCDIR)/cycles.md
+	@tail -1 $(CYCDIR)/cycles.md
+	@echo "PASS: cycles (FPU=$(FPU), the table in $(CYCDIR)/cycles.md)"
 
 # The MC68LC040 against UAE040 -L (M12): the core built with FPU=0, the
 # integer programs and m12_lc040, every FP instruction a format $4 frame.
