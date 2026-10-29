@@ -83,17 +83,32 @@ endtask
 
 // The handshakes are sampled at the edge they complete on, before it updates
 // anything (every register is written with a nonblocking assignment).
+// A read released to EX before its answer (rd68041_dmu ld_rel) is answered
+// after <ea> fetch has moved on: its address and size are the ones asked for
+// when it was released.
+logic [31:0] rel_a;
+logic  [1:0] rel_sz;
 always @(posedge clk) begin
   if (cap_on && rst_n) begin
     // (A write's probe, with a TTR or translation on, is not an operand read.)
-    if (dut.u_core.u_dmu.ld_done && dut.u_core.rs == 2'd2 && !dut.u_core.u_dmu.ld_probe) begin
+    if (dut.u_core.u_dmu.ld_done && dut.u_core.rs == 2'd2 &&
+        (dut.u_core.u_dmu.rel_q || dut.u_core.u_dmu.rel_pend || !dut.u_core.u_dmu.ld_probe)) begin
       if (ncap < MAXCAP) begin
-        cap_addr[ncap]  = dut.u_core.u_dmu.ld_addr;
-        cap_bytes[ncap] = sz_bytes(dut.u_core.u_dmu.ld_sz);
+        if (dut.u_core.u_dmu.rel_q || dut.u_core.u_dmu.rel_pend) begin
+          cap_addr[ncap]  = rel_a;
+          cap_bytes[ncap] = sz_bytes(rel_sz);
+        end else begin
+          cap_addr[ncap]  = dut.u_core.u_dmu.ld_addr;
+          cap_bytes[ncap] = sz_bytes(dut.u_core.u_dmu.ld_sz);
+        end
         cap_rd[ncap]    = 1'b1;
         cap_data[ncap]  = dut.u_core.u_dmu.ld_data;
       end
       ncap = ncap + 1;
+    end
+    if (dut.u_core.u_dmu.ld_rel) begin
+      rel_a  = dut.u_core.u_dmu.ld_addr;
+      rel_sz = dut.u_core.u_dmu.ld_sz;
     end
     if (dut.u_core.u_dmu.st_valid && dut.u_core.u_dmu.st_ready) begin
       if (ncap < MAXCAP) begin

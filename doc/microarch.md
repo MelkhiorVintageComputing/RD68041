@@ -209,8 +209,19 @@ walking the 256 lines; the snooper invalidates a line a snooped transfer hits
 **The data cache** (`rtl/rd68041_dmu.sv`). The cache's port A is addressed with the
 address \<ea\> fetch will hold next (the one \<ea\> calculate hands on, or the one it
 holds), so a read that fits in a half-line has its data out of the RAM on the clock it is
-in \<ea\> fetch; its tags are compared then, and a hit is answered on the next clock --
-two clocks of \<ea\> fetch where the part takes one (`doc/timing-divergences.md`).
+in \<ea\> fetch; its tags are compared then, and a hit is answered on the next clock.
+\<ea\> fetch does not wait for that answer when the machine can promise, from its
+registers, to take the read in that clock (`ld_take`: it rests, no write in the queue
+is in the read's way, no read is outstanding). The read is then released to execute
+(`of_rel`): a plain one, not locked, alternate-space, MOVE16, acknowledge, exception
+processing's or an FP operation's. Execute receives the hit's data on the same edge as the
+data unit would have registered it (`ld_fast`, `ld_fdata`), so it reads a register of its own, and \<ea\>
+fetch takes the next read at once: a run of hits goes at one a clock, as on the part.
+Otherwise execute waits (`ex_wait`) for the data unit's `ld_done`, which writes its
+operand, or the access fault, into its registers; nothing else is asked for meanwhile.
+The read of the miss, or of the ATC miss, starts in the clock it was released; a read
+that must wait, a serialised or cache-inhibited page's, is held in the data unit's slot,
+which starts it once execute's instruction is the oldest and the queue is empty.
 Everything else goes a piece at a time (each aligned in a long word, as UM 7.3 splits
 an operand) through a state machine: a cachable piece's half-line read on port B and
 its tags compared; a hit read from or written into the cache (a copyback write setting

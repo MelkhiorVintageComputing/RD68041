@@ -281,7 +281,7 @@ sim: dirs $(patsubst %,build/programs/%.hex,$(SIMPROGS))
 # ---------------------------------------------------------------------------
 PROGS   ?= m6_basic m7_a m7_b m7_c m8_exc m9_icache m9_dcache m9_move16 \
            m11_fpu_a m11_fpu_b m12_fpu_ind m13_move_mm m13_an_upd m13_fsave_null m13_ind_moves m14_duff \
-           m15_fwd
+           m15_fwd m15_ldrel
 
 # Keep the intermediate files: the ELF is what objdump reads when a run fails.
 .SECONDARY:
@@ -649,7 +649,7 @@ CPUTEST_MAX  ?= 40
 # What is on the bus is core_cache_tb's and core_snoop_tb's, in `make sim`.
 .PHONY: cache
 cache:
-	@$(MAKE) --no-print-directory cosim PROGS="m9_icache m9_dcache m9_move16 m15_fwd"
+	@$(MAKE) --no-print-directory cosim PROGS="m9_icache m9_dcache m9_move16 m15_fwd m15_ldrel"
 	@$(MAKE) --no-print-directory mmu-cache
 	@for c in 1 2; do echo "== vectors-all CACHE=$$c"; \
 	  $(MAKE) --no-print-directory vectors-all CACHE=$$c || exit 1; done
@@ -713,7 +713,7 @@ cycles: dirs
 
 # The MC68LC040 against UAE040 -L (M12): the core built with FPU=0, the
 # integer programs and m12_lc040, every FP instruction a format $4 frame.
-LCPROGS ?= m6_basic m7_a m7_b m7_c m8_exc m9_icache m9_dcache m9_move16 m10_mmu m12_lc040 m13_move_mm m13_an_upd m13_ind_moves m14_duff m15_fwd
+LCPROGS ?= m6_basic m7_a m7_b m7_c m8_exc m9_icache m9_dcache m9_move16 m10_mmu m12_lc040 m13_move_mm m13_an_upd m13_ind_moves m14_duff m15_fwd m15_ldrel
 .PHONY: cosim-lc
 cosim-lc:
 	@$(MAKE) --no-print-directory cosim FPU=0 BUILD=$(BUILD)/lc040 PROGS="$(LCPROGS)"
