@@ -23,8 +23,8 @@ integer instructions against it (below).
 
 **Not identical.** UM section 10 counts in BCLK ("All timings are related to BCLK cycles",
 UM 10.1), so the comparison is direct. `make cycles` measures 142 instruction and
-addressing-mode cases from UM 10.4-10.6. 21 take what the part takes, 66 are faster and
-55 slower. The MC68LC040 build (`make cycles FPU=0`) gives the same table, clock for clock.
+addressing-mode cases from UM 10.4-10.6. 22 take what the part takes, 68 are faster and
+52 slower. The MC68LC040 build (`make cycles FPU=0`) gives the same table, clock for clock.
 
 **How it is measured** (`tools/cycles/cycles.py`, `sim/tb/core_cycles_tb.sv`):
 - Each case is 16 copies of the instruction in a straight line, or of a pair that must go
@@ -67,18 +67,22 @@ addressing-mode cases from UM 10.4-10.6. 21 take what the part takes, 66 are fas
 - **Slower:**
   - **A read that hits the cache takes two clocks of \<ea\> fetch**, the part one (the
     caches, below). Every load is 2 where the UM gives 1.
-  - **A run of writes goes at the data memory unit's rate.** Writes drain from the write
-    queue through the unit's state machine, a piece at a time: the half-line read, the tag
-    compare and the write. With a TTR or the MMU on, each write's micro-operation also
-    waits for its probe (the MMU, below). A run of stores takes 3.73 clocks a store, where
-    the part takes 1.
-    - MOVEM.L of four registers to memory takes 17 (UM: 6).
+  - **A run of writes goes at the data memory unit's rate: 2 clocks a write.** Writes
+    drain from the write queue through the unit's state machine: the translation and
+    half-line read, then the tag compare and the write. While one write compares its tag,
+    the next in the queue starts its translation, and a write's probe in \<ea\> fetch runs
+    beside the writes draining (`doc/microarch.md`, the data cache). A run of stores takes
+    2 clocks a store, where the part takes 1 (3 for the indexed mode, so faster there).
+    - MOVEM.L of four registers to memory takes 12 (UM: 6).
     - MOVE16 takes 24. The UM gives 7, plus 8 for each successive one (its note d), so 15
       in a run.
-  - **A read-modify-write of memory takes 9**, the part 1 to 3: ADD, ADDI, ADDQ, NOT, BSET
-    or LSL to (An). The read waits for the write the copy before made to the same long
-    word to drain from the queue (UM 7.7: a read of data waiting to be written).
-    Instructions that read and write memory through two micro-operations take 4 to 10 a
+  - **A read-modify-write of memory takes 4**, the part 1 to 3: ADD, ADDI, ADDQ, NOT, BSET
+    or LSL to (An). The read is answered from the write queue: the write the copy before
+    made to the same long word is still queued, and holds every byte the read wants (UM
+    7.7 lets a read be answered from data waiting to be written). What remains is the
+    \<ea\> fetch stage waiting for the write in execute and write-back to reach the
+    queue. A read the queued write covers only in part still waits for it to drain.
+    Instructions that read and write memory through two micro-operations take 4 to 8 a
     copy (UM: 2 to 4):
     - MOVE (An),(An);
     - CMPM;
@@ -89,7 +93,7 @@ addressing-mode cases from UM 10.4-10.6. 21 take what the part takes, 66 are fas
     applies to:
     - BRA, DBcc and JMP: 8 (UM: 2 to 3);
     - BSR or JSR with RTS: 18 (UM: 7 and 8);
-    - LINK with UNLK: 13 (UM: 5). Each also writes or reads the stack.
+    - LINK with UNLK: 8 (UM: 5). Each also writes or reads the stack.
   - **The divider is a bit a clock.** DIVS.L and DIVU.L take 35 against 44, but DIVU.W
     takes 35 against 27.
   - **Instruction fetch gives about two words a clock** (the caches, below). A run of
@@ -120,23 +124,23 @@ give each instruction's figures, separated by ";":
 | MOVE.L ([bd,An,Xn],od),Dn | 11 | 1L+10 | 11 | 6 | -5 |
 | MOVE.L ([bd,An],Xn),Dn | 11 | 3L+8 | 11 | 6 | -5 |
 | MOVE.L ([bd,An],Xn,od),Dn | 12 | 3L+9 | 12 | 6 | -6 |
-| MOVE.L Dn,(An) | 1 | 1 | 1 | 3.73 | +2.73 |
-| MOVE.L Dn,(An)+ | 1 | 1 | 1 | 3.73 | +2.73 |
-| MOVE.L Dn,-(An) | 1 | 1 | 1 | 3.73 | +2.73 |
-| MOVE.L Dn,(d16,An) | 1 | 1 | 1 | 3.73 | +2.73 |
-| MOVE.L Dn,(xxx).L | 1 | 1 | 1 | 3.73 | +2.73 |
-| MOVE.L Dn,(d8,An,Xn) | 3 | 3 | 3 | 3.73 | +0.73 |
-| MOVE.L #<xxx>,(An) | 1 | 1 | 1 | 3.73 | +2.73 |
-| MOVE.L (An),(An) | 1 | 1 | 1 | 5.87 | +4.87 |
-| MOVE.L (An)+,(An)+ | 2 | 1L+1 | 2 | 5.87 | +3.87 |
-| MOVE.L (An),(d16,An) | 2 | 1L+1 | 2 | 5.87 | +3.87 |
-| MOVE.L (d8,An,Xn),(d8,An,Xn) | 8 | 8 | 8 | 5.87 | -2.13 |
+| MOVE.L Dn,(An) | 1 | 1 | 1 | 2 | +1 |
+| MOVE.L Dn,(An)+ | 1 | 1 | 1 | 2 | +1 |
+| MOVE.L Dn,-(An) | 1 | 1 | 1 | 2 | +1 |
+| MOVE.L Dn,(d16,An) | 1 | 1 | 1 | 2 | +1 |
+| MOVE.L Dn,(xxx).L | 1 | 1 | 1 | 2 | +1 |
+| MOVE.L Dn,(d8,An,Xn) | 3 | 3 | 3 | 2 | -1 |
+| MOVE.L #<xxx>,(An) | 1 | 1 | 1 | 2 | +1 |
+| MOVE.L (An),(An) | 1 | 1 | 1 | 4.93 | +3.93 |
+| MOVE.L (An)+,(An)+ | 2 | 1L+1 | 2 | 4.93 | +2.93 |
+| MOVE.L (An),(d16,An) | 2 | 1L+1 | 2 | 4.93 | +2.93 |
+| MOVE.L (d8,An,Xn),(d8,An,Xn) | 8 | 8 | 8 | 4.93 | -3.07 |
 | MOVEA.L (An),An | 1 | 1 | 1 | 2 | +1 |
 | MOVEQ | 1 | 1 | 1 | 1 | = |
 | ABCD Dy,Dx | 1 | 3 | 3 | 1 | -2 |
-| ABCD -(Ay),-(Ax) | 3 | 1L+3 | 3 | 8.60 | +5.60 |
+| ABCD -(Ay),-(Ax) | 3 | 1L+3 | 3 | 8 | +5 |
 | ADDX.L Dy,Dx | 1 | 1 | 1 | 1 | = |
-| ADDX.L -(Ay),-(Ax) | 3 | 1L+2 | 3 | 7.87 | +4.87 |
+| ADDX.L -(Ay),-(Ax) | 3 | 1L+2 | 3 | 5.40 | +2.40 |
 | ANDI #<xxx>,CCR | 1 | 4 | 4 | 1 | -3 |
 | ANDI #<xxx>,SR | 9 | 1L+8 | 9 | 8.93 | -0.07 |
 | Bcc.W, taken (BRA) | 2 | 2 | 2 | 7.87 | +5.87 |
@@ -149,27 +153,27 @@ give each instruction's figures, separated by ";":
 | EXT.W | 1 | 2 | 2 | 1 | -1 |
 | EXT.L | 1 | 1 | 1 | 1 | = |
 | EXTB.L | 1 | 1 | 1 | 1 | = |
-| LINK + UNLK | 3+2 | 2L+1 ; 1L+1 | 5 | 13 | +8 |
+| LINK + UNLK | 3+2 | 2L+1 ; 1L+1 | 5 | 8 | +3 |
 | MOVE USP,An | 3 | 2L+1 | 3 | 1 | -2 |
 | MOVE An,USP | 7 | 1L+6 | 7 | 1 | -6 |
 | MOVE16 (Ax)+,(Ay)+ | 6 | 1L+7 | 7 | 24 | +17 |
 | MOVEC Rc,Rn (VBR) | 11 | 1L+10 | 11 | 1 | -10 |
 | MOVEC Rn,Rc (VBR) | 7 | 1L+6 | 7 | 8.93 | +1.93 |
-| MOVEP.W Dn,(d16,An) | 11 | 2L+9 | 11 | 7.87 | -3.13 |
-| MOVEP.L Dn,(d16,An) | 13 | 2L+11 | 13 | 16 | +3 |
+| MOVEP.W Dn,(d16,An) | 11 | 2L+9 | 11 | 4 | -7 |
+| MOVEP.L Dn,(d16,An) | 13 | 2L+11 | 13 | 8 | -5 |
 | MOVEP.W (d16,An),Dn | 4 | 2L+5 | 5 | 4 | -1 |
 | MOVEP.L (d16,An),Dn | 8 | 2L+8 | 8 | 8 | = |
 | NOP | 8 | 1L+7 | 8 | 8.53 | +0.53 |
 | ORI #<xxx>,CCR | 1 | 4 | 4 | 1 | -3 |
 | PACK Dx,Dy,# | 1 | 3 | 3 | 1 | -2 |
-| PACK -(Ax),-(Ay),# | 3 | 2L+3 | 3 | 8 | +5 |
+| PACK -(Ax),-(Ay),# | 3 | 2L+3 | 3 | 6 | +3 |
 | SBCD Dy,Dx | 1 | 3 | 3 | 1 | -2 |
 | SUBX.L Dy,Dx | 1 | 1 | 1 | 1 | = |
 | SWAP | 1 | 2 | 2 | 1 | -1 |
 | TRAPcc, not taken (TRAPF) | 5 | 5 | 5 | 1 | -4 |
 | TRAPV, not taken | 5 | 5 | 5 | 1 | -4 |
 | UNPK Dx,Dy,# | 1 | 4 | 4 | 1 | -3 |
-| UNPK -(Ax),-(Ay),# | 3 | 2L+4 | 4 | 10 | +6 |
+| UNPK -(Ax),-(Ay),# | 3 | 2L+4 | 4 | 6 | +2 |
 | ADD.L Dn,Dn | 1 | 1 | 1 | 1 | = |
 | ADD.L (An),Dn | 1 | 1 | 1 | 2 | +1 |
 | ADD.L (An)+,Dn | 1 | 1 | 1 | 2 | +1 |
@@ -180,29 +184,29 @@ give each instruction's figures, separated by ";":
 | ADD.L (d8,An,Xn),Dn | 3 | 3 | 3 | 2 | -1 |
 | ADD.L (bd,An,Xn),Dn | 7 | 1L+6 | 7 | 2 | -5 |
 | ADD.L ([bd,An,Xn]),Dn | 10 | 1L+9 | 10 | 6 | -4 |
-| ADD.L Dn,(An) | 1 | 1 | 1 | 9 | +8 |
-| ADD.L Dn,(d16,An) | 1 | 1 | 1 | 9 | +8 |
+| ADD.L Dn,(An) | 1 | 1 | 1 | 4 | +3 |
+| ADD.L Dn,(d16,An) | 1 | 1 | 1 | 4 | +3 |
 | ADDA.L Dn,An | 1 | 2 | 2 | 1 | -1 |
 | ADDA.L (An),An | 1 | 2 | 2 | 2 | = |
 | ADDI.L #<xxx>,Dn | 1 | 1 | 1 | 1.40 | +0.40 |
-| ADDI.L #<xxx>,(An) | 1 | 1 | 1 | 9 | +8 |
+| ADDI.L #<xxx>,(An) | 1 | 1 | 1 | 4 | +3 |
 | ADDQ.L #,Dn | 1 | 1 | 1 | 1 | = |
 | ADDQ.L #,An | 1 | 1 | 1 | 1 | = |
-| ADDQ.L #,(An) | 1 | 1 | 1 | 9 | +8 |
+| ADDQ.L #,(An) | 1 | 1 | 1 | 4 | +3 |
 | ASL.L #,Dn | 1 | 3 | 3 | 1 | -2 |
 | ASL.L Dn,Dn | 1 | 4 | 4 | 1 | -3 |
 | ASR.L #,Dn | 1 | 2 | 2 | 1 | -1 |
 | LSR.L Dn,Dn | 1 | 3 | 3 | 1 | -2 |
-| LSL.W (An) | 1 | 2 | 2 | 9 | +7 |
+| LSL.W (An) | 1 | 2 | 2 | 4 | +2 |
 | ROL.L #,Dn | 1 | 3 | 3 | 1 | -2 |
 | ROXL.L #,Dn | 1 | 5 | 5 | 1 | -4 |
 | BCHG #,Dn | 1 | 3 | 3 | 1 | -2 |
 | BCHG Dn,Dn | 1 | 4 | 4 | 1 | -3 |
-| BSET #,(An) | 1 | 3 | 3 | 9 | +6 |
+| BSET #,(An) | 1 | 3 | 3 | 4 | +1 |
 | BTST #,Dn | 1 | 1 | 1 | 1 | = |
 | BTST Dn,(An) | 1 | 2 | 2 | 2 | = |
 | BFCHG Dn{#:#} | 3 | 6 | 6 | 2 | -4 |
-| BFCHG (An){#:#} | 9 | 2L+8 | 9 | 13 | +4 |
+| BFCHG (An){#:#} | 9 | 2L+8 | 9 | 10 | +1 |
 | BFEXTU Dn{#:#},Dn | 1 | 4 | 4 | 2 | -2 |
 | BFEXTU (An){#:#},Dn | 9 | 2L+7 | 9 | 7 | -2 |
 | BFFFO Dn{#:#},Dn | 3 | 6 | 6 | 2 | -4 |
@@ -212,7 +216,7 @@ give each instruction's figures, separated by ";":
 | CHK.L Dn,Dn (in bounds) | 8 | 1L+7 | 8 | 1 | -7 |
 | CHK2.L (An),Dn (in bounds) | 11 | 2L+9 | 11 | 4 | -7 |
 | CLR.L Dn | 1 | 1 | 1 | 1 | = |
-| CLR.L (An) | 1 | 1 | 1 | 3.73 | +2.73 |
+| CLR.L (An) | 1 | 1 | 1 | 2 | +1 |
 | CMP.L Dn,Dn | 1 | 1 | 1 | 1 | = |
 | CMP.L (An),Dn | 1 | 1 | 1 | 2 | +1 |
 | CMPA.L Dn,An | 1 | 1 | 1 | 1 | = |
@@ -230,7 +234,7 @@ give each instruction's figures, separated by ";":
 | MOVE Dn,CCR | 1 | 2 | 2 | 1 | -1 |
 | MOVE SR,Dn | 2 | 1L+2 | 2 | 1 | -1 |
 | MOVE Dn,SR | 9 | 1L+8 | 9 | 8.40 | -0.60 |
-| MOVEM.L 4 Dn,(An) | 2+4 | 1L+1+4 | 6 | 17.13 | +11.13 |
+| MOVEM.L 4 Dn,(An) | 2+4 | 1L+1+4 | 6 | 12 | +6 |
 | MOVEM.L (An),4 Dn | 3+4 | 1L+2+4 | 7 | 11 | +4 |
 | MULS.W Dn,Dn | 1 | 16 | 16 | 1 | -15 |
 | MULU.W Dn,Dn | 1 | 14 | 14 | 1 | -13 |
@@ -238,10 +242,10 @@ give each instruction's figures, separated by ";":
 | MULU.L Dn,Dn | 1 | 20 | 20 | 1 | -19 |
 | NBCD Dn | 1 | 3 | 3 | 1 | -2 |
 | NEG.L Dn | 1 | 1 | 1 | 1 | = |
-| NOT.L (An) | 1 | 1 | 1 | 9 | +8 |
-| PEA (An) | 2 | 1L+1 | 2 | 3.93 | +1.93 |
+| NOT.L (An) | 1 | 1 | 1 | 4 | +3 |
+| PEA (An) | 2 | 1L+1 | 2 | 3 | +1 |
 | Scc Dn (ST) | 1 | 2 | 2 | 1 | -1 |
-| Scc (An) (SEQ) | 1 | 2 | 2 | 3.73 | +1.73 |
+| Scc (An) (SEQ) | 1 | 2 | 2 | 2 | = |
 | SUBA.L Dn,An | 1 | 1 | 1 | 1 | = |
 | TAS Dn | 1 | 2 | 2 | 1 | -1 |
 | TAS (An) | 26 | 2L+24 | 26 | 17 | -9 |
@@ -280,6 +284,8 @@ misses are still to be measured:
   answers in one: the tags are compared on the clock the read is in \<ea\> fetch and the
   answer registered. Misaligned reads, writes and misses go a piece at a time, a clock or
   two each before any bus transfer.
+- **A read of bytes a queued write holds is answered from the write queue** (M15), at
+  a hit's cost, without waiting for the write to drain.
 - **The instruction cache gives a half-line every second clock** -- about two words a
   clock -- where the part's gives one a clock.
 - **A miss with a dirty victim pays for the push first** (`doc/divergences.md`).

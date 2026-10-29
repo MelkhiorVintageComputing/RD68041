@@ -223,7 +223,25 @@ copies the line into the push buffer and writes it with TM 000, a long word if o
 word is dirty, the line otherwise, and invalidates it; it is done before the fill that
 needs the way, where the part does it after (`doc/divergences.md`). The writes queued
 from write-back drain through the same machine, a read going first unless it touches
-one of them or its page is serialised. A cache-inhibited read (CM 10 or 11) or a locked
+one of them or its page is serialised. A write starts in the clock the machine rests,
+even when a fast read or a write's probe is answered in that clock, since those use the
+rest's translation and tags and a write's start only the queue head. A write that hits
+the cache ends in `X_LOOK` and the next queued one starts there, unless a read wants the
+machine: a run of hits goes at two clocks a write. The translator follows the read in
+`X_LOOK` as in the rest, so the next store's probe is answered beside it. Its input
+select is one state bit (bit 5 of `x`, set in those two states alone), because it is on
+the path from the state to `st_ready`. A read that a queued write covers is answered from the queue on the next
+clock, as a fast read is (`fwd`). This happens only when:
+- it is the youngest write the read overlaps;
+- it is at the same logical address in the same space, so the same byte, since mappings
+  change only with the queue empty;
+- both are within one long word;
+- the read is cachable;
+- the write is not locked, alternate or MOVE16;
+- the queue is not frozen by a faulted write.
+
+A read-modify-write's read takes the fast path as an ordinary read does: it is
+translated as a write there. A cache-inhibited read (CM 10 or 11) or a locked
 one waits, before it starts, until no older instruction is left in execute or
 write-back (`of_oldest`), so that no interrupt or mispredicted branch discards it once
 made (UM 4.3.2; for CM 11 a divergence, `doc/divergences.md`); a read started before its
